@@ -1,10 +1,6 @@
 from langchain_openai import ChatOpenAI
 from langchain_core.language_models.chat_models import BaseChatModel
 import os
-import time
-import json
-import re
-import random
 
 # API Provider type
 class ApiProvider:
@@ -55,8 +51,8 @@ def call_llm_with_retry(llm_model, prompt: str, max_retries: int = 3, context: s
                 "api key" in error_msg.lower() or
                 "AuthenticationError" in error_type or
                 "invalid" in error_msg.lower()):
-                print(f"❌ Authentication failed - API key appears to be invalid", flush=True)
-                print(f"💡 请检查您的硅基流动API Key是否正确", flush=True)
+                print("❌ Authentication failed - API key appears to be invalid", flush=True)
+                print("💡 请检查您的硅基流动API Key是否正确", flush=True)
                 raise APIErrorException(f"Authentication error with {api_info}: {error_msg}")
 
             # For other errors, retry if attempts remain
@@ -130,7 +126,7 @@ def get_current_api_info():
             return f"{display_name}-{key_info.replace(' ', '')}"
         else:
             return display_name
-    except:
+    except Exception:
         return "Unknown"
 
 # Get base URL and headers for provider (env overrides allowed)
@@ -181,9 +177,6 @@ def get_model_name(provider):
 
 def _create_chat_model(temperature: float = 0.7, max_tokens: int = 500, timeout: int = None, scope: str = "default") -> BaseChatModel:
     """Create a ChatOpenAI model with the specified parameters."""
-    import time
-
-    start_time = time.time()
     result = get_api_provider()
 
     if result['provider'] == 'mock':
@@ -238,8 +231,6 @@ def get_gm_model() -> BaseChatModel:
 
 def test_llm_call():
     """测试LLM调用的主函数"""
-    import time
-
     print("🚀 测试LLM调用功能")
     print("=" * 50)
 
@@ -257,10 +248,7 @@ def test_llm_call():
     try:
         # 初始化路由模型（轻量级，适合测试）
         print("\n🤖 初始化路由模型...")
-        start_time = time.time()
         router_model = get_router_model()
-        init_time = time.time() - start_time
-        print(".2f")
         print(f"✅ 模型类型: {type(router_model).__name__}")
 
         # 测试简单的查询
@@ -268,15 +256,12 @@ def test_llm_call():
         print(f"\n📤 发送测试查询: {test_query}")
 
         # 调用LLM (使用改进的错误处理)
-        call_start = time.time()
         response_content, success = call_llm_with_retry(router_model, test_query, max_retries=1, context="test")
-        call_time = time.time() - call_start
 
         if not success:
             print("❌ LLM调用失败")
             return False
 
-        print(".2f")
         print(f"📝 响应长度: {len(response_content)} 字符")
         print(f"📄 响应内容: {response_content[:200]}{'...' if len(response_content) > 200 else ''}")
 
