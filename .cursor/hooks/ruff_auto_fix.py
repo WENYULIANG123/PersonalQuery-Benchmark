@@ -60,35 +60,66 @@ def run_ruff_fix(file_path: str) -> None:
             timeout=30,
         )
         # 解析 JSON 输出，打印每一条具体违规
+        total_violations = 0
+        violations_by_code = {}
+        
         if result.stdout:
             try:
                 data = json.loads(result.stdout)
-                print("[ruff_auto_fix] Ruff violations (before/after fix):", file=sys.stderr)
+                
+                # 统计违规信息
                 for file_result in data:
-                    for v in file_result.get("violations", []):
-                        code = v.get("code")
-                        message = v.get("message")
+                    filename = file_result.get("filename", file_path)
+                    violations = file_result.get("violations", [])
+                    
+                    for v in violations:
+                        total_violations += 1
+                        code = v.get("code", "UNKNOWN")
+                        message = v.get("message", "")
                         loc = v.get("location", {})
-                        line = loc.get("row")
-                        col = loc.get("column")
+                        line = loc.get("row", "?")
+                        col = loc.get("column", "?")
+                        
+                        # 统计错误类型
+                        if code not in violations_by_code:
+                            violations_by_code[code] = 0
+                        violations_by_code[code] += 1
+                        
+                        # 打印详细错误信息
                         print(
-                            f"  {file_result.get('filename')}:{line}:{col} "
+                            f"[ruff_auto_fix] ❌ {filename}:{line}:{col} "
                             f"[{code}] {message}",
                             file=sys.stderr,
                         )
+                
+                # 打印汇总信息
+                if total_violations == 0:
+                    print("[ruff_auto_fix] ✅ 全pass - 未发现任何错误", file=sys.stderr)
+                else:
+                    print(f"[ruff_auto_fix] ⚠️  发现 {total_violations} 个违规", file=sys.stderr)
+                    if violations_by_code:
+                        code_summary = ", ".join([f"{code}({count})" for code, count in sorted(violations_by_code.items())])
+                        print(f"[ruff_auto_fix] 错误类型统计: {code_summary}", file=sys.stderr)
+                        
             except json.JSONDecodeError:
                 # 如果解析失败，就退回到原始 stdout
-                print("[ruff_auto_fix] Ruff raw stdout:", file=sys.stderr)
+                print("[ruff_auto_fix] ⚠️  无法解析 Ruff JSON 输出，显示原始输出:", file=sys.stderr)
                 print(result.stdout.rstrip("\n"), file=sys.stderr)
+        else:
+            # 没有 stdout 输出，通常表示没有错误
+            print("[ruff_auto_fix] ✅ 全pass - 未发现任何错误", file=sys.stderr)
 
         if result.stderr:
             print("[ruff_auto_fix] Ruff stderr:", file=sys.stderr)
             print(result.stderr.rstrip("\n"), file=sys.stderr)
 
         if result.returncode == 0:
-            print(f"[ruff_auto_fix] Ruff fix completed for {file_path}", file=sys.stderr)
+            if total_violations == 0:
+                print(f"[ruff_auto_fix] ✅ Ruff 检查完成: {file_path} (无错误)", file=sys.stderr)
+            else:
+                print(f"[ruff_auto_fix] ✅ Ruff 修复完成: {file_path} (已修复 {total_violations} 个问题)", file=sys.stderr)
         else:
-            print(f"[ruff_auto_fix] Ruff exited with code {result.returncode}", file=sys.stderr)
+            print(f"[ruff_auto_fix] ❌ Ruff 退出码: {result.returncode} (可能有未修复的错误)", file=sys.stderr)
     except FileNotFoundError:
         print(f"[ruff_auto_fix] Ruff binary not found at {RUFF_BIN}", file=sys.stderr)
     except subprocess.TimeoutExpired:

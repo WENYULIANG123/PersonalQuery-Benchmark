@@ -11,12 +11,14 @@ import json
 import sys
 import re
 import os
-from typing import Dict, Any, Optional
+import shlex
+from typing import Dict, Any
 
 # Stark environment configuration
 STARK_ENV = "/home/wlia0047/ar57_scratch/wenyu/stark"
 CONDA_INIT = "/apps/anaconda/2024.02-1/etc/profile.d/conda.sh"
 PROJECT_ROOT = "/home/wlia0047/ar57/wenyu"
+SBATCH_WRAPPER = "/home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.sh"
 
 
 def is_python_command(command: str) -> bool:
@@ -86,6 +88,13 @@ def has_activation_in_command(command: str) -> bool:
     return False
 
 
+def has_sbatch_in_command(command: str) -> bool:
+    """Check if command already contains sbatch"""
+    if not command:
+        return False
+    return 'sbatch' in command.lower() or SBATCH_WRAPPER in command
+
+
 def read_input() -> Dict[str, Any]:
     """Read and parse JSON input from stdin"""
     try:
@@ -139,16 +148,33 @@ def main():
     is_python = is_python_command(command)
     in_project = is_in_project_directory(working_dir)
     has_activation = has_activation_in_command(command)
+    has_sbatch = has_sbatch_in_command(command)
     
     print(f"[activate-stark-env] Is Python command: {is_python}", file=sys.stderr)
     print(f"[activate-stark-env] In project directory: {in_project}", file=sys.stderr)
     print(f"[activate-stark-env] Has activation: {has_activation}", file=sys.stderr)
+    print(f"[activate-stark-env] Has sbatch: {has_sbatch}", file=sys.stderr)
     
-    # If it's a Python command in project directory but doesn't have activation, block it
-    if is_python and in_project and not has_activation:
-        activation_command = f"source {CONDA_INIT} && conda activate {STARK_ENV} && {command}"
+    # If it's a Python command in project directory, wrap it with sbatch
+    if is_python and in_project and not has_sbatch:
+        # Properly escape the command for shell execution
+        escaped_command = shlex.quote(command)
+        wrapped_command = f"{SBATCH_WRAPPER} {escaped_command}"
         
-        print(f"[activate-stark-env] Blocking command - no activation detected", file=sys.stderr)
+        print("[activate-stark-env] 🔄 使用 sbatch 包装 Python 命令", file=sys.stderr)
+        print(f"[activate-stark-env] 原命令: {command[:100]}", file=sys.stderr)
+        print(f"[activate-stark-env] 包装后命令: {wrapped_command[:150]}", file=sys.stderr)
+        
+        # Return modified command
+        output = {
+            "continue": True,
+            "permission": "allow",
+            "command": wrapped_command
+        }
+    elif is_python and in_project and not has_activation:
+        # If Python command but no activation and no sbatch, suggest activation
+        
+        print("[activate-stark-env] ⚠️  检测到 Python 命令但未激活环境", file=sys.stderr)
         
         # Block execution and prompt user
         output = {
@@ -158,7 +184,7 @@ def main():
             "agent_message": f"检测到 Python 命令但未激活虚拟环境。重要提示：\n1. 需要先初始化 conda: source {CONDA_INIT}\n2. 再激活环境: conda activate {STARK_ENV}\n3. 命令中要包含 'activate' 关键字以通过 hook 检查\n完整命令格式: source {CONDA_INIT} && conda activate {STARK_ENV} && {command}"
         }
     else:
-        # Allow command as-is (either not Python, not in project, or already has activation)
+        # Allow command as-is (either not Python, not in project, or already has activation/sbatch)
         output = {
             "continue": True,
             "permission": "allow"
