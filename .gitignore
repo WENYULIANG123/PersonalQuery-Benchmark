@@ -35,3 +35,36 @@ stark/LLMRankereval/
 stark/.cache/
 stark/.conda/
 stark/__pycache__/
+
+# 排除缓存和临时文件
+.cache/
+tmp/
+logs/
+*.log
+*.err
+*.out
+
+# 排除虚拟环境
+ruff-venv/
+venv/
+env/
+.venv/
+
+# 排除 Cursor 临时文件
+.cursor/hooks/logs/
+.cursor/scratchpad.md
+.cursor/worktrees.json
+
+# 排除嵌入的 git 仓库（应作为子模块添加）
+GR_Analysis/
+ontology-nlp/
+ruff-mcp-server/
+
+# 排除数据文件和结果文件
+detection_results_ngram.json
+spelling_analysis_combined_batch_ulhdemmplr.json
+spelling_errors_detected_idf_jaccard.json
+
+# 排除测试和临时脚本（根据需要调整）
+# test.py
+# spell_checker_idf_jaccard.py
