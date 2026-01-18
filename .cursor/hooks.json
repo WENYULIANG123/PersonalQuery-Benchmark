@@ -9,6 +9,10 @@
     "beforeShellExecution": [
       {
         "command": "python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/activate-stark-env.py"
+        
+      },
+      {
+        "command": "python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py"
       }
     ],
     "stop": [
