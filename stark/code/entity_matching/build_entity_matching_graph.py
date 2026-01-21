@@ -27,6 +27,7 @@ Outputs (in output_dir):
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import os.path as osp
@@ -103,7 +104,7 @@ def build_graph(
         "Material",
         "Dimensions",
         "Quantity",
-        "Color/Finish",
+        "Color",
         "Design",
         "Usage",
         "Selling Point",
@@ -127,6 +128,24 @@ def build_graph(
         s = "".join(out).strip("_")
         while "__" in s:
             s = s.replace("__", "_")
+        return s
+
+    def normalize_entity_type_label(label: str) -> str:
+        """
+        Normalize entity type labels to keep graph schema stable.
+        Currently enforces: "Color/Finish" -> "Color" (and common variants).
+        """
+        if label is None:
+            return label
+        s = str(label).strip()
+        if not s:
+            return s
+        s_lower = s.lower().strip()
+        s_compact = s_lower.replace(" ", "")
+        if s_compact in {"color/finish", "colour/finish", "colorfinish", "colourfinish"}:
+            return "Color"
+        if s_lower in {"color", "colour"}:
+            return "Color"
         return s
 
     # node types: product, category, then one type per entity category (Brand, Material, ...)
@@ -191,11 +210,20 @@ def build_graph(
         }
         return nid
 
-    def get_or_create_entity(entity_label: str, value: str) -> int:
+    def get_or_create_entity(entity_label: str, value: str, sentiment: Optional[str] = None) -> int:
         # keep nodes unique per (entity_label, value) to avoid collisions
         key = f"{entity_label}::{value}"
         if key in entity_id_by_key:
-            return entity_id_by_key[key]
+            # If sentiment is provided and different, update it (prefer non-neutral)
+            existing_nid = entity_id_by_key[key]
+            existing_info = node_info.get(existing_nid, {})
+            existing_sentiment = existing_info.get("sentiment")
+            if sentiment and sentiment != "neutral":
+                if not existing_sentiment or existing_sentiment == "neutral":
+                    existing_info["sentiment"] = sentiment
+            elif sentiment and not existing_sentiment:
+                existing_info["sentiment"] = sentiment
+            return existing_nid
         nid = alloc.next()
         entity_id_by_key[key] = nid
         node_types[nid] = entity_type_id_by_label[entity_label]
@@ -203,6 +231,8 @@ def build_graph(
             "type": entity_label,
             "name": value,
         }
+        if sentiment:
+            node_info[nid]["sentiment"] = sentiment
         return nid
 
     def add_edge(src: int, dst: int, edge_type_id: int) -> None:
@@ -238,18 +268,27 @@ def build_graph(
                 if category_parent_of_edge_type_id is not None:
                     add_edge(parent_id, child_id, category_parent_of_edge_type_id)
 
-        # entities: use product_entities (categorized) only
+        # entities: ONLY use product_entities (plain string list, no sentiment)
         product_entities = p.get("product_entities") or {}
+        
         if isinstance(product_entities, dict):
             for etype_raw, vals in product_entities.items():
                 etype_label = _norm_str(etype_raw)
                 if etype_label is None:
                     continue
+                etype_label = normalize_entity_type_label(etype_label)
                 # Keep only the known categories from product_extraction.py
                 if etype_label not in entity_type_order:
                     continue
-                for v in _iter_str_list(vals):
-                    eid = get_or_create_entity(etype_label, v)
+                
+                # product_entities values are plain strings (no sentiment)
+                for v in vals:
+                    entity_value = _norm_str(v)
+                    if not entity_value:
+                        continue
+                    
+                    # No sentiment for product_entities
+                    eid = get_or_create_entity(etype_label, entity_value, None)
                     add_edge(pid, eid, edge_type_id_by_label[etype_label])
 
     # materialize to tensors
@@ -287,12 +326,12 @@ def build_graph(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build SKB-style graph from entity_matching_results.json")
+    parser = argparse.ArgumentParser(description="Build SKB-style graph from product_entities.json")
     parser.add_argument(
         "--input",
         type=str,
-        default=str(Path.cwd() / "entity_matching_results.json"),
-        help="Path to entity_matching_results.json",
+        default="/home/wlia0047/ar57/wenyu/result/product_entities.json",
+        help="Path to product_entities.json (default points to /home/wlia0047/ar57/wenyu/result/product_entities.json)",
     )
     parser.add_argument(
         "--output_dir",

@@ -4,20 +4,40 @@
 负责处理商品实体的提取和处理
 """
 
-import os, json, gzip, re, sys
+import os
+import json
+import gzip
+import re
+import sys
 from typing import Dict, List, Optional, Union
 from datetime import datetime
-from langchain_core.language_models.chat_models import BaseChatModel
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model import call_llm_with_retry, APIErrorException
-from utils import get_all_api_keys_in_order, create_llm_with_config, try_api_keys_with_fallback
 
 def log_with_timestamp(message: str):
     """Log message with timestamp."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}", flush=True)
+
+def normalize_category_label(category: str) -> str:
+    """
+    Normalize category labels to keep keys consistent across pipeline.
+    Currently enforces: "Color/Finish" -> "Color" (and common variants).
+    """
+    if category is None:
+        return category
+    c = str(category).strip()
+    if not c:
+        return c
+    c_lower = c.lower().strip()
+    c_compact = c_lower.replace(" ", "")
+    if c_compact in {"color/finish", "colour/finish", "colorfinish", "colourfinish"}:
+        return "Color"
+    if c_lower in {"color", "colour"}:
+        return "Color"
+    return c
 
 def robust_json_loads(json_str: str):
     """
@@ -190,12 +210,14 @@ def load_data(data_type: str, filter_func=None, max_items: int = None, user_prod
         file_path = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz"
         # If user_products is specified, create a filter function
         if user_products is not None:
-            filter_func = lambda item: item.get('asin', '') in user_products
+            def filter_func(item):
+                return item.get('asin', '') in user_products
     elif data_type == 'reviews':
         file_path = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/raw/Arts_Crafts_and_Sewing.json.gz"
         # If user_products is specified for reviews, create a filter function
         if user_products is not None:
-            filter_func = lambda item: item.get('asin', '') in user_products
+            def filter_func(item):
+                return item.get('asin', '') in user_products
     else:
         raise ValueError(f"Unknown data type: {data_type}")
 
@@ -249,6 +271,9 @@ def process_product_extraction_response(response_str: str) -> List[str]:
         # Try to parse as JSON with robust error handling
         result = robust_json_loads(response_str)
 
+        # Detect compound color-like forms such as "Red/Blue" (but not fractions like "3/8")
+        color_combo_slash_re = re.compile(r"[A-Za-z]\s*/\s*[A-Za-z]")
+
         # Handle different response formats
         if isinstance(result, dict) and not ('result' in result and isinstance(result['result'], list)):
             # New direct format: {category: [entities]}
@@ -256,6 +281,7 @@ def process_product_extraction_response(response_str: str) -> List[str]:
             flattened = []
 
             for category, entities in result.items():
+                category_norm = normalize_category_label(category)
                 if isinstance(entities, list):
                     # Process list of entities for this category
                     category_entities = []
@@ -270,12 +296,13 @@ def process_product_extraction_response(response_str: str) -> List[str]:
                                         ' with ' in entity_lower or
                                         ' or ' in entity_lower or
                                         ' for ' in entity_lower or
-                                        '&' in entity_text):
+                                        '&' in entity_text or
+                                        color_combo_slash_re.search(entity_text)):
                                     category_entities.append(entity_text)
                                     flattened.append(entity_text)
 
                     if category_entities:
-                        categorized_entities[category] = category_entities
+                        categorized_entities[category_norm] = category_entities
                 elif isinstance(entities, str):
                     # Handle single entity as string
                     entity_text = entities.strip()
@@ -286,8 +313,9 @@ def process_product_extraction_response(response_str: str) -> List[str]:
                                 ' with ' in entity_lower or
                                 ' or ' in entity_lower or
                                 ' for ' in entity_lower or
-                                '&' in entity_text):
-                            categorized_entities[category] = [entity_text]
+                                '&' in entity_text or
+                                color_combo_slash_re.search(entity_text)):
+                            categorized_entities[category_norm] = [entity_text]
                             flattened.append(entity_text)
 
             if flattened:
@@ -302,7 +330,7 @@ def process_product_extraction_response(response_str: str) -> List[str]:
                 if isinstance(item, dict) and 'entity' in item and 'category' in item:
                     # Extract entity and category from structured format
                     entity_text = item.get('entity', '').strip()
-                    category = item.get('category', '').strip()
+                    category = normalize_category_label(item.get('category', '').strip())
                     if entity_text and category:
                         # Apply atomic filtering
                         entity_lower = entity_text.lower()
@@ -311,7 +339,8 @@ def process_product_extraction_response(response_str: str) -> List[str]:
                                 ' with ' in entity_lower or
                                 ' or ' in entity_lower or
                                 ' for ' in entity_lower or
-                                '&' in entity_text):
+                                '&' in entity_text or
+                                color_combo_slash_re.search(entity_text)):
                             # Accumulate entities in lists by category
                             if category not in categorized_entities:
                                 categorized_entities[category] = []
@@ -333,7 +362,7 @@ def process_product_extraction_response(response_str: str) -> List[str]:
                 if isinstance(item, dict) and 'entity' in item and 'category' in item:
                     # Extract entity and category from structured format
                     entity_text = item.get('entity', '').strip()
-                    category = item.get('category', '').strip()
+                    category = normalize_category_label(item.get('category', '').strip())
                     if entity_text and category:
                         # Use category as key, entity as value
                         if category not in categorized_entities:
@@ -363,7 +392,8 @@ def process_product_extraction_response(response_str: str) -> List[str]:
                     ' with ' in entity_lower or
                     ' or ' in entity_lower or
                     ' for ' in entity_lower or
-                    '&' in entity):
+                    '&' in entity or
+                    color_combo_slash_re.search(entity)):
                     continue
                 atomic_entities.append(entity)
 
@@ -477,7 +507,7 @@ def extract_product_entities(content: str, llm_model, asin: str = None) -> List[
 
 **实体分类要求:**
 对于每个提取的实体，必须将其归类为以下类别之一：
-[Brand, Material, Dimensions, Quantity, Color/Finish, Design, Usage, Selling Point, Safety/Certification, Accessories]
+[Brand, Material, Dimensions, Quantity, Color, Design, Usage, Selling Point, Safety/Certification, Accessories]
 
 **提取规则:**
 1. **严禁输出类别名称**: 严禁输出类别名称（如 'Brand', 'Color', 'Size', 'Material', 'Dimensions' 等）作为实体值。只提取具体的品牌名、具体的颜色名、具体的尺寸值等。
@@ -487,6 +517,10 @@ def extract_product_entities(content: str, llm_model, asin: str = None) -> List[
 5. 避免提取通用形容词或营销词汇
 6. 确保实体是产品描述中的具体内容
 7. **原子化 (Atomic Only)**: 提取的实体必须是单一、独立的属性。严禁提取包含连接词(and,or,with,for,&)或逗号的复合短语
+8. **颜色实体必须单色 (Color = One Color Only)**:
+   - `Color` 类别中，每个数组元素只能包含 **一种** 颜色（一个颜色词或一个颜色短语）。
+   - 如果原文出现多种颜色（例如 “Red/Blue”, “Blue and Green”, “Black & White”），必须 **拆分成多个元素**：["Red","Blue"]、["Blue","Green"]、["Black","White"]。
+   - 严禁在单个颜色实体里包含分隔符 `/`, `&`, `and`, `or`, `,` 等把多个颜色拼在一起。
 
 **重要:** 每个实体应该是单个词或简单短语，不要包含多个属性。宁缺毋滥，如果不确定是否为具体值，就不要提取。
 
@@ -498,7 +532,7 @@ def extract_product_entities(content: str, llm_model, asin: str = None) -> List[
   "Brand": ["Apple"],
   "Design": ["iPhone 15", "Smartphone"],
   "Quantity": ["256GB"],
-  "Color/Finish": ["Blue", "Space Gray"],
+  "Color": ["Blue", "Space Gray"],
   "Material": ["Aluminum"],
   "Selling Point": ["Waterproof", "Face ID"]
 }}
@@ -563,7 +597,7 @@ def extract_product_entities(content: str, llm_model, asin: str = None) -> List[
                     print(f"JSON parsing failed after {json_parse_retries} attempts", flush=True)
             # Re-raise API errors (including JSON parsing errors after retries)
             raise
-        except Exception as e:
+        except Exception:
             # Let the caller handle other API errors - they will trigger key switching
             raise
 
@@ -630,7 +664,6 @@ def extract_product_entities_only(asin: str, product_metadata: Dict[str, Dict], 
 
         # Skip generating explanations for entities - no longer needed
         # entity_explanations = generate_entity_explanations(entities_for_explanations, product_info, llm_model)
-        entity_explanations = {}  # Empty dict - explanations no longer generated
 
         # Prepare metadata for printing (still need HTML cleaning for display)
         metadata_lines = []

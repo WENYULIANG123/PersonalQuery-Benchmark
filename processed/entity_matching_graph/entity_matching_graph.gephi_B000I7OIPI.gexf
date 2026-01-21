@@ -1,0 +1,279 @@
+<?xml version='1.0' encoding='utf-8'?>
+<gexf xmlns="http://www.gexf.net/1.2draft" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.gexf.net/1.2draft http://www.gexf.net/1.2draft/gexf.xsd" version="1.2">
+  <meta lastmodifieddate="2026-01-18">
+    <creator>NetworkX 3.6.1</creator>
+  </meta>
+  <graph defaultedgetype="directed" mode="static" name="">
+    <attributes mode="static" class="edge">
+      <attribute id="7" title="rel" type="string" />
+      <attribute id="8" title="etype" type="long" />
+    </attributes>
+    <attributes mode="static" class="node">
+      <attribute id="0" title="ntype" type="string" />
+      <attribute id="1" title="type" type="string" />
+      <attribute id="2" title="asin" type="string" />
+      <attribute id="3" title="title" type="string" />
+      <attribute id="4" title="main_cat" type="string" />
+      <attribute id="5" title="category_name" type="string" />
+      <attribute id="6" title="name" type="string" />
+    </attributes>
+    <nodes>
+      <node id="0" label="B000I7OIPI">
+        <attvalues>
+          <attvalue for="0" value="product" />
+          <attvalue for="1" value="product" />
+          <attvalue for="2" value="B000I7OIPI" />
+          <attvalue for="3" value="Staedtler Karat Aquarell Premium Watercolor Crayons (223M24)" />
+          <attvalue for="4" value="Office Products" />
+        </attvalues>
+      </node>
+      <node id="1" label="Arts, Crafts &amp; Sewing">
+        <attvalues>
+          <attvalue for="0" value="category" />
+          <attvalue for="1" value="category" />
+          <attvalue for="5" value="Arts, Crafts &amp; Sewing" />
+        </attvalues>
+      </node>
+      <node id="2" label="Painting, Drawing &amp; Art Supplies">
+        <attvalues>
+          <attvalue for="0" value="category" />
+          <attvalue for="1" value="category" />
+          <attvalue for="5" value="Painting, Drawing &amp; Art Supplies" />
+        </attvalues>
+      </node>
+      <node id="3" label="Drawing">
+        <attvalues>
+          <attvalue for="0" value="category" />
+          <attvalue for="1" value="category" />
+          <attvalue for="5" value="Drawing" />
+        </attvalues>
+      </node>
+      <node id="4" label="Drawing Media">
+        <attvalues>
+          <attvalue for="0" value="category" />
+          <attvalue for="1" value="category" />
+          <attvalue for="5" value="Drawing Media" />
+        </attvalues>
+      </node>
+      <node id="5" label="Crayons">
+        <attvalues>
+          <attvalue for="0" value="category" />
+          <attvalue for="1" value="category" />
+          <attvalue for="5" value="Crayons" />
+        </attvalues>
+      </node>
+      <node id="6" label="Office Products">
+        <attvalues>
+          <attvalue for="0" value="category" />
+          <attvalue for="1" value="category" />
+          <attvalue for="5" value="Office Products" />
+        </attvalues>
+      </node>
+      <node id="7" label="Brand:Staedtler">
+        <attvalues>
+          <attvalue for="0" value="Brand" />
+          <attvalue for="1" value="Brand" />
+          <attvalue for="6" value="Staedtler" />
+        </attvalues>
+      </node>
+      <node id="8" label="Quantity:24">
+        <attvalues>
+          <attvalue for="0" value="Quantity" />
+          <attvalue for="1" value="Quantity" />
+          <attvalue for="6" value="24" />
+        </attvalues>
+      </node>
+      <node id="9" label="Design:Karat Aquarell">
+        <attvalues>
+          <attvalue for="0" value="Design" />
+          <attvalue for="1" value="Design" />
+          <attvalue for="6" value="Karat Aquarell" />
+        </attvalues>
+      </node>
+      <node id="10" label="Usage:Dry">
+        <attvalues>
+          <attvalue for="0" value="Usage" />
+          <attvalue for="1" value="Usage" />
+          <attvalue for="6" value="Dry" />
+        </attvalues>
+      </node>
+      <node id="11" label="Usage:Shading">
+        <attvalues>
+          <attvalue for="0" value="Usage" />
+          <attvalue for="1" value="Usage" />
+          <attvalue for="6" value="Shading" />
+        </attvalues>
+      </node>
+      <node id="12" label="Usage:Blending">
+        <attvalues>
+          <attvalue for="0" value="Usage" />
+          <attvalue for="1" value="Usage" />
+          <attvalue for="6" value="Blending" />
+        </attvalues>
+      </node>
+      <node id="13" label="Usage:Coloring large areas">
+        <attvalues>
+          <attvalue for="0" value="Usage" />
+          <attvalue for="1" value="Usage" />
+          <attvalue for="6" value="Coloring large areas" />
+        </attvalues>
+      </node>
+      <node id="14" label="Usage:Scratch art">
+        <attvalues>
+          <attvalue for="0" value="Usage" />
+          <attvalue for="1" value="Usage" />
+          <attvalue for="6" value="Scratch art" />
+        </attvalues>
+      </node>
+      <node id="15" label="Selling Point:Premium quality">
+        <attvalues>
+          <attvalue for="0" value="Selling Point" />
+          <attvalue for="1" value="Selling Point" />
+          <attvalue for="6" value="Premium quality" />
+        </attvalues>
+      </node>
+      <node id="16" label="Selling Point:Can apply on a variety of paper colors">
+        <attvalues>
+          <attvalue for="0" value="Selling Point" />
+          <attvalue for="1" value="Selling Point" />
+          <attvalue for="6" value="Can apply on a variety of paper colors" />
+        </attvalues>
+      </node>
+      <node id="17" label="Selling Point:Achieves a dramatic look on dark paper">
+        <attvalues>
+          <attvalue for="0" value="Selling Point" />
+          <attvalue for="1" value="Selling Point" />
+          <attvalue for="6" value="Achieves a dramatic look on dark paper" />
+        </attvalues>
+      </node>
+    </nodes>
+    <edges>
+      <edge source="0" target="1" id="0">
+        <attvalues>
+          <attvalue for="7" value="has_category" />
+          <attvalue for="8" value="0" />
+        </attvalues>
+      </edge>
+      <edge source="0" target="2" id="1">
+        <attvalues>
+          <attvalue for="7" value="has_category" />
+          <attvalue for="8" value="0" />
+        </attvalues>
+      </edge>
+      <edge source="0" target="3" id="2">
+        <attvalues>
+          <attvalue for="7" value="has_category" />
+          <attvalue for="8" value="0" />
+        </attvalues>
+      </edge>
+      <edge source="0" target="4" id="3">
+        <attvalues>
+          <attvalue for="7" value="has_category" />
+          <attvalue for="8" value="0" />
+        </attvalues>
+      </edge>
+      <edge source="0" target="5" id="4">
+        <attvalues>
+          <attvalue for="7" value="has_category" />
+          <attvalue for="8" value="0" />
+        </attvalues>
+      </edge>
+      <edge source="0" target="6" id="5">
+        <attvalues>
+          <attvalue for="7" value="has_category" />
+          <attvalue for="8" value="0" />
+        </attvalues>
+      </edge>
+      <edge source="0" target="7" id="6">
+        <attvalues>
+          <attvalue for="7" value="has_brand" />
+          <attvalue for="8" value="1" />
+        </attvalues>
+      </edge>
+      <edge source="0" target="8" id="7">
+        <attvalues>
+          <attvalue for="7" value="has_quantity" />
+          <attvalue for="8" value="4" />
+        </attvalues>
+      </edge>
+      <edge source="0" target="9" id="8">
+        <attvalues>
+          <attvalue for="7" value="has_design" />
+          <attvalue for="8" value="6" />
+        </attvalues>
+      </edge>
+      <edge source="0" target="10" id="9">
+        <attvalues>
+          <attvalue for="7" value="has_usage" />
+          <attvalue for="8" value="7" />
+        </attvalues>
+      </edge>
+      <edge source="0" target="11" id="10">
+        <attvalues>
+          <attvalue for="7" value="has_usage" />
+          <attvalue for="8" value="7" />
+        </attvalues>
+      </edge>
+      <edge source="0" target="12" id="11">
+        <attvalues>
+          <attvalue for="7" value="has_usage" />
+          <attvalue for="8" value="7" />
+        </attvalues>
+      </edge>
+      <edge source="0" target="13" id="12">
+        <attvalues>
+          <attvalue for="7" value="has_usage" />
+          <attvalue for="8" value="7" />
+        </attvalues>
+      </edge>
+      <edge source="0" target="14" id="13">
+        <attvalues>
+          <attvalue for="7" value="has_usage" />
+          <attvalue for="8" value="7" />
+        </attvalues>
+      </edge>
+      <edge source="0" target="15" id="14">
+        <attvalues>
+          <attvalue for="7" value="has_selling_point" />
+          <attvalue for="8" value="8" />
+        </attvalues>
+      </edge>
+      <edge source="0" target="16" id="15">
+        <attvalues>
+          <attvalue for="7" value="has_selling_point" />
+          <attvalue for="8" value="8" />
+        </attvalues>
+      </edge>
+      <edge source="0" target="17" id="16">
+        <attvalues>
+          <attvalue for="7" value="has_selling_point" />
+          <attvalue for="8" value="8" />
+        </attvalues>
+      </edge>
+      <edge source="1" target="2" id="17">
+        <attvalues>
+          <attvalue for="7" value="category_parent_of" />
+          <attvalue for="8" value="11" />
+        </attvalues>
+      </edge>
+      <edge source="2" target="3" id="18">
+        <attvalues>
+          <attvalue for="7" value="category_parent_of" />
+          <attvalue for="8" value="11" />
+        </attvalues>
+      </edge>
+      <edge source="3" target="4" id="19">
+        <attvalues>
+          <attvalue for="7" value="category_parent_of" />
+          <attvalue for="8" value="11" />
+        </attvalues>
+      </edge>
+      <edge source="4" target="5" id="20">
+        <attvalues>
+          <attvalue for="7" value="category_parent_of" />
+          <attvalue for="8" value="11" />
+        </attvalues>
+      </edge>
+    </edges>
+  </graph>
+</gexf>

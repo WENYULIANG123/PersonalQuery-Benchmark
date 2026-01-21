@@ -49,7 +49,7 @@ def is_job_running(job_id):
 
 
 def monitor_logs(log_file, err_file, job_id, max_wait=30):
-    """Monitor log files until job completes, checking job status simultaneously."""
+    """Monitor job status until it completes, without outputting log content to terminal."""
     log_path = Path(log_file)
     err_path = Path(err_file)
     
@@ -65,72 +65,33 @@ def monitor_logs(log_file, err_file, job_id, max_wait=30):
         time.sleep(1)
         wait_count += 1
     
-    # Start tail processes for log and err files separately
-    tail_processes = []
-    if log_path.exists() or err_path.exists():
-        try:
-            # Start tail -n +1 -f for log file (output to stdout)
-            # -n +1 means start from line 1, -f means follow new lines
-            if log_path.exists():
-                tail_log = subprocess.Popen(
-                    ['tail', '-n', '+1', '-f', '-q', str(log_path)],
-                    stdout=sys.stdout,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                    bufsize=1
-                )
-                tail_processes.append(tail_log)
+    # Monitor job status without outputting log content
+    # Periodically check if job is still running
+    last_status_time = 0
+    status_interval = 5  # Print status every 5 seconds
+    
+    try:
+        while True:
+            # Check if job is still running
+            if not is_job_running(job_id):
+                # Job is no longer in queue, wait a bit more to ensure it's fully done
+                time.sleep(0.5)
+                break
             
-            # Start tail -n +1 -f for err file (output to stderr)
-            if err_path.exists():
-                tail_err = subprocess.Popen(
-                    ['tail', '-n', '+1', '-f', '-q', str(err_path)],
-                    stdout=sys.stderr,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                    bufsize=1
-                )
-                tail_processes.append(tail_err)
+            # Print status message periodically (not the actual log content)
+            current_time = time.time()
+            if current_time - last_status_time >= status_interval:
+                print(f"[sbatch_wrapper] 作业正在运行中 (Job ID: {job_id})...", file=sys.stderr)
+                last_status_time = current_time
             
-            # Monitor until job completes or user interrupts
-            # Check job status while tailing logs
-            while True:
-                # Check if job is still running
-                if not is_job_running(job_id):
-                    # Job is no longer in queue, wait a bit more for final output
-                    time.sleep(0.5)
-                    break
-                
-                # Check if all tail processes are still alive
-                if all(p.poll() is not None for p in tail_processes):
-                    # All tail processes ended unexpectedly
-                    break
-                
-                time.sleep(0.1)  # Check more frequently
+            time.sleep(1)  # Check job status every second
             
-            # Give tail processes a moment to flush final output
-            time.sleep(0.5)
-            
-            # Stop all tail processes when job completes
-            for tail_process in tail_processes:
-                if tail_process and tail_process.poll() is None:
-                    tail_process.terminate()
-                    try:
-                        tail_process.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        tail_process.kill()
-        except Exception as e:
-            print(f"[sbatch_wrapper] ⚠️  监控日志时出错: {e}", file=sys.stderr)
-            # Clean up any started processes
-            for tail_process in tail_processes:
-                if tail_process and tail_process.poll() is None:
-                    tail_process.terminate()
-    else:
-        print(
-            f"[sbatch_wrapper] ⚠️  日志文件未在 {max_wait} 秒内创建，继续等待作业完成...",
-            file=sys.stderr
-        )
-        # Just wait for job to complete
+    except KeyboardInterrupt:
+        # User interrupted, but job continues running
+        raise
+    except Exception as e:
+        print(f"[sbatch_wrapper] ⚠️  监控作业状态时出错: {e}", file=sys.stderr)
+        # Continue monitoring even if there's an error
         while True:
             if not is_job_running(job_id):
                 break
@@ -324,7 +285,7 @@ cd "{current_dir}"
     print(f"[sbatch_wrapper] ✅ 作业已提交，Job ID: {job_id}", file=sys.stderr)
     print(f"[sbatch_wrapper] 日志文件: {log_file}", file=sys.stderr)
     print(f"[sbatch_wrapper] 错误文件: {err_file}", file=sys.stderr)
-    print("[sbatch_wrapper] 开始监控日志 (Ctrl+C 停止监控，作业将继续运行)...", file=sys.stderr)
+    print("[sbatch_wrapper] 开始监控作业状态 (Ctrl+C 停止监控，作业将继续运行)...", file=sys.stderr)
     
     # Monitor logs
     job_completed = False

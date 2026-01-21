@@ -1,0 +1,74 @@
+digraph G {
+  graph [rankdir=LR, splines=ortho, nodesep=0.35, ranksep=0.75, concentrate=true];
+  node [shape=ellipse, fontsize=10];
+  edge [fontsize=9, color="#555555"];
+  { rank=source;
+    p_B000I7OIPI [label="B000I7OIPI\nStaedtler Karat Aquarell Premium Watercolor Crayons (223M24)", style=filled, fillcolor="#ff6b6b"];
+  }
+  { rank=same;
+    c_Arts_Crafts_Sewing [label="Arts, Crafts & Sewing", style=filled, fillcolor="#4dabf7"];
+    c_Painting_Drawing_Art_Supplies [label="Painting, Drawing & Art Supplies", style=filled, fillcolor="#4dabf7"];
+    c_Drawing [label="Drawing", style=filled, fillcolor="#4dabf7"];
+    c_Drawing_Media [label="Drawing Media", style=filled, fillcolor="#4dabf7"];
+    c_Crayons [label="Crayons", style=filled, fillcolor="#4dabf7"];
+    c_Office_Products [label="Office Products", style=filled, fillcolor="#4dabf7"];
+  }
+  subgraph cluster_entities_1 {
+    style="dashed"; color="#dddddd";
+    label="Brand";
+    { rank=sink;
+      e_Brand_Staedtler [label="Staedtler", style=filled, fillcolor="#adb5bd"];
+    }
+  }
+  subgraph cluster_entities_2 {
+    style="dashed"; color="#dddddd";
+    label="Design";
+    { rank=sink;
+      e_Design_Karat_Aquarell [label="Karat Aquarell", style=filled, fillcolor="#adb5bd"];
+    }
+  }
+  subgraph cluster_entities_3 {
+    style="dashed"; color="#dddddd";
+    label="Quantity";
+    { rank=sink;
+      e_Quantity_24 [label="24", style=filled, fillcolor="#adb5bd"];
+    }
+  }
+  subgraph cluster_entities_4 {
+    style="dashed"; color="#dddddd";
+    label="Selling Point";
+    { rank=sink;
+      e_Selling_Point_Premium_quality [label="Premium quality", style=filled, fillcolor="#adb5bd"];
+      e_Selling_Point_Can_apply_on_a_variety_of_paper_colors [label="Can apply on a variety of paper colors", style=filled, fillcolor="#adb5bd"];
+      e_Selling_Point_Achieves_a_dramatic_look_on_dark_paper [label="Achieves a dramatic look on dark paper", style=filled, fillcolor="#adb5bd"];
+    }
+  }
+  subgraph cluster_entities_5 {
+    style="dashed"; color="#dddddd";
+    label="Usage";
+    { rank=sink;
+      e_Usage_Dry [label="Dry", style=filled, fillcolor="#adb5bd"];
+      e_Usage_Shading [label="Shading", style=filled, fillcolor="#adb5bd"];
+      e_Usage_Blending [label="Blending", style=filled, fillcolor="#adb5bd"];
+      e_Usage_Coloring_large_areas [label="Coloring large areas", style=filled, fillcolor="#adb5bd"];
+      e_Usage_Scratch_art [label="Scratch art", style=filled, fillcolor="#adb5bd"];
+    }
+  }
+  p_B000I7OIPI -> c_Arts_Crafts_Sewing [label="has_category"];
+  p_B000I7OIPI -> c_Painting_Drawing_Art_Supplies [label="has_category"];
+  p_B000I7OIPI -> c_Drawing [label="has_category"];
+  p_B000I7OIPI -> c_Drawing_Media [label="has_category"];
+  p_B000I7OIPI -> c_Crayons [label="has_category"];
+  p_B000I7OIPI -> c_Office_Products [label="has_category"];
+  p_B000I7OIPI -> e_Brand_Staedtler [label="has_brand"];
+  p_B000I7OIPI -> e_Quantity_24 [label="has_quantity"];
+  p_B000I7OIPI -> e_Design_Karat_Aquarell [label="has_design"];
+  p_B000I7OIPI -> e_Usage_Dry [label="has_usage"];
+  p_B000I7OIPI -> e_Usage_Shading [label="has_usage"];
+  p_B000I7OIPI -> e_Usage_Blending [label="has_usage"];
+  p_B000I7OIPI -> e_Usage_Coloring_large_areas [label="has_usage"];
+  p_B000I7OIPI -> e_Usage_Scratch_art [label="has_usage"];
+  p_B000I7OIPI -> e_Selling_Point_Premium_quality [label="has_selling_point"];
+  p_B000I7OIPI -> e_Selling_Point_Can_apply_on_a_variety_of_paper_colors [label="has_selling_point"];
+  p_B000I7OIPI -> e_Selling_Point_Achieves_a_dramatic_look_on_dark_paper [label="has_selling_point"];
+}

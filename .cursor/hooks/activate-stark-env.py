@@ -53,19 +53,22 @@ def is_in_project_directory(working_dir: str) -> bool:
     """Check if working directory is in project"""
     if not working_dir:
         return False
-    
+
     # Normalize paths for comparison
     project_root = os.path.abspath(PROJECT_ROOT)
     scratch_root = os.path.abspath("/home/wlia0047/ar57_scratch/wenyu")
     home_root = os.path.abspath("/home/wlia0047")
+    fs04_root = os.path.abspath("/fs04/ar57/wenyu")  # Add /fs04 path
     abs_working_dir = os.path.abspath(working_dir)
-    
+
     return (abs_working_dir.startswith(project_root + os.sep) or
             abs_working_dir == project_root or
             abs_working_dir.startswith(scratch_root + os.sep) or
             abs_working_dir == scratch_root or
             abs_working_dir.startswith(home_root + os.sep) or
-            abs_working_dir == home_root)
+            abs_working_dir == home_root or
+            abs_working_dir.startswith(fs04_root + os.sep) or
+            abs_working_dir == fs04_root)
 
 
 def has_activation_in_command(command: str) -> bool:

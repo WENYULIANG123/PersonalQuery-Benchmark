@@ -1,0 +1,231 @@
+=== Color Entities Analysis ===
+Total products: 102
+Products with color entities: 49
+Total color mentions: 232
+Unique color values: 180
+
+=== All Unique Color Entities (sorted) ===
+  1. 12 METALLIC colors                       (appears 1 time)
+  2. 14k                                      (appears 1 time)
+  3. 32 Color                                 (appears 1 time)
+  4. 5 color                                  (appears 1 time)
+  5. 72-color                                 (appears 1 time)
+  6. Almond Pink                              (appears 1 time)
+  7. Amethyst Genuine                         (appears 1 time)
+  8. Anti-tarnish finish                      (appears 1 time)
+  9. Antique Bronze                           (appears 1 time)
+ 10. Antique Copper                           (appears 1 time)
+ 11. Antique Gold                             (appears 1 time)
+ 12. Antique Silver                           (appears 1 time)
+ 13. Any color                                (appears 2 times)
+ 14. Aqua                                     (appears 1 time)
+ 15. Assorted Color                           (appears 1 time)
+ 16. Aztec Gold                               (appears 1 time)
+ 17. Beautiful color                          (appears 1 time)
+ 18. Beige                                    (appears 1 time)
+ 19. Black                                    (appears 6 times)
+ 20. Black Coarse                             (appears 1 time)
+ 21. Black Fine                               (appears 1 time)
+ 22. Blue                                     (appears 6 times)
+ 23. Blue Russet                              (appears 1 time)
+ 24. Blue gray                                (appears 1 time)
+ 25. Blue/Green                               (appears 1 time)
+ 26. Brick Beige                              (appears 1 time)
+ 27. Bright Red                               (appears 1 time)
+ 28. Bright Yellow                            (appears 1 time)
+ 29. Brilliant Gold                           (appears 1 time)
+ 30. Brilliant colors                         (appears 1 time)
+ 31. Bronze                                   (appears 1 time)
+ 32. Brown                                    (appears 3 times)
+ 33. Carbazole Violet                         (appears 1 time)
+ 34. Carmine Red                              (appears 1 time)
+ 35. Cobalt Blue                              (appears 1 time)
+ 36. Copper                                   (appears 2 times)
+ 37. Disney Designs                           (appears 1 time)
+ 38. Embossed Metallic                        (appears 1 time)
+ 39. Emerald Green                            (appears 1 time)
+ 40. English Lavender                         (appears 1 time)
+ 41. FL. Green                                (appears 1 time)
+ 42. FL. Pink                                 (appears 1 time)
+ 43. FL. Yellow                               (appears 1 time)
+ 44. Flamingo Pink                            (appears 1 time)
+ 45. French Artists Watercolor                (appears 1 time)
+ 46. French Ultramarine                       (appears 1 time)
+ 47. Frost                                    (appears 1 time)
+ 48. Gloss black                              (appears 1 time)
+ 49. Glow in the Dark                         (appears 1 time)
+ 50. Gold                                     (appears 5 times)
+ 51. Gorgeous finishes                        (appears 1 time)
+ 52. Grass Green                              (appears 1 time)
+ 53. Green                                    (appears 5 times)
+ 54. Green Shadow                             (appears 1 time)
+ 55. Green gray                               (appears 1 time)
+ 56. Green shadow                             (appears 1 time)
+ 57. Green/Yellow                             (appears 1 time)
+ 58. Grey                                     (appears 2 times)
+ 59. Hansa Yellow Medium                      (appears 1 time)
+ 60. Haze Blue                                (appears 1 time)
+ 61. Hematite Genuine                         (appears 1 time)
+ 62. Hooker's green                           (appears 1 time)
+ 63. Jadeite Genuine                          (appears 1 time)
+ 64. Jewel Tones                              (appears 1 time)
+ 65. Lemon Yellow                             (appears 1 time)
+ 66. Light Gold                               (appears 1 time)
+ 67. Lilac                                    (appears 1 time)
+ 68. Luminous                                 (appears 1 time)
+ 69. Macropearl                               (appears 1 time)
+ 70. Magenta                                  (appears 1 time)
+ 71. Mayan Blue Genuine                       (appears 1 time)
+ 72. Metallic                                 (appears 4 times)
+ 73. Metallic Colors                          (appears 1 time)
+ 74. Metallics-650 Micropearl                 (appears 1 time)
+ 75. Mid Brown                                (appears 1 time)
+ 76. Mid Green                                (appears 1 time)
+ 77. Mid gray                                 (appears 1 time)
+ 78. Mint                                     (appears 1 time)
+ 79. Misty Lavender                           (appears 1 time)
+ 80. Mud                                      (appears 1 time)
+ 81. Multicolored                             (appears 1 time)
+ 82. Oatmeal                                  (appears 1 time)
+ 83. Ochre                                    (appears 1 time)
+ 84. Olive Green                              (appears 1 time)
+ 85. Orange                                   (appears 2 times)
+ 86. Pastel                                   (appears 1 time)
+ 87. Peacock Blue                             (appears 1 time)
+ 88. Pearl                                    (appears 1 time)
+ 89. Pearlwhite                               (appears 1 time)
+ 90. Persian Blue                             (appears 1 time)
+ 91. Persian Green                            (appears 1 time)
+ 92. Perylene Red                             (appears 1 time)
+ 93. Pewter                                   (appears 2 times)
+ 94. Piemontite Genuine                       (appears 1 time)
+ 95. Pink                                     (appears 2 times)
+ 96. Pink Flamingo                            (appears 1 time)
+ 97. Polished black                           (appears 1 time)
+ 98. Purple                                   (appears 1 time)
+ 99. Quinacridone Burnt Orange                (appears 1 time)
+100. Red                                      (appears 7 times)
+101. Red-Russet                               (appears 1 time)
+102. Red/Blue                                 (appears 1 time)
+103. Rhodonite Genuine                        (appears 1 time)
+104. Rich Gold                                (appears 1 time)
+105. Rose Quartz                              (appears 1 time)
+106. Scarlet Red                              (appears 1 time)
+107. Silver                                   (appears 4 times)
+108. Sparkle                                  (appears 1 time)
+109. Sparkle Gold                             (appears 1 time)
+110. Sparkling Copper                         (appears 1 time)
+111. Spring green                             (appears 1 time)
+112. Super-Copper                             (appears 1 time)
+113. Super-Russet                             (appears 1 time)
+114. Teal                                     (appears 1 time)
+115. True Blue                                (appears 1 time)
+116. Turquoise                                (appears 1 time)
+117. Undersea Green                           (appears 1 time)
+118. Variegated COLORS                        (appears 1 time)
+119. Violet                                   (appears 5 times)
+120. WHITE GOLD                               (appears 1 time)
+121. Water-soluble                            (appears 1 time)
+122. White                                    (appears 6 times)
+123. White Coarse                             (appears 1 time)
+124. White Fine                               (appears 1 time)
+125. Yellow                                   (appears 4 times)
+126. Yellow Green                             (appears 1 time)
+127. assorted colors                          (appears 1 time)
+128. black                                    (appears 3 times)
+129. blush                                    (appears 1 time)
+130. bright Yellow                            (appears 1 time)
+131. cadmium yellow deep                      (appears 1 time)
+132. carnival red                             (appears 1 time)
+133. clear                                    (appears 1 time)
+134. cool gray 1                              (appears 1 time)
+135. corn flour Blue                          (appears 1 time)
+136. dark Brown                               (appears 1 time)
+137. dark Oatmeal                             (appears 1 time)
+138. dark Pink                                (appears 1 time)
+139. dark gray                                (appears 1 time)
+140. deep Blue                                (appears 1 time)
+141. deep Brown                               (appears 1 time)
+142. deep Green                               (appears 1 time)
+143. deep Red                                 (appears 1 time)
+144. deep Violet                              (appears 1 time)
+145. dull Blue                                (appears 1 time)
+146. flesh color                              (appears 1 time)
+147. geranium Red                             (appears 1 time)
+148. gray Brown                               (appears 1 time)
+149. gray tint                                (appears 1 time)
+150. iron blue                                (appears 1 time)
+151. light Blue                               (appears 1 time)
+152. light Brown                              (appears 1 time)
+153. light Carmine                            (appears 1 time)
+154. light Green                              (appears 1 time)
+155. light Pink                               (appears 1 time)
+156. light Violet                             (appears 1 time)
+157. light gray                               (appears 1 time)
+158. marine Green                             (appears 1 time)
+159. may Green                                (appears 1 time)
+160. natural gray                             (appears 1 time)
+161. pale Green                               (appears 1 time)
+162. pale Pink                                (appears 1 time)
+163. pale Rose                                (appears 1 time)
+164. pale dawn gray                           (appears 1 time)
+165. pale gray                                (appears 1 time)
+166. pale vermillion                          (appears 1 time)
+167. peach Pink                               (appears 1 time)
+168. pink                                     (appears 1 time)
+169. sanguine                                 (appears 1 time)
+170. sap green                                (appears 1 time)
+171. sepia                                    (appears 1 time)
+172. shadow Mauve                             (appears 1 time)
+173. tea Rose                                 (appears 1 time)
+174. turquoise Green                          (appears 1 time)
+175. ultramarine blue                         (appears 1 time)
+176. vibrant                                  (appears 1 time)
+177. violet                                   (appears 1 time)
+178. warm gray 2                              (appears 1 time)
+179. white                                    (appears 1 time)
+180. wine Red                                 (appears 1 time)
+
+=== Top 20 Most Frequent Colors ===
+Red                                      : 7
+Black                                    : 6
+Blue                                     : 6
+White                                    : 6
+Green                                    : 5
+Violet                                   : 5
+Gold                                     : 5
+Yellow                                   : 4
+Silver                                   : 4
+Metallic                                 : 4
+black                                    : 3
+Brown                                    : 3
+Grey                                     : 2
+Copper                                   : 2
+Pewter                                   : 2
+Any color                                : 2
+Orange                                   : 2
+Pink                                     : 2
+Pastel                                   : 1
+sap green                                : 1
+
+=== Color Entities by Product (first 20 products) ===
+ASIN: B0011UP7BK      Colors: Pastel
+ASIN: B000N2Y6P0      Colors: cadmium yellow deep, iron blue, Hooker's green, sepia, carnival red, white, black, sanguine, violet, sap green, ultramarine blue, pale vermillion
+ASIN: B000S5OWCO      Colors: Water-soluble
+ASIN: B001668EL4      Colors: Black
+ASIN: B001GQ37ZW      Colors: Red, Blue, Green, Gold, Violet, White, Black, Silver, Yellow, Grey, Luminous, Brown
+ASIN: B000BGSZFU      Colors: Macropearl, Spring green, Gold, Antique Bronze, Pearlwhite, Turquoise, Super-Russet, Flamingo Pink, Blue/Green, Antique Copper, Green/Yellow, True Blue, Antique Silver, Metallics-650 Micropearl, Violet, Bright Yellow, Misty Lavender, Sparkle Gold, Red-Russet, Blue Russet, Red, Blue, Green, Aztec Gold, Antique Gold, Sparkling Copper, Red/Blue, Brilliant Gold, Super-Copper
+ASIN: B00114587Y      Colors: Metallic
+ASIN: B000RAYLXK      Colors: 14k
+ASIN: B000MATF4A      Colors: Jewel Tones
+ASIN: B001T2YFCW      Colors: 12 METALLIC colors
+ASIN: B001U0152G      Colors: Variegated COLORS
+ASIN: B00369ZL2E      Colors: Sparkle, Copper, Gold, Silver, Frost, Pewter
+ASIN: B003TZZ634      Colors: black, pink
+ASIN: B003WD2T06      Colors: Black, White
+ASIN: B003ZS335S      Colors: Disney Designs
+ASIN: B0042GZGU2      Colors: Anti-tarnish finish
+ASIN: B0044JOUCC      Colors: Aqua
+ASIN: B004BNAIHW      Colors: Black, Gloss black, Polished black
+ASIN: B0052PPJI6      Colors: Metallic
+ASIN: B0052PT2U2      Colors: Metallic

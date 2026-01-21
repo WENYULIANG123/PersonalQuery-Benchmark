@@ -319,13 +319,6 @@ def main() -> None:
       "unknown": "#c0c0c0",
     }};
 
-    const EDGE_COLORS = {{
-      0: "#555555",
-      1: "#555555",
-      2: "#555555",
-      3: "#777777",
-    }};
-
     const edgeTypeDict = {_safe_json(edge_type_dict)};
     const asin2id = {_safe_json(asin2id)};
 
@@ -606,6 +599,42 @@ def main() -> None:
       return {{nodeSet, edgeTriples}};
     }}
 
+    function edgeLabelWithSentiment(s, d, t) {{
+      // If the edge connects a product to an entity node (non-product/non-category),
+      // use the entity node's sentiment field as the edge label (the attitude towards that entity).
+      const src = nodesById[s];
+      const dst = nodesById[d];
+      const srcType = src?.ntype || "unknown";
+      const dstType = dst?.ntype || "unknown";
+
+      const normalizeSentimentLabel = (raw) => {{
+        if (typeof raw !== "string") return null;
+        let s = raw.trim();
+        if (!s) return null;
+        // Handle "sentiment:positive" / "sentiment：positive" -> "positive"
+        const lower = s.toLowerCase();
+        if (lower.startsWith("sentiment:")) s = s.slice("sentiment:".length).trim();
+        if (lower.startsWith("sentiment：")) s = s.slice("sentiment：".length).trim();
+        // Common typo seen in some outputs
+        if (s.toLowerCase() === "posotive") s = "positive";
+        return s || null;
+      }};
+
+      const getSent = (node) => normalizeSentimentLabel(node?.info?.sentiment);
+
+      const isEntity = (nt) => nt !== "product" && nt !== "category";
+      const connectsProductEntity =
+        (srcType === "product" && isEntity(dstType)) ||
+        (dstType === "product" && isEntity(srcType));
+
+      if (connectsProductEntity) {{
+        const sent = getSent(isEntity(dstType) ? dst : src);
+        if (sent) return sent;  // Directly show: positive/negative/neutral
+      }}
+
+      return edgeTypeDict[t] || String(t);
+    }}
+
     function buildVisData(center, nodeSet, edgeIdx, centersSet) {{
       const idMap = new Map();
       let cur = 0;
@@ -660,10 +689,10 @@ def main() -> None:
         visEdges.push({{
           from: idMap.get(s),
           to: idMap.get(d),
-          color: EDGE_COLORS[t] || "#555",
+          color: "#555",
           arrows: "to",
           arrowStrikethrough: false,
-          label: (edgeTypeDict[t] || String(t)),
+          label: edgeLabelWithSentiment(s, d, t),
           font: {{ align: "middle", size: 10 }},
           width: 1,
         }});
@@ -724,10 +753,10 @@ def main() -> None:
         visEdges.push({{
           from: idMap.get(s),
           to: idMap.get(d),
-          color: EDGE_COLORS[t] || "#555",
+          color: "#555",
           arrows: "to",
           arrowStrikethrough: false,
-          label: (edgeTypeDict[t] || String(t)),
+          label: edgeLabelWithSentiment(s, d, t),
           font: {{ align: "middle", size: 10 }},
           width: 1,
         }});
@@ -746,6 +775,11 @@ def main() -> None:
       lines.push("label: " + rec.label);
       lines.push("");
       for (const [k,v] of Object.entries(info)) {{
+        // matched_entities is now a dict in latest outputs; pretty print it for readability.
+        if (k === "matched_entities" && v && typeof v === "object") {{
+          lines.push(k + ": " + JSON.stringify(v, null, 2));
+          continue;
+        }}
         lines.push(k + ": " + (typeof v === "object" ? JSON.stringify(v) : v));
       }}
       return lines.join("\\n");
