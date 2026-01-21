@@ -39,6 +39,6 @@ conda activate /home/wlia0047/ar57_scratch/wenyu/stark
 # Run the simplified analysis script using SiliconFlow API
 export HF_HOME=/home/wlia0047/ar57_scratch/wenyu/hf_cache
 export PYTHONUNBUFFERED=1
-python3 /home/wlia0047/ar57/wenyu/stark/code/generate_strategy_variants.py
+python3 /home/wlia0047/ar57/wenyu/stark/code/query_generation/generate_strategy_variants.py
 
 

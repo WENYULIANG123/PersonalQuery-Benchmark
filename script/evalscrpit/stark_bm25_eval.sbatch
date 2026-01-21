@@ -103,6 +103,6 @@ echo "Launching Python script..."
 export PYTHONUNBUFFERED=1
 
 cd /home/wlia0047/ar57/wenyu/stark/code
-exec python3 /home/wlia0047/ar57/wenyu/stark/code/run_stark_bm25_eval.py
-#exec python3 /home/wlia0047/ar57/wenyu/stark/code/run_stark_bm25_eval.py  --strategy grammar_aware
+exec python3 /home/wlia0047/ar57/wenyu/stark/code/retrieval/eval/run_stark_bm25_eval.py
+#exec python3 /home/wlia0047/ar57/wenyu/stark/code/retrieval/eval/run_stark_bm25_eval.py  --strategy grammar_aware
 

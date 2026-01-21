@@ -8,7 +8,9 @@ import time
 import os
 
 # 添加model.py的路径
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+CODE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if CODE_DIR not in sys.path:
+    sys.path.append(CODE_DIR)
 
 try:
     from model import get_gm_model

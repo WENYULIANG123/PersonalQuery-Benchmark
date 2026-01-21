@@ -33,10 +33,9 @@ def create_llm_with_config(api_config):
         return ChatOpenAI(
             base_url="https://api.siliconflow.cn/v1",
             api_key=api_config['api_key'],
-            model_name=api_config.get('model', 'Qwen/Qwen2.5-7B-Instruct'),
+            model_name=api_config.get('model', 'deepseek-ai/DeepSeek-R1-0528-Qwen3-8B'),
             temperature=0.1,
             max_tokens=4000,
-            timeout=60
         )
     else:
         # Default to OpenAI
@@ -45,7 +44,6 @@ def create_llm_with_config(api_config):
             model_name=api_config.get('model', 'gpt-3.5-turbo'),
             temperature=0.1,
             max_tokens=4000,
-            timeout=60
         )
 
 

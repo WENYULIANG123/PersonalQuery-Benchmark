@@ -1,23 +1,43 @@
 #!/usr/bin/env python3
 """
-商品实体提取模块
-负责处理商品实体的提取和处理
+Product Entity Extraction Module
+Responsible for processing product entity extraction and handling
 """
 
-import os, json, gzip, re, sys
+import os
+import json
+import gzip
+import re
+import sys
 from typing import Dict, List, Optional, Union
 from datetime import datetime
-from langchain_core.language_models.chat_models import BaseChatModel
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model import call_llm_with_retry, APIErrorException
-from utils import get_all_api_keys_in_order, create_llm_with_config, try_api_keys_with_fallback
 
 def log_with_timestamp(message: str):
     """Log message with timestamp."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}", flush=True)
+
+def normalize_category_label(category: str) -> str:
+    """
+    Normalize category labels to keep keys consistent across pipeline.
+    Currently enforces: "Color/Finish" -> "Color" (and common variants).
+    """
+    if category is None:
+        return category
+    c = str(category).strip()
+    if not c:
+        return c
+    c_lower = c.lower().strip()
+    c_compact = c_lower.replace(" ", "")
+    if c_compact in {"color/finish", "colour/finish", "colorfinish", "colourfinish"}:
+        return "Color"
+    if c_lower in {"color", "colour"}:
+        return "Color"
+    return c
 
 def robust_json_loads(json_str: str):
     """
@@ -149,7 +169,7 @@ def clean_html_content(text) -> str:
     return text
 
 def load_data_from_gzip(file_path: str, data_type: str, filter_func=None, max_items: int = None) -> Union[List[Dict], Dict[str, Dict]]:
-    """从gzip文件加载数据"""
+    """Load data from gzip file"""
     try:
         with gzip.open(file_path, 'rt', encoding='utf-8') as f:
             if data_type == 'metadata':
@@ -185,38 +205,40 @@ def load_data_from_gzip(file_path: str, data_type: str, filter_func=None, max_it
         return {} if data_type == 'metadata' else []
 
 def load_data(data_type: str, filter_func=None, max_items: int = None, user_products: set = None):
-    """加载数据的通用函数"""
+    """General function to load data"""
     if data_type == 'metadata':
         file_path = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz"
         # If user_products is specified, create a filter function
         if user_products is not None:
-            filter_func = lambda item: item.get('asin', '') in user_products
+            def filter_func(item):
+                return item.get('asin', '') in user_products
     elif data_type == 'reviews':
         file_path = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/raw/Arts_Crafts_and_Sewing.json.gz"
         # If user_products is specified for reviews, create a filter function
         if user_products is not None:
-            filter_func = lambda item: item.get('asin', '') in user_products
+            def filter_func(item):
+                return item.get('asin', '') in user_products
     else:
         raise ValueError(f"Unknown data type: {data_type}")
 
     return load_data_from_gzip(file_path, data_type, filter_func, max_items)
 
 def load_product_metadata(user_products: set = None) -> Dict[str, Dict]:
-    """加载产品元数据，可选择只加载指定用户的商品（保持向后兼容）"""
+    """Load product metadata, optionally loading only products for specified users (maintain backward compatibility)"""
     return load_data('metadata', user_products=user_products)
 
 def process_product_extraction_response(response_str: str) -> List[str]:
     """
-    处理商品实体提取的LLM响应
+    Process LLM response for product entity extraction
 
     Args:
-        response_str: LLM返回的原始字符串
+        response_str: Raw string returned by LLM
 
     Returns:
-        处理后的实体列表
+        Processed entity list
 
     Raises:
-        APIErrorException: 当响应无效或无法解析时
+        APIErrorException: When response is invalid or cannot be parsed
     """
     if not response_str:
         raise APIErrorException("No response from product extraction")
@@ -249,6 +271,9 @@ def process_product_extraction_response(response_str: str) -> List[str]:
         # Try to parse as JSON with robust error handling
         result = robust_json_loads(response_str)
 
+        # Detect compound color-like forms such as "Red/Blue" (but not fractions like "3/8")
+        color_combo_slash_re = re.compile(r"[A-Za-z]\s*/\s*[A-Za-z]")
+
         # Handle different response formats
         if isinstance(result, dict) and not ('result' in result and isinstance(result['result'], list)):
             # New direct format: {category: [entities]}
@@ -256,6 +281,7 @@ def process_product_extraction_response(response_str: str) -> List[str]:
             flattened = []
 
             for category, entities in result.items():
+                category_norm = normalize_category_label(category)
                 if isinstance(entities, list):
                     # Process list of entities for this category
                     category_entities = []
@@ -270,12 +296,13 @@ def process_product_extraction_response(response_str: str) -> List[str]:
                                         ' with ' in entity_lower or
                                         ' or ' in entity_lower or
                                         ' for ' in entity_lower or
-                                        '&' in entity_text):
+                                        '&' in entity_text or
+                                        color_combo_slash_re.search(entity_text)):
                                     category_entities.append(entity_text)
                                     flattened.append(entity_text)
 
                     if category_entities:
-                        categorized_entities[category] = category_entities
+                        categorized_entities[category_norm] = category_entities
                 elif isinstance(entities, str):
                     # Handle single entity as string
                     entity_text = entities.strip()
@@ -286,9 +313,11 @@ def process_product_extraction_response(response_str: str) -> List[str]:
                                 ' with ' in entity_lower or
                                 ' or ' in entity_lower or
                                 ' for ' in entity_lower or
-                                '&' in entity_text):
-                            categorized_entities[category] = [entity_text]
+                                '&' in entity_text or
+                                color_combo_slash_re.search(entity_text)):
+                            categorized_entities[category_norm] = [entity_text]
                             flattened.append(entity_text)
+
 
             if flattened:
                 return flattened, categorized_entities
@@ -302,7 +331,7 @@ def process_product_extraction_response(response_str: str) -> List[str]:
                 if isinstance(item, dict) and 'entity' in item and 'category' in item:
                     # Extract entity and category from structured format
                     entity_text = item.get('entity', '').strip()
-                    category = item.get('category', '').strip()
+                    category = normalize_category_label(item.get('category', '').strip())
                     if entity_text and category:
                         # Apply atomic filtering
                         entity_lower = entity_text.lower()
@@ -311,7 +340,8 @@ def process_product_extraction_response(response_str: str) -> List[str]:
                                 ' with ' in entity_lower or
                                 ' or ' in entity_lower or
                                 ' for ' in entity_lower or
-                                '&' in entity_text):
+                                '&' in entity_text or
+                                color_combo_slash_re.search(entity_text)):
                             # Accumulate entities in lists by category
                             if category not in categorized_entities:
                                 categorized_entities[category] = []
@@ -333,7 +363,7 @@ def process_product_extraction_response(response_str: str) -> List[str]:
                 if isinstance(item, dict) and 'entity' in item and 'category' in item:
                     # Extract entity and category from structured format
                     entity_text = item.get('entity', '').strip()
-                    category = item.get('category', '').strip()
+                    category = normalize_category_label(item.get('category', '').strip())
                     if entity_text and category:
                         # Use category as key, entity as value
                         if category not in categorized_entities:
@@ -363,7 +393,8 @@ def process_product_extraction_response(response_str: str) -> List[str]:
                     ' with ' in entity_lower or
                     ' or ' in entity_lower or
                     ' for ' in entity_lower or
-                    '&' in entity):
+                    '&' in entity or
+                    color_combo_slash_re.search(entity)):
                     continue
                 atomic_entities.append(entity)
 
@@ -402,16 +433,16 @@ def process_product_extraction_response(response_str: str) -> List[str]:
         raise APIErrorException("Response processing failed in product extraction")
 
 def prepare_content_and_extract_entities(data_source, data_type: str, llm_model, asin: str = None) -> List[str]:
-    """通用函数：准备内容并提取实体
+    """General function: prepare content and extract entities
 
     Args:
-        data_source: 数据源（产品信息或评论数据）
-        data_type: 数据类型 ('product' 或 'user preference')
-        llm_model: LLM模型
-        asin: 产品ASIN（可选）
+        data_source: Data source (product information or review data)
+        data_type: Data type ('product' or 'user preference')
+        llm_model: LLM model
+        asin: Product ASIN (optional)
 
     Returns:
-        提取的实体列表
+        List of extracted entities
     """
     if data_type == 'product':
         # Prepare product content
@@ -471,39 +502,49 @@ def extract_product_entities(content: str, llm_model, asin: str = None) -> List[
         raise APIErrorException("Invalid content for product extraction")
 
     prompt = f"""
-你是一个电商数据专家。请从以下产品信息中提取关键实体。
+You are an e-commerce data expert. Please extract key entities from the following product information.
 
-**输入产品信息:** {content}
+**Input Product Information:** {content}
 
-**实体分类要求:**
-对于每个提取的实体，必须将其归类为以下类别之一：
-[Brand, Material, Dimensions, Quantity, Color/Finish, Design, Usage, Selling Point, Safety/Certification, Accessories]
+**Entity Classification Requirements:**
+For each extracted entity, it must be classified into one of the following categories:
+[Brand, Material, Dimensions, Quantity, Color, Design, Usage, Selling Point, Safety/Certification, Accessories]
 
-**提取规则:**
-1. **严禁输出类别名称**: 严禁输出类别名称（如 'Brand', 'Color', 'Size', 'Material', 'Dimensions' 等）作为实体值。只提取具体的品牌名、具体的颜色名、具体的尺寸值等。
-2. **只提取具体值**: 如果找不到具体的值，不要输出该条目。例如，不要输出"Brand"，而是要输出"Apple"或"Nike"等具体品牌名。
-3. 只提取真正代表产品特征的具体实体
-4. 每个实体必须能明确归类到上述类别之一
-5. 避免提取通用形容词或营销词汇
-6. 确保实体是产品描述中的具体内容
-7. **原子化 (Atomic Only)**: 提取的实体必须是单一、独立的属性。严禁提取包含连接词(and,or,with,for,&)或逗号的复合短语
+**Extraction Rules:**
+1. **Strictly Prohibit Outputting Category Names**: Strictly prohibit outputting category names (such as 'Brand', 'Color', 'Size', 'Material', 'Dimensions', etc.) as entity values. Only extract specific brand names, specific color names, specific size values, etc.
+2. **Extract Only Specific Values**: If specific values cannot be found, do not output the entry. For example, do not output "Brand", but output "Apple" or "Nike" as specific brand names.
+3. Only extract entities that truly represent specific product features
+4. Each entity must clearly belong to one of the above categories
+5. Avoid extracting generic adjectives or marketing vocabulary
+6. Ensure entities are specific content from the product description
+7. **Atomic Only**: Extracted entities must be single, independent attributes. Strictly prohibit extracting compound phrases containing conjunctions (and,or,with,for,&) or commas
+8. **Color Entities Must Be Single Colors (Color = One Color Only)**:
+   - In the `Color` category, each array element can only contain **one** color (one color word or one color phrase).
+   - If multiple colors appear in the original text (such as "Red/Blue", "Blue and Green", "Black & White"), they must be split into multiple elements: ["Red","Blue"], ["Blue","Green"], ["Black","White"].
+   - Strictly prohibit including separators `/`, `&`, `and`, `or`, `,` etc. that combine multiple colors in a single color entity.
+   - **Metallic Color Restrictions**: If colors belong to metallic categories, only extract the following subcategories:
+     * Gold series: gold, golden, brilliant gold, sparkle gold, aztec gold, antique gold
+     * Copper series: copper, super-copper, sparkling copper, antique copper
+     * Antique metallic colors: antique bronze, antique silver
+     * Rust series: russet, red-russet, super-russet, blue russet
+     * Other metallic color variants (such as pearl, metallic, etc.) are strictly prohibited
 
-**重要:** 每个实体应该是单个词或简单短语，不要包含多个属性。宁缺毋滥，如果不确定是否为具体值，就不要提取。
+**Important:** Each entity should be a single word or simple phrase, not containing multiple attributes. Better to miss than include uncertain specific values.
 
-**输出格式:**
-返回一个JSON对象，其中键是类别名称，值是该类别对应的实体数组。相同类别的多个实体应该放在同一个数组中。
+**Output Format:**
+Return a JSON object where keys are category names and values are arrays of entities for that category. Multiple entities of the same category should be placed in the same array.
 
-示例:
+Example:
 {{
   "Brand": ["Apple"],
   "Design": ["iPhone 15", "Smartphone"],
   "Quantity": ["256GB"],
-  "Color/Finish": ["Blue", "Space Gray"],
+  "Color": ["Blue", "Space Gray"],
   "Material": ["Aluminum"],
   "Selling Point": ["Waterproof", "Face ID"]
 }}
 
-只返回有效的JSON对象，不要其他解释。
+Return only valid JSON object, no other explanations.
 """
 
     # Retry up to 5 times for JSON parsing errors
@@ -563,7 +604,7 @@ def extract_product_entities(content: str, llm_model, asin: str = None) -> List[
                     print(f"JSON parsing failed after {json_parse_retries} attempts", flush=True)
             # Re-raise API errors (including JSON parsing errors after retries)
             raise
-        except Exception as e:
+        except Exception:
             # Let the caller handle other API errors - they will trigger key switching
             raise
 
@@ -630,7 +671,6 @@ def extract_product_entities_only(asin: str, product_metadata: Dict[str, Dict], 
 
         # Skip generating explanations for entities - no longer needed
         # entity_explanations = generate_entity_explanations(entities_for_explanations, product_info, llm_model)
-        entity_explanations = {}  # Empty dict - explanations no longer generated
 
         # Prepare metadata for printing (still need HTML cleaning for display)
         metadata_lines = []

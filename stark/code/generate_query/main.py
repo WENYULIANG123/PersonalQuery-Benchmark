@@ -4,25 +4,28 @@
 整合商品实体提取、用户偏好实体提取和实体匹配模块
 """
 
-import os, json, gzip, sys, threading
-from typing import Dict, List, Optional, Union
-from datetime import datetime
+import os
+import json
+import sys
+import threading
 import concurrent.futures
+from collections import defaultdict
 
-# Add parent directory to path for imports
+ # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from model import APIErrorException, ApiProvider, get_all_api_keys_in_order
+from model import get_all_api_keys_in_order, set_api_responses_file
 
 # Import modules
 from product_extraction import (
-    log_with_timestamp, clean_html_content, load_data_from_gzip, load_data,
-    load_product_metadata, process_product_extraction_response,
-    extract_product_entities, extract_product_entities_only
+    log_with_timestamp, clean_html_content, load_product_metadata, extract_product_entities_only
 )
 
 from user_preference_extraction import (
-    load_user_reviews, process_user_preference_extraction_response,
-    prepare_content_and_extract_entities, TARGET_USER, OUTPUT_FILE
+    load_user_reviews,
+    prepare_content_and_extract_entities,
+    TARGET_USER,
+    process_user_preference_extraction_response,
+    normalize_category_label,
 )
 
 from utils import (
@@ -30,11 +33,13 @@ from utils import (
 )
 
 from entity_matching import (
-    process_entity_matching_response, match_product_and_user_entities,
-    perform_entity_matching, generate_formatted_product_output
+    perform_entity_matching
 )
 
-from query_generation import generate_queries_for_matched_products
+# Dimension normalization for matched entities
+from normalize_dimensions import process as normalize_dimensions_process
+
+# from query_generation import generate_queries_for_matched_products
 
 def report_progress(current, total, report_interval=10, message_template="📊 Progress: {current} / {total} {unit} processed"):
     """
@@ -49,12 +54,89 @@ def report_progress(current, total, report_interval=10, message_template="📊 P
     if current % report_interval == 0 or current == total:
         log_with_timestamp(message_template.format(current=current, total=total, unit="products"))
 
+def is_valid_user_preference_entities(entities):
+    """Check user preference entities contain usable values."""
+    if not entities:
+        return False
+    if isinstance(entities, dict):
+        for value in entities.values():
+            if isinstance(value, list) and any(str(item).strip() for item in value):
+                return True
+            if isinstance(value, str) and value.strip():
+                return True
+    elif isinstance(entities, list):
+        return any(str(item).strip() for item in entities)
+    return False
+
+
+def normalize_user_preference_entities_with_sentiment(entities):
+    """
+    Normalize user preference entities into {category: [{"entity": ..., "sentiment": ...}]}.
+    - Strings are kept with neutral sentiment.
+    - Dict items keep sentiment/polarity when valid, otherwise default to neutral.
+    - Deduplicates by (category, entity, sentiment).
+    """
+
+    def _coerce_item(item):
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                return {"entity": text, "sentiment": "neutral"}
+            return None
+        if isinstance(item, dict):
+            text = str(item.get("entity") or item.get("text") or item.get("name") or "").strip()
+            if not text:
+                return None
+            sentiment = str(item.get("sentiment") or item.get("polarity") or "").strip().lower()
+            if sentiment not in {"positive", "negative", "neutral"}:
+                sentiment = "neutral"
+            return {"entity": text, "sentiment": sentiment}
+        return None
+
+    if not entities:
+        return {}
+
+    normalized = {}
+    seen = set()
+
+    if isinstance(entities, dict):
+        for category, raw_items in entities.items():
+            cat = normalize_category_label(category)
+            # Accept single item or list
+            items = raw_items if isinstance(raw_items, list) else [raw_items]
+            for item in items:
+                coerced = _coerce_item(item)
+                if not coerced:
+                    continue
+                dedupe_key = (cat, coerced["entity"], coerced["sentiment"])
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                normalized.setdefault(cat, []).append(coerced)
+    elif isinstance(entities, list):
+        for item in entities:
+            coerced = _coerce_item(item)
+            if not coerced:
+                continue
+            dedupe_key = ("General", coerced["entity"], coerced["sentiment"])
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            normalized.setdefault("General", []).append(coerced)
+
+    return normalized
+
 def print_entity_matching_results():
     """打印实体匹配的完整结果"""
     log_with_timestamp("📋 Printing complete entity matching results...")
 
+    # Get the workspace root directory (parent of stark directory)
+    workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    result_dir = os.path.join(workspace_root, "result")
+    matched_entities_file = os.path.join(result_dir, "entity_matching_results.json")
+
     try:
-        with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
+        with open(matched_entities_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
     except Exception as e:
         log_with_timestamp(f"❌ Error reading results file for printing: {e}")
@@ -105,7 +187,7 @@ def print_entity_matching_results():
             if len(unique_reviews) > 3:
                 print(f'    ... and {len(unique_reviews) - 3} more unique reviews', flush=True)
         else:
-            print(f'  Reviews: None found', flush=True)
+            print('  Reviews: None found', flush=True)
 
         # 打印产品实体
         if product_entities:
@@ -114,35 +196,57 @@ def print_entity_matching_results():
             for category, entities in product_entities.items():
                 print(f'    {category}: {", ".join(entities)}', flush=True)
         else:
-            print(f'  Product Entities: None extracted', flush=True)
+            print('  Product Entities: None extracted', flush=True)
+
+        def _format_entities_with_sentiment(entity_list):
+            formatted = []
+            for item in entity_list:
+                if isinstance(item, dict):
+                    entity_text = str(item.get('entity') or item.get('text') or item.get('name') or "").strip()
+                    sentiment = str(item.get('sentiment') or item.get('polarity') or "").strip().lower()
+                    if entity_text:
+                        formatted.append(f"{entity_text} ({sentiment})" if sentiment else entity_text)
+                elif isinstance(item, str):
+                    item = item.strip()
+                    if item:
+                        formatted.append(item)
+            return formatted
 
         # 打印用户偏好实体
         if user_entities:
             total_user_entities = sum(len(entities) for entities in user_entities.values())
             print(f'  User Preference Entities ({len(user_entities)} categories, {total_user_entities} total):', flush=True)
             for category, entities in user_entities.items():
-                print(f'    {category}: {", ".join(entities)}', flush=True)
+                if isinstance(entities, list):
+                    formatted_entities = _format_entities_with_sentiment(entities)
+                    print(f'    {category}: {", ".join(formatted_entities)}', flush=True)
+                else:
+                    print(f'    {category}: {entities}', flush=True)
         else:
-            print(f'  User Preference Entities: None extracted', flush=True)
+            print('  User Preference Entities: None extracted', flush=True)
 
         # 打印匹配实体
         if matched_entities:
             total_matched = sum(len(entities) for entities in matched_entities.values())
             print(f'  Matched Entities ({len(matched_entities)} categories, {total_matched} total):', flush=True)
             for category, entities in matched_entities.items():
-                print(f'    {category}: {", ".join(entities)}', flush=True)
+                if isinstance(entities, list):
+                    formatted_entities = _format_entities_with_sentiment(entities)
+                    print(f'    {category}: {", ".join(formatted_entities)}', flush=True)
+                else:
+                    print(f'    {category}: {entities}', flush=True)
         else:
-            print(f'  Matched Entities: No matches found', flush=True)
+            print('  Matched Entities: No matches found', flush=True)
 
         # 打印生成的查询
         generated_query = product.get('generated_query', '')
         if generated_query:
             print(f'  Generated Query: {generated_query}', flush=True)
         else:
-            print(f'  Generated Query: None generated', flush=True)
+            print('  Generated Query: None generated', flush=True)
 
         # 打印metadata
-        print(f'  Metadata:', flush=True)
+        print('  Metadata:', flush=True)
         for key, value in metadata.items():
             print(f'    {key}: {value}', flush=True)
         print()
@@ -160,6 +264,16 @@ def print_entity_matching_results():
 
 def main():
     log_with_timestamp('Starting product entity extraction with API key fallback...')
+
+    # Get the workspace root directory (parent of stark directory)
+    workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    result_dir = os.path.join(workspace_root, "result")
+    os.makedirs(result_dir, exist_ok=True)
+    
+    # Set up API responses file for saving raw API data
+    api_responses_file = os.path.join(result_dir, "api_raw_responses.json")
+    set_api_responses_file(api_responses_file)
+    log_with_timestamp(f'💾 API raw responses will be saved to {api_responses_file}')
 
     user_reviews = load_user_reviews(TARGET_USER)
 
@@ -206,41 +320,86 @@ def main():
         log_with_timestamp("❌ No reviewed products found")
         return
 
+    # Get the workspace root directory (parent of stark directory)
+    workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    result_dir = os.path.join(workspace_root, "result")
+    os.makedirs(result_dir, exist_ok=True)
+    product_entities_file = os.path.join(result_dir, "product_entities.json")
+    user_preferences_file = os.path.join(result_dir, "user_preference_entities.json")
+
+    # Load cached product entities if exists
+    cached_product_data = {}
+    if os.path.exists(product_entities_file):
+        try:
+            with open(product_entities_file, 'r', encoding='utf-8') as f:
+                cached_data = json.load(f)
+                if cached_data.get('user_id') == TARGET_USER:
+                    for product in cached_data.get('products', []):
+                        cached_asin = product.get('asin')
+                        if cached_asin and product.get('product_entities'):
+                            cached_product_data[cached_asin] = product
+                    log_with_timestamp(f'📦 Loaded {len(cached_product_data)} cached product entities from {product_entities_file}')
+        except Exception as e:
+            log_with_timestamp(f'⚠️ Error loading cached product entities: {e}, will re-extract all products')
+
     all_results = []
 
-    log_with_timestamp(f'🔄 Processing {len(all_asins)} products concurrently with 5 workers...')
+    # Count how many products need extraction vs cached
+    cached_count = sum(1 for asin in all_asins if asin in cached_product_data)
+    need_extraction_count = total_products - cached_count
+    if cached_count > 0:
+        log_with_timestamp(f'📦 Found {cached_count} products in cache, {need_extraction_count} products need extraction')
+    
+    log_with_timestamp(f'🔄 Processing {len(all_asins)} products concurrently with 102 workers...')
 
     progress_counter = {'completed': 0}
     progress_lock = threading.Lock()
 
     def process_single_product(asin):
         try:
-            # Get API keys for processing
-            ordered_keys = get_all_api_keys_in_order()
+            # Check if we have cached data for this ASIN
+            if asin in cached_product_data:
+                cached_product = cached_product_data[asin]
+                #log_with_timestamp(f'📦 Using cached data for product {asin}')
 
-            def extract_operation(api_config, provider_name, key_index):
-                result = extract_product_entities_only(asin, product_metadata, api_config, total_products)
-                if result and result.get('success', False):
-                    return result
-                else:
-                    error_msg = result.get('error', 'Unknown error') if result else 'No result returned'
-                    raise Exception(f"Extraction failed: {error_msg}")
-
-            product_result, success = try_api_keys_with_fallback(
-                ordered_keys,
-                extract_operation,
-                f"product {asin}",
-                "✅ Successfully processed {context} with {provider} Key #{key_num}"
-            )
-
-            if success:
-                result = product_result
-            else:
+                # Convert cached format to result format
+                product_info = product_metadata.get(asin, {})
                 result = {
                     'asin': asin,
-                    'error': 'All API keys failed',
-                    'success': False
+                    'product_title': cached_product.get('product_title', product_info.get('title', f'Product {asin}')),
+                    'product_entities': cached_product.get('product_entities', {}),
+                    'product_info': cached_product.get('product_info', {}),
+                    'metadata': cached_product.get('metadata', {}),
+                    'metadata_lines': [f"    {k}: {v}" for k, v in cached_product.get('metadata', {}).items()],
+                    'success': True
                 }
+            else:
+                # Get API keys for processing
+                ordered_keys = get_all_api_keys_in_order()
+
+                def extract_operation(api_config, provider_name, key_index):
+                    result = extract_product_entities_only(asin, product_metadata, api_config, total_products)
+                    if result and result.get('success', False):
+                        return result
+                    else:
+                        error_msg = result.get('error', 'Unknown error') if result else 'No result returned'
+                        raise Exception(f"Extraction failed: {error_msg}")
+
+                product_result, success = try_api_keys_with_fallback(
+                    ordered_keys,
+                    extract_operation,
+                    f"product {asin}",
+                    ""  # 不打印成功消息
+                )
+
+                if success:
+                    result = product_result
+                else:
+                    result = {
+                        'asin': asin,
+                        'error': 'All API keys failed',
+                        'success': False
+                    }
 
             # Update progress
             with progress_lock:
@@ -259,7 +418,7 @@ def main():
                 'success': False
             }
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=102) as executor:
         # Submit all tasks
         future_to_asin = {executor.submit(process_single_product, asin): asin for asin in all_asins}
 
@@ -290,161 +449,253 @@ def main():
     total_reviews_to_process = sum(len(reviews) for reviews in reviews_by_asin.values())
     log_with_timestamp(f'📊 Total user preference reviews to process: {total_reviews_to_process}')
 
-    output_data = {
-        'user_id': TARGET_USER,
-        'products': []
-    }
+    successful_products = [result for result in all_results if result.get('success', False) and 'error' not in result]
 
-    product_user_entities_map = {}  # asin -> user_entities
+    # 用户偏好实体缓存检测，验证有效性并按需跳过提取
+    cached_user_preferences_map = {}
+    user_preferences_data = []
+    valid_cached_asins = set()
 
-    log_with_timestamp(f'🔍 Starting user preference entity extraction for {len(all_results)} products concurrently...')
-
-    successful_products = [result for result in all_results if 'error' not in result]
-
-    user_pref_progress_counter = {'completed_reviews': 0}
-    user_pref_progress_lock = threading.Lock()
-
-    log_with_timestamp(f'🔍 Processing {len(successful_products)} successful products: {[p["asin"] for p in successful_products[:3]]}...')
-
-    def process_user_preferences(result):
-        asin = result['asin']
-        log_with_timestamp(f'🔍 Starting user preference processing for {asin}')
-        product_user_entities = []
-
+    if os.path.exists(user_preferences_file):
         try:
-            # Rebuild reviews_by_asin for this ASIN to avoid concurrency issues
-            product_reviews = [r for r in user_reviews if r.get('asin') == asin]
-            log_with_timestamp(f'🔍 Found {len(product_reviews)} reviews for {asin}')
-            if product_reviews:
-                # Check if reviews have actual content
-                valid_reviews = []
-                for review in product_reviews:
-                    text = review.get('reviewText', '').strip()
-                    title = review.get('summary', '').strip()
-                    if text or title:
-                        valid_reviews.append(review)
+            with open(user_preferences_file, 'r', encoding='utf-8') as f:
+                cached_user_pref = json.load(f)
 
-                if not valid_reviews:
-                    log_with_timestamp(f'⚠️ No valid content in {len(product_reviews)} reviews for {asin}')
-                    product_user_entities_map[asin] = []
-                    with user_pref_progress_lock:
-                        user_pref_progress_counter['completed_reviews'] += len(product_reviews)
-                        current_reviews = user_pref_progress_counter['completed_reviews']
-                        if current_reviews % 100 == 0 or current_reviews == total_reviews_to_process:
-                            log_with_timestamp(f'📊 User preference progress: {current_reviews}/{total_reviews_to_process} reviews processed')
+            if cached_user_pref.get('user_id') == TARGET_USER:
+                cached_products = cached_user_pref.get('products', [])
+                for item in cached_products:
+                    asin = item.get('asin')
+                    entities = item.get('user_preference_entities')
+                    normalized_entities = normalize_user_preference_entities_with_sentiment(entities)
+                    if asin and asin in all_asins and is_valid_user_preference_entities(normalized_entities):
+                        cached_user_preferences_map[asin] = normalized_entities
+                        valid_cached_asins.add(asin)
+                        user_preferences_data.append({
+                            'asin': asin,
+                            'user_preference_entities': normalized_entities,
+                            'review_content': item.get('review_content', [])
+                        })
+                missing_asins = [asin for asin in all_asins if asin not in valid_cached_asins]
+                if not missing_asins:
+                    log_with_timestamp(f'📦 Using valid cached user preference entities for all {len(valid_cached_asins)} products from {user_preferences_file}')
+                else:
+                    log_with_timestamp(f'⚠️ Cached user preferences missing or invalid for {len(missing_asins)} ASIN(s), will re-extract for: {missing_asins}')
+            else:
+                log_with_timestamp(f'⚠️ Cached user preference entities belong to {cached_user_pref.get("user_id")}, expected {TARGET_USER}, will re-extract')
+        except Exception as e:
+            log_with_timestamp(f'⚠️ Error loading cached user preference entities: {e}, will re-extract')
+
+    product_user_entities_map = dict(cached_user_preferences_map)  # asin -> user_entities
+    missing_asins = [asin for asin in all_asins if asin not in valid_cached_asins]
+    sum(len(reviews_by_asin.get(asin, [])) for asin in missing_asins)
+    user_pref_cache_valid = len(missing_asins) == 0
+
+    if user_pref_cache_valid:
+        log_with_timestamp('⏭️ Valid cached user preference entities found. Skipping extraction and proceeding to entity matching.')
+    else:
+        log_with_timestamp(f'🔍 Starting user preference entity extraction for {len(missing_asins)} products concurrently with 102 workers...')
+
+        user_pref_progress_counter = {'completed_reviews': 0}
+        user_pref_progress_lock = threading.Lock()
+
+        target_products = [p for p in successful_products if p.get('asin') in missing_asins]
+        log_with_timestamp(f'🔍 Processing {len(target_products)} products needing user preference extraction: {[p["asin"] for p in target_products[:3]]}...')
+
+        # Store ASIN -> prompt mapping for later parsing
+        asin_prompt_map = {}
+        asin_review_map = {}
+        
+        def process_user_preferences(result):
+            asin = result['asin']
+            log_with_timestamp(f'🔍 Starting user preference processing for {asin}')
+
+            try:
+                # Rebuild reviews_by_asin for this ASIN to avoid concurrency issues
+                product_reviews = [r for r in user_reviews if r.get('asin') == asin]
+                log_with_timestamp(f'🔍 Found {len(product_reviews)} reviews for {asin}')
+                if product_reviews:
+                    # Check if reviews have actual content
+                    valid_reviews = []
+                    for review in product_reviews:
+                        text = review.get('reviewText', '').strip()
+                        title = review.get('summary', '').strip()
+                        if text or title:
+                            valid_reviews.append(review)
+
+                    if not valid_reviews:
+                        log_with_timestamp(f'⚠️ No valid content in {len(product_reviews)} reviews for {asin}')
+                        product_user_entities_map[asin] = {}
+                        with user_pref_progress_lock:
+                            user_pref_progress_counter['completed_reviews'] += len(product_reviews)
+                            current_reviews = user_pref_progress_counter['completed_reviews']
+                            progress_total = target_reviews_to_process if target_reviews_to_process else total_reviews_to_process
+                            if current_reviews % 100 == 0 or current_reviews == progress_total:
+                                log_with_timestamp(f'📊 User preference progress: {current_reviews}/{progress_total} reviews processed')
+                        return asin, []
+
+                # Get API keys for processing
+                ordered_keys = all_api_keys
+                log_with_timestamp(f'🔍 Using {len(ordered_keys)} API keys for {asin}')
+
+                def preference_operation(api_config, provider_name, key_index):
+                    llm_model = create_llm_with_config(api_config)
+                    # Just call LLM and return raw response - no JSON parsing here
+                    raw_response = prepare_content_and_extract_entities(valid_reviews, 'user preference', llm_model, asin=asin)
+                    # Store ASIN -> prompt mapping for later parsing
+                    # We'll use the prompt to match responses from api_raw_responses.json
+                    return raw_response
+
+                try:
+                    # Just call LLM - response will be saved to api_raw_responses.json
+                    # We'll parse all responses later
+                    raw_result = try_api_keys_with_fallback(
+                        ordered_keys,
+                        preference_operation,
+                        f"{asin} user preference extraction"
+                    )
+                    
+                    # Store the mapping for later parsing
+                    # We'll use this to match responses from api_raw_responses.json
+                    if raw_result:
+                        # Create a simple key from reviews content for matching
+                        review_content_key = ' '.join([r.get('summary', '') + ' ' + r.get('reviewText', '') for r in valid_reviews[:2]])[:200]
+                        asin_prompt_map[asin] = review_content_key
+                    
+                    # Return placeholder - will be filled later from api_raw_responses.json
+                    return asin, valid_reviews
+
+                except Exception as api_error:
+                    log_with_timestamp(f'❌ Exception in user preference extraction for {asin}: {api_error}')
                     return asin, []
 
-            # Get API keys for processing
-            ordered_keys = all_api_keys
-            log_with_timestamp(f'🔍 Using {len(ordered_keys)} API keys for {asin}')
+            except Exception as e:
+                log_with_timestamp(f'❌ Error processing user preferences for {asin}: {e}')
+                return asin, []
 
-            def preference_operation(api_config, provider_name, key_index):
-                llm_model = create_llm_with_config(api_config)
-                return prepare_content_and_extract_entities(valid_reviews, 'user preference', llm_model)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=102) as executor:
+            # Submit all tasks - just call LLM, don't parse JSON yet
+            future_to_result = {executor.submit(process_user_preferences, result): result for result in target_products}
 
-            try:
-                raw_result = try_api_keys_with_fallback(
-                    ordered_keys,
-                    preference_operation,
-                    f"{asin} user preference extraction"
-                )
-                log_with_timestamp(f'🔍 Raw result for {asin}: {raw_result} (type: {type(raw_result)})')
-                if raw_result is None:
-                    log_with_timestamp(f'❌ try_api_keys_with_fallback returned None for {asin}')
-                    product_user_entities, success = {}, False
-                elif isinstance(raw_result, tuple) and len(raw_result) == 2:
-                    # Check what the tuple contains
-                    first_elem, second_elem = raw_result
-                    if isinstance(first_elem, dict) and isinstance(second_elem, bool):
-                        # Format: ({category: [entities]}, success_bool)
-                        product_user_entities = first_elem  # The dict
-                        success = second_elem  # The bool
-                    elif isinstance(first_elem, (list, dict)) and isinstance(second_elem, (list, dict)):
-                        # Format: (list, dict) - old format
-                        entities_list, entities_dict = first_elem, second_elem
-                        product_user_entities = entities_dict if entities_dict else entities_list
-                        success = True
+            # Collect ASIN -> review_content mappings as requests complete
+            asin_review_map = {}
+            for future in concurrent.futures.as_completed(future_to_result):
+                result = future_to_result[future]
+                try:
+                    future_result = future.result()
+                    if len(future_result) == 2:
+                        asin, review_content = future_result
+                        asin_review_map[asin] = review_content
                     else:
-                        log_with_timestamp(f'❌ Unexpected tuple content: {type(first_elem)}, {type(second_elem)}')
-                        product_user_entities, success = {}, False
-                elif isinstance(raw_result, dict):
-                    # Direct dict format
-                    product_user_entities = raw_result
-                    success = True
-                elif isinstance(raw_result, list):
-                    # Legacy list format
-                    product_user_entities = raw_result
-                    success = True
-                else:
-                    log_with_timestamp(f'❌ Unexpected result type from try_api_keys_with_fallback: {raw_result}')
-                    product_user_entities, success = {}, False
-            except Exception as api_error:
-                log_with_timestamp(f'❌ Exception in user preference extraction for {asin}: {api_error}')
-                product_user_entities, success = [], False
+                        asin = result['asin']
+                        log_with_timestamp(f'⚠️ Unexpected result format for {asin}: {future_result}')
+                        asin_review_map[asin] = []
+                except Exception as e:
+                    asin = result['asin']
+                    log_with_timestamp(f'❌ Exception processing user preferences for {asin}: {e}')
+                    asin_review_map[asin] = []
 
-            if not success:
-                product_user_entities = []
-                user_entity_explanations = {}
-            else:
-                # Skip generating explanations for user preference entities
-                user_entity_explanations = {}
-
-            # Update global progress
-            with user_pref_progress_lock:
-                user_pref_progress_counter['completed_reviews'] += len(valid_reviews)
-                current_reviews = user_pref_progress_counter['completed_reviews']
-                if current_reviews % 100 == 0 or current_reviews == total_reviews_to_process:
-                    log_with_timestamp(f'📊 User preference progress: {current_reviews}/{total_reviews_to_process} reviews processed')
-
-            log_with_timestamp(f'✅ Completed user preference extraction for {asin}: {len(product_user_entities)} entities')
-
-            # Skip generating explanations for user preference entities
-            user_entity_explanations = {}
-
-            return asin, product_user_entities, user_entity_explanations, valid_reviews
-
-        except Exception as e:
-            log_with_timestamp(f'❌ Error processing user preferences for {asin}: {e}')
-            return asin, [], {}, []
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        # Submit all tasks
-        future_to_result = {executor.submit(process_user_preferences, result): result for result in successful_products}
-
-        # Collect results as they complete
-        user_preferences_data = []
-        for future in concurrent.futures.as_completed(future_to_result):
-            result = future_to_result[future]
+        log_with_timestamp(f'✅ All LLM requests completed. Now parsing responses from {api_responses_file}...')
+        
+        # Now parse all responses from api_raw_responses.json
+        # We need to match responses to ASINs by prompt content
+        if not os.path.exists(api_responses_file):
+            log_with_timestamp(f'❌ API responses file not found: {api_responses_file}')
+        else:
             try:
-                future_result = future.result()
-                if len(future_result) == 4:
-                    asin, user_entities, user_explanations, review_content = future_result
-                elif len(future_result) == 2:
-                    asin, user_entities = future_result
-                    user_explanations = {}
-                    review_content = []
-                else:
-                    raise ValueError(f"Unexpected result format: {future_result}")
+                with open(api_responses_file, 'r', encoding='utf-8') as f:
+                    all_responses = json.load(f)
+            except Exception as e:
+                log_with_timestamp(f'❌ Error reading API responses file: {e}')
+                all_responses = []
+            
+            # Filter responses by context and success
+            filtered_responses = [r for r in all_responses 
+                                 if r.get('context') == 'user_preference_extraction' 
+                                 and r.get('success', False)]
+            
+            log_with_timestamp(f'📋 Found {len(filtered_responses)} successful responses to parse')
+            
+            # Match responses to ASINs:
+            # Only do exact match by meta.asin saved at request time.
+            used_response_indices = set()
+            asin_to_response_indices = defaultdict(list)
 
-                product_user_entities_map[asin] = user_entities
-
-                # Store user preference data - now with categorized entities
+            for idx, response_data in enumerate(filtered_responses):
+                meta = response_data.get('meta') or {}
+                meta_asin = meta.get('asin')
+                if isinstance(meta_asin, str) and meta_asin.strip():
+                    asin_to_response_indices[meta_asin.strip().upper()].append(idx)
+            
+            for asin, review_content in asin_review_map.items():
+                matched_entities = {}
+                normalized_entities = {}
+                
+                # Exact match by meta.asin
+                if asin in asin_to_response_indices:
+                    # Pick the latest unused response for this ASIN (file append order is chronological)
+                    candidates = [i for i in asin_to_response_indices[asin] if i not in used_response_indices]
+                    if candidates:
+                        idx = candidates[-1]
+                        response_data = filtered_responses[idx]
+                        try:
+                            raw_response = response_data.get('raw_response', {})
+                            content = raw_response.get('content', '')
+                            if content:
+                                entities_result = process_user_preference_extraction_response(content)
+                                if isinstance(entities_result, tuple):
+                                    entities_list, entities_dict = entities_result
+                                    matched_entities = entities_dict if entities_dict else entities_list
+                                else:
+                                    matched_entities = entities_result
+                                normalized_entities = normalize_user_preference_entities_with_sentiment(matched_entities)
+                                used_response_indices.add(idx)
+                            else:
+                                log_with_timestamp(f'⚠️ Empty content in response {idx} for {asin} (meta.asin match)')
+                        except Exception as e:
+                            log_with_timestamp(f'⚠️ Error parsing response for {asin} (meta.asin match): {e}')
+                if not matched_entities:
+                    log_with_timestamp(
+                        f'⚠️ No matching response found for {asin} by meta.asin '
+                        f'(searched {len(filtered_responses)} responses, {len(used_response_indices)} already used)'
+                    )
+                
+                product_user_entities_map[asin] = normalized_entities if matched_entities else {}
+                
                 user_pref_item = {
                     'asin': asin,
-                    'user_preference_entities': user_entities,
+                    'user_preference_entities': normalized_entities if matched_entities else {},
                     'review_content': review_content
                 }
                 user_preferences_data.append(user_pref_item)
-            except Exception as e:
-                asin = result['asin']
-                log_with_timestamp(f'❌ Exception processing user preferences for {asin}: {e}')
-                product_user_entities_map[asin] = []
+                
+                if matched_entities:
+                    entity_container = normalized_entities if normalized_entities else matched_entities
+                    total_entities = sum(len(v) if isinstance(v, list) else 1 for v in entity_container.values()) if isinstance(entity_container, dict) else len(entity_container) if isinstance(entity_container, list) else 0
+                    log_with_timestamp(f'✅ Parsed entities for {asin}: {len(entity_container) if isinstance(entity_container, dict) else 1} categories, {total_entities} total entities')
+                else:
+                    log_with_timestamp(f'⚠️ No entities parsed for {asin}')
+
+    # Ensure every ASIN has a user preference entry (cache or extracted)
+    existing_user_pref_asins = {item.get('asin') for item in user_preferences_data}
+    for asin in all_asins:
+        if asin not in existing_user_pref_asins:
+            fallback_entities = product_user_entities_map.get(asin, {})
+            user_preferences_data.append({
+                'asin': asin,
+                'user_preference_entities': fallback_entities if fallback_entities else {},
+                'review_content': []
+            })
 
     log_with_timestamp(f'✅ Completed entity extraction for {len(all_results)} products.')
 
     log_with_timestamp('💾 Saving extracted entity data...')
 
-    product_entities_file = "/home/wlia0047/ar57_scratch/wenyu/product_entities.json"
+    # Get the workspace root directory (parent of stark directory)
+    workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    result_dir = os.path.join(workspace_root, "result")
+    os.makedirs(result_dir, exist_ok=True)
+    
+    product_entities_file = os.path.join(result_dir, "product_entities.json")
     product_entities_data = {
         'user_id': TARGET_USER,
         'products': []
@@ -549,18 +800,20 @@ def main():
         json.dump(product_entities_data, f, indent=2, ensure_ascii=False)
     log_with_timestamp(f'💾 Saved product entities to {product_entities_file}')
 
-    # 保存用户偏好实体数据到新的JSON文件
-    user_preferences_file = "/home/wlia0047/ar57_scratch/wenyu/user_preference_entities.json"
-    try:
-        user_pref_save_data = {
-            'user_id': TARGET_USER,
-            'products': user_preferences_data
-        }
-        with open(user_preferences_file, 'w', encoding='utf-8') as f:
-            json.dump(user_pref_save_data, f, indent=2, ensure_ascii=False)
-        log_with_timestamp(f'💾 Saved user preference entities to {user_preferences_file}')
-    except Exception as e:
-        log_with_timestamp(f'❌ Error saving user preference entities: {e}')
+    # 保存用户偏好实体数据到新的JSON文件（若未使用缓存则写入）
+    if user_pref_cache_valid:
+        log_with_timestamp(f'📦 Cached user preference entities reused, no need to resave {user_preferences_file}')
+    else:
+        try:
+            user_pref_save_data = {
+                'user_id': TARGET_USER,
+                'products': user_preferences_data
+            }
+            with open(user_preferences_file, 'w', encoding='utf-8') as f:
+                json.dump(user_pref_save_data, f, indent=2, ensure_ascii=False)
+            log_with_timestamp(f'💾 Saved user preference entities to {user_preferences_file}')
+        except Exception as e:
+            log_with_timestamp(f'❌ Error saving user preference entities: {e}')
 
     log_with_timestamp('✅ Product entity extraction completed. Proceeding to entity matching...')
 
@@ -573,7 +826,7 @@ def main():
     log_with_timestamp('🎯 Entity extraction phase finished.')
 
     # 加载用户偏好数据并合并到商品数据中
-    user_preferences_file = "/home/wlia0047/ar57_scratch/wenyu/user_preference_entities.json"
+    # user_preferences_file already defined above
     try:
         with open(user_preferences_file, 'r', encoding='utf-8') as f:
             user_pref_data = json.load(f)
@@ -582,7 +835,9 @@ def main():
         user_entities_map = {}
         for product in user_pref_data.get('products', []):
             asin = product.get('asin')
-            user_entities = product.get('user_preference_entities', {})
+            user_entities = normalize_user_preference_entities_with_sentiment(
+                product.get('user_preference_entities', {})
+            )
             if asin:
                 user_entities_map[asin] = user_entities
 
@@ -598,39 +853,75 @@ def main():
         log_with_timestamp(f'❌ Error loading user preference data: {e}')
         # 如果加载失败，继续处理，但没有用户偏好数据
 
-    matched_products = perform_entity_matching(save_data['products'])
+    # 实体匹配及结果缓存逻辑（支持跳过已存在且有效的结果）
+    matched_entities_file = os.path.join(result_dir, "entity_matching_results.json")
+    matched_products = None
+    matched_data = None
 
-    # 保存实体匹配结果到新文件
-    matched_entities_file = "/home/wlia0047/ar57_scratch/wenyu/entity_matching_results.json"
-    try:
+    if os.path.exists(matched_entities_file):
+        try:
+            with open(matched_entities_file, 'r', encoding='utf-8') as f:
+                cached_matched = json.load(f)
+
+            cached_user = cached_matched.get('user_id')
+            cached_products = cached_matched.get('products', [])
+            cached_asins = {p.get('asin') for p in cached_products if p.get('asin')}
+            expected_asins = {p.get('asin') for p in save_data['products'] if p.get('asin')}
+
+            if (
+                cached_user == TARGET_USER
+                and cached_products
+                and expected_asins
+                and cached_asins == expected_asins
+            ):
+                log_with_timestamp(
+                    f'📦 Using cached matched entity data for {len(cached_products)} products from {matched_entities_file}'
+                )
+                matched_products = cached_products
+                matched_data = cached_matched
+        except Exception as e:
+            log_with_timestamp(f'⚠️ Error loading cached matched entities: {e}, will recompute')
+
+    # 如果没有有效缓存，则重新执行实体匹配
+    if matched_products is None:
+        log_with_timestamp('🎯 No valid cached matched entities found, running entity matching...')
+        matched_products = perform_entity_matching(save_data['products'])
         matched_data = {
             'user_id': TARGET_USER,
             'products': matched_products
         }
-        with open(matched_entities_file, 'w', encoding='utf-8') as f:
-            json.dump(matched_data, f, indent=2, ensure_ascii=False)
-        log_with_timestamp(f'💾 Saved matched entity data to {matched_entities_file}')
+        try:
+            with open(matched_entities_file, 'w', encoding='utf-8') as f:
+                json.dump(matched_data, f, indent=2, ensure_ascii=False)
+            log_with_timestamp(f'💾 Saved matched entity data to {matched_entities_file}')
+        except Exception as e:
+            log_with_timestamp(f'❌ Error saving matched entity data: {e}')
+
+    # 在实体匹配完成（无论是缓存还是新计算）后，进行维度规格标准化
+    try:
+        normalize_dimensions_process()
+        log_with_timestamp('✅ Standardized dimensions for matched entities.')
     except Exception as e:
-        log_with_timestamp(f'❌ Error saving matched entity data: {e}')
+        log_with_timestamp(f'⚠️ Failed to normalize dimensions: {e}')
 
     # 为匹配实体类别大于等于3个的产品生成查询语句
-    try:
-        products_with_queries = generate_queries_for_matched_products(matched_data, get_all_api_keys_in_order())
-
-        # 保存生成的查询到单独的文件
-        if products_with_queries:
-            generated_queries_file = "/home/wlia0047/ar57_scratch/wenyu/generated_queries.json"
-            queries_data = {
-                'user_id': TARGET_USER,
-                'products': products_with_queries
-            }
-            with open(generated_queries_file, 'w', encoding='utf-8') as f:
-                json.dump(queries_data, f, indent=2, ensure_ascii=False)
-            log_with_timestamp(f'💾 Saved generated queries for {len(products_with_queries)} products to {generated_queries_file}')
-        else:
-            log_with_timestamp('⚠️ No queries were generated')
-    except Exception as e:
-        log_with_timestamp(f'❌ Error generating queries: {e}')
+    # try:
+    #     products_with_queries = generate_queries_for_matched_products(matched_data, get_all_api_keys_in_order())
+    #
+    #     # 保存生成的查询到单独的文件
+    #     if products_with_queries:
+    #         generated_queries_file = os.path.join(result_dir, "generated_queries.json")
+    #         queries_data = {
+    #             'user_id': TARGET_USER,
+    #             'products': products_with_queries
+    #         }
+    #         with open(generated_queries_file, 'w', encoding='utf-8') as f:
+    #             json.dump(queries_data, f, indent=2, ensure_ascii=False)
+    #         log_with_timestamp(f'💾 Saved generated queries for {len(products_with_queries)} products to {generated_queries_file}')
+    #     else:
+    #         log_with_timestamp('⚠️ No queries were generated')
+    # except Exception as e:
+    #     log_with_timestamp(f'❌ Error generating queries: {e}')
 
     print_entity_matching_results()
 

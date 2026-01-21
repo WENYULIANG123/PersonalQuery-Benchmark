@@ -73,7 +73,7 @@ export HF_HOME=/home/wlia0047/ar57_scratch/wenyu/hf_cache
 # Enable unbuffered output for real-time logging
 export PYTHONUNBUFFERED=1
 # Use stdbuf to ensure unbuffered output from Python
-stdbuf -o0 -e0 python3 /home/wlia0047/ar57/wenyu/stark/code/generate_grammer_query.py
+stdbuf -o0 -e0 python3 /home/wlia0047/ar57/wenyu/stark/code/query_generation/generate_grammer_query.py
 
 # Job completion information
 echo ""

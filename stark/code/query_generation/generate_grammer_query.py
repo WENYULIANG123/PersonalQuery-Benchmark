@@ -6,7 +6,9 @@ import time
 from typing import List, Dict, Any
 
 # 导入LLM模型接口
-sys.path.append('/home/wlia0047/ar57/wenyu/stark/code')
+CODE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if CODE_DIR not in sys.path:
+    sys.path.append(CODE_DIR)
 from model import get_gm_model
 
 def assess_grammar_dna_from_analysis_file(analysis_file_path):

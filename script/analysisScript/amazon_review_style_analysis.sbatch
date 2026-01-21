@@ -67,6 +67,6 @@ conda activate /home/wlia0047/ar57_scratch/wenyu/stark
 
 # Run the simplified analysis script using SiliconFlow API
 export HF_HOME=/home/wlia0047/ar57_scratch/wenyu/hf_cache
-python3 /home/wlia0047/ar57/wenyu/stark/code/amazon_review_style_analysis.py
+python3 /home/wlia0047/ar57/wenyu/stark/code/analysis/review_style/amazon_review_spelling_error_analysis_beauty.py
 
 

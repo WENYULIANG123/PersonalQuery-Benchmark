@@ -2,7 +2,7 @@
 """
 Amazon Review Spelling Error Analysis using SiliconFlow LLM
 
-This script analyzes spelling errors in Amazon arts and crafts product reviews by:
+This script analyzes spelling errors in Amazon beauty product reviews by:
 1. Extracting and classifying spelling errors using mandatory error categorization system
 2. Validating error classifications and explanations
 3. Generating error-aware query modifications for user behavior simulation
@@ -14,8 +14,10 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Add the current directory to Python path to import model.py
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# Ensure stark/code is on Python path so we can import model.py
+CODE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if CODE_DIR not in sys.path:
+    sys.path.append(CODE_DIR)
 from model import get_gm_model, call_llm_with_retry
 
 import nltk
@@ -181,9 +183,7 @@ def create_spelling_analysis_prompt(sentence):
 "{sentence}"
 
 **Analysis Requirements:**
-You are an expert proofreader specializing in Amazon arts and crafts product reviews. Analyze this sentence for genuine spelling errors and classify each error according to the mandatory error classification system.
-
-**IMPORTANT**: Provide ONLY the final JSON result. Do NOT include any reasoning, explanation, or thinking process in your response. Be concise and direct.
+You are an expert proofreader specializing in Amazon beauty product reviews. Analyze this sentence for genuine spelling errors and classify each error according to the mandatory error classification system.
 
 ### CRITICAL RESTRICTIONS (ZERO TOLERANCE):
 🚫 **NO CAPITALIZATION**: Never report case differences ('i' vs 'I', 'regimen' vs 'Regimen').
@@ -209,13 +209,13 @@ You are an expert proofreader specializing in Amazon arts and crafts product rev
 
 ### AMAZON & DOMAIN SPECIFIC RULES:
 - **AMAZON CONTEXT**: Terms like "Prime", "Subscribe & Save" are valid platform-specific language.
-- **DOMAIN EXPERTISE**: Arts and crafts terms are correct including:
-  - **Crafting Materials**: "cardstock", "scrapbook", "embossing powder", "glitter", "ribbon", "yarn", "fabric", "felt", "canvas"
-  - **Tools & Techniques**: "die cutting", "embossing", "stamping", "quilting", "crocheting", "knitting", "sewing", "punching"
-  - **Art Supplies**: "watercolor", "acrylic", "oil paint", "sketchbook", "easel", "palette", "brushes", "pencils", "markers"
-  - **Paper Crafts**: "origami", "card making", "scrapbooking", "papercraft", "decoupage"
-- **FABRIC vs CLOTHING DISTINCTION**: In arts and crafts reviews, "fabric" and "cloth" are legitimate crafting materials. Only correct if context clearly indicates non-crafting usage.
-- **BRAND PROTECTION**: Respect potential brand names (e.g., "Cricut", "Silhouette", "Sizzix", "Spellbinders"). If unsure, favor "No Error".
+- **DOMAIN EXPERTISE**: Beauty/skin care terms are correct including:
+  - **Fabric/Textile Terms**: "cloths" (face wipes, microfiber cloths), "wash cloths", "microfiber", "flannel", "terry cloth", "cotton rounds", "towelettes"
+  - **Product Categories**: "face wipes", "cleansing cloths", "makeup remover cloths", "eyelash curler", "water flosser", "emery board", "nail buffer"
+  - **Skin Care Terms**: "moisturizer", "cleanser", "toner", "serum", "hyaluronic acid", "retinol", "vitamin C", "peptide", "hyaluronic", "ceramide"
+  - **Beauty Tools**: "foundation brush", "beauty blender", "concealer brush", "eyeshadow palette", "lip liner", "mascara wand"
+- **FABRIC vs CLOTHING DISTINCTION**: In beauty reviews, "cloths" typically refers to cleansing/face wipes, not clothing items. Only correct if context clearly indicates garments.
+- **BRAND PROTECTION**: Respect potential brand names (e.g., "Iryasa", "Isntree", "The Ordinary"). If unsure, favor "No Error".
 
 ### ERROR CLASSIFICATION SYSTEM (MANDATORY):
 Each reported error MUST be classified into ONE SPECIFIC SUBCATEGORY from the following system. If an error doesn't fit any subcategory exactly, DO NOT report it.
@@ -815,10 +815,10 @@ def analyze_text_with_llm(text, llm_model, start_time=0):
     # sys.stdout.flush()
 
     # Initialize second_pass_errors for compatibility
-    second_pass_errors = []
+        second_pass_errors = []
 
     print(f"[{time.time() - start_time:.1f}s] 📊 Total errors found: {len(all_errors)} (first pass only)", flush=True)
-    sys.stdout.flush()
+                    sys.stdout.flush()
 
     # # COMMENTED OUT: Wait before validation
     # if all_errors:
@@ -882,7 +882,7 @@ def process_users(input_file, output_file, llm_model, start_time=0):
         selected_user_id, review_count = qualified_users[0]
 
         print(f"[{time.time() - start_time:.1f}s] 👤 Selected user {selected_user_id} with {review_count} reviews", flush=True)
-        sys.stdout.flush()
+                        sys.stdout.flush()
 
         # Extract all review texts for the selected user
         user_data = data[selected_user_id]
@@ -893,19 +893,19 @@ def process_users(input_file, output_file, llm_model, start_time=0):
             if text:
                 user_reviews.append(text)
 
-        if not user_reviews:
+            if not user_reviews:
             print(f"[{time.time() - start_time:.1f}s] ❌ No review texts found for user {selected_user_id}", flush=True)
-            sys.stdout.flush()
-            return None
+                sys.stdout.flush()
+                return None
 
-        # Combine all reviews for this user
+            # Combine all reviews for this user
         max_reviews = len(user_reviews)
         selected_reviews = user_reviews
         combined_text = ' '.join(selected_reviews)
 
         print(f"[{time.time() - start_time:.1f}s] ✅ Using {max_reviews}/{len(user_reviews)} reviews for user {selected_user_id}", flush=True)
-        print(f"[{time.time() - start_time:.1f}s] 📏 Combined text length: {len(combined_text)} characters", flush=True)
-        sys.stdout.flush()
+            print(f"[{time.time() - start_time:.1f}s] 📏 Combined text length: {len(combined_text)} characters", flush=True)
+            sys.stdout.flush()
 
     except Exception as e:
         print(f"[{time.time() - start_time:.1f}s] ❌ Error reading/parsing file: {e}", flush=True)

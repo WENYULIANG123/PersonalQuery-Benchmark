@@ -21,8 +21,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 
-# Add the current directory to Python path to import model.py
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# Ensure stark/code is on Python path so we can import model.py
+CODE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if CODE_DIR not in sys.path:
+    sys.path.append(CODE_DIR)
 from model import get_gm_model
 
 import nltk
