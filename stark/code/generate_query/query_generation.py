@@ -136,8 +136,8 @@ def generate_queries_for_matched_products(data, all_api_keys):
             product['generated_query'] = ""
             return product, ""
 
-    # Process query generation concurrently with 5 workers
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    # Process query generation concurrently with 102 workers
+    with concurrent.futures.ThreadPoolExecutor(max_workers=102) as executor:
         # Submit all tasks with index
         future_to_product = {executor.submit(process_query_generation, product, idx): (product, idx)
                            for idx, product in enumerate(products_with_many_matches, 1)}

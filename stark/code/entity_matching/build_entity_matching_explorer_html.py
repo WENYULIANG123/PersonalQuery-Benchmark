@@ -285,8 +285,14 @@ def main() -> None:
           <label>自动显示商品完整信息数量（0=关闭）</label>
           <input id="maxProductInfos" type="number" min="0" max="50" step="1" value="0" />
         </div>
-        <div class="hint" style="margin-top: 22px;">
-          渲染后在左下角一次性展示前 N 个商品信息
+        <div>
+          <label>指定节点 ID (覆盖默认行为)</label>
+          <input id="nodeId" type="text" placeholder="例如: 107" />
+        </div>
+      </div>
+      <div class="row">
+        <div class="hint">
+          填写“指定节点 ID”后，点击按钮将直接以该节点为中心进行渲染。
         </div>
       </div>
       <button id="renderBtn">Display Semi-structured Data</button>
@@ -1066,6 +1072,17 @@ def main() -> None:
       const maxValues = parseInt(document.getElementById("maxValues").value, 10) || 0;
       const traversalMode = document.getElementById("traversalMode").value || "undirected";
       const n = parseInt(document.getElementById("maxProductInfos").value, 10) || 0;
+
+      const nodeIdStr = document.getElementById("nodeId").value.trim();
+      if (nodeIdStr) {{
+        const customId = parseInt(nodeIdStr, 10);
+        if (isNaN(customId) || !nodesById[customId]) {{
+          alert("无效的节点 ID: " + nodeIdStr);
+          return;
+        }}
+        drawMulti([customId], hops, maxEdges, seed, traversalMode);
+        return;
+      }}
 
       // If maxProductInfos>0, deterministically pick first N products by ASIN and show their full entities.
       if (n > 0) {{

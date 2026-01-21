@@ -350,7 +350,7 @@ def main():
     if cached_count > 0:
         log_with_timestamp(f'📦 Found {cached_count} products in cache, {need_extraction_count} products need extraction')
     
-    log_with_timestamp(f'🔄 Processing {len(all_asins)} products concurrently with 5 workers...')
+    log_with_timestamp(f'🔄 Processing {len(all_asins)} products concurrently with 102 workers...')
 
     progress_counter = {'completed': 0}
     progress_lock = threading.Lock()
@@ -361,7 +361,7 @@ def main():
             if asin in cached_product_data:
                 cached_product = cached_product_data[asin]
                 #log_with_timestamp(f'📦 Using cached data for product {asin}')
-                
+
                 # Convert cached format to result format
                 product_info = product_metadata.get(asin, {})
                 result = {
@@ -389,7 +389,7 @@ def main():
                     ordered_keys,
                     extract_operation,
                     f"product {asin}",
-                    "✅ Successfully processed {context} with {provider} Key #{key_num}"
+                    ""  # 不打印成功消息
                 )
 
                 if success:
@@ -418,7 +418,7 @@ def main():
                 'success': False
             }
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=102) as executor:
         # Submit all tasks
         future_to_asin = {executor.submit(process_single_product, asin): asin for asin in all_asins}
 
@@ -493,7 +493,7 @@ def main():
     if user_pref_cache_valid:
         log_with_timestamp('⏭️ Valid cached user preference entities found. Skipping extraction and proceeding to entity matching.')
     else:
-        log_with_timestamp(f'🔍 Starting user preference entity extraction for {len(missing_asins)} products concurrently...')
+        log_with_timestamp(f'🔍 Starting user preference entity extraction for {len(missing_asins)} products concurrently with 102 workers...')
 
         user_pref_progress_counter = {'completed_reviews': 0}
         user_pref_progress_lock = threading.Lock()
@@ -572,7 +572,7 @@ def main():
                 log_with_timestamp(f'❌ Error processing user preferences for {asin}: {e}')
                 return asin, []
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=102) as executor:
             # Submit all tasks - just call LLM, don't parse JSON yet
             future_to_result = {executor.submit(process_user_preferences, result): result for result in target_products}
 
