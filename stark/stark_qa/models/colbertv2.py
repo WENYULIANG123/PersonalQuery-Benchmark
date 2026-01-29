@@ -111,11 +111,11 @@ class Colbertv2(ModelForSTaRKQA):
         self.kmeans_iterations = kmeans_iterations
 
         # Handle strategy parameter
-        valid_strategies = ['original', 'character', 'embedding', 'other', 'typo', 'wordnet', 'error_aware', 'grammar_aware', 'all']
+        valid_strategies = ['original', 'character', 'embedding', 'other', 'typo', 'wordnet', 'error_aware', 'grammar_aware', 'kg_query', 'all']
         if strategy not in valid_strategies:
             raise ValueError(f"Invalid strategy '{strategy}'. Must be one of: {valid_strategies}")
         self.strategy = strategy
-        self.strategies = ['original', 'character', 'embedding', 'other', 'typo', 'wordnet', 'error_aware', 'grammar_aware'] if strategy == 'all' else [strategy]
+        self.strategies = ['original', 'character', 'embedding', 'other', 'typo', 'wordnet', 'error_aware', 'grammar_aware', 'kg_query'] if strategy == 'all' else [strategy]
         self.dataset_root = dataset_root
 
         # Determine query file name based on strategy
@@ -191,7 +191,22 @@ class Colbertv2(ModelForSTaRKQA):
         self.docid2pid = {idx: i for i, idx in enumerate(indices)}
         self.pid2docid = {i: idx for i, idx in enumerate(indices)}
 
-        if not osp.exists(doc_tsv_path):
+        regenerate = False
+        if osp.exists(doc_tsv_path):
+            # Verify existing doc.tsv matches current candidate count
+            try:
+                with open(doc_tsv_path, 'r') as f:
+                    line_count = sum(1 for _ in f)
+                if line_count != len(indices):
+                    print(f"⚠️ Warning: Existing {doc_tsv_path} has {line_count} lines, but SKB has {len(indices)} candidates. Regenerating...")
+                    regenerate = True
+                else:
+                    print(f"✅ Existing {doc_tsv_path} matches candidate count ({line_count}).")
+            except Exception as e:
+                print(f"⚠️ Error checking {doc_tsv_path}: {e}. Regenerating...")
+                regenerate = True
+
+        if not osp.exists(doc_tsv_path) or regenerate:
             corpus = {self.docid2pid[idx]: skb.get_doc_info(idx, add_rel=add_rel, compact=True)
                       for idx in tqdm(indices, desc="Gathering documents")}
             
@@ -297,8 +312,8 @@ class Colbertv2(ModelForSTaRKQA):
 
             print(f"\n🔄 Phase 1/4: Starting document encoding...")
             try:
-                # Build the index (don't force overwrite since we already checked for existing)
-                indexer.index(name=index_name, collection=self.doc_tsv_path, overwrite=False)
+                # Build the index (force overwrite since we already checked for completeness)
+                indexer.index(name=index_name, collection=self.doc_tsv_path, overwrite=True)
 
                 # Phase completions (estimated based on typical ColBERT processing)
                 phase_times = {
@@ -431,6 +446,23 @@ class Colbertv2(ModelForSTaRKQA):
                             f.write(f"{i}\t{row.query}\n")
                 else:
                     print(f"Warning: Variants file not found for strategy {strategy}, skipping...")
+                    continue
+            elif strategy == 'kg_query':
+                # Custom handling for kg_query
+                strategy_split = "variants"
+                # For kg_query, we need to ensure the query TSV is created from our source CSV
+                # Source: /home/wlia0047/ar57/wenyu/result/generated_kg_queries.csv
+                source_csv = "/home/wlia0047/ar57/wenyu/result/generated_kg_queries.csv"
+                if os.path.exists(source_csv):
+                    df = pd.read_csv(source_csv)
+                    query_tsv_path = f"/home/wlia0047/ar57/wenyu/stark/Colbertv2eval/query_{strategy}_variants.tsv"
+                    with open(query_tsv_path, 'w') as f:
+                        for i, row in enumerate(df.itertuples()):
+                            # Handle different column names if necessary
+                            query_text = row.query
+                            f.write(f"{i}\t{query_text}\n")
+                else:
+                    print(f"Warning: Source CSV not found for strategy {strategy}: {source_csv}, skipping...")
                     continue
             else:
                 strategy_dataset_root = create_strategy_dataset(strategy)
@@ -591,14 +623,17 @@ class Colbertv2(ModelForSTaRKQA):
         all_scores = {}
         min_score = min(score_dict.values()) if score_dict else -float('inf')
 
+
         # Set very low scores for all candidates first
         for doc_id in self.candidate_ids:
             all_scores[doc_id] = min_score - 1.0  # Even lower than the lowest retrieved score
 
         # Update scores for retrieved documents
+        # Skip PIDs that are not in pid2docid (e.g., attribute nodes)
         for pid, score in score_dict.items():
-            doc_id = self.pid2docid[pid]
-            all_scores[doc_id] = score
+            if pid in self.pid2docid:
+                doc_id = self.pid2docid[pid]
+                all_scores[doc_id] = score
 
         return all_scores
 

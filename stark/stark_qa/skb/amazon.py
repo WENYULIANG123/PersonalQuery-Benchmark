@@ -103,7 +103,11 @@ class AmazonSKB(SKB):
         # Initialize directory paths early
         if self.root is not None:
             self.raw_data_dir = osp.join(self.root, "raw")
-            self.processed_data_dir = osp.join(self.root, "processed")
+            # If node_info.pkl exists directly in root, use root as processed_data_dir
+            if osp.exists(osp.join(self.root, "node_info.pkl")):
+                self.processed_data_dir = self.root
+            else:
+                self.processed_data_dir = osp.join(self.root, "processed")
         else:
             # For HF cache mode, these will be set later
             self.raw_data_dir = None
@@ -242,7 +246,17 @@ class AmazonSKB(SKB):
         elif 'review' in attribute:
             chunk = ''
             if node_attr:
-                scores = [0 if pd.isnull(review['vote']) else int(review['vote'].replace(",", "")) for review in node_attr]
+                scores = []
+                for review in node_attr:
+                    vote_val = review.get('vote')
+                    if pd.isnull(vote_val) or vote_val is None:
+                        scores.append(0)
+                    else:
+                        try:
+                            # Handle cases where vote might already be int or string "5,000"
+                            scores.append(int(str(vote_val).replace(",", "")))
+                        except (ValueError, AttributeError):
+                            scores.append(0)
                 ranks = np.argsort(-np.array(scores))
                 for idx, review_idx in enumerate(ranks):
                     review = node_attr[review_idx]
@@ -287,7 +301,11 @@ class AmazonSKB(SKB):
             return f'color name: {self[idx].color_name}'
         
         node = self[idx]
-        doc = f'- product: {node.title}\n'
+        title = getattr(node, 'title', 
+                getattr(node, 'brand_name', 
+                getattr(node, 'category_name', 
+                getattr(node, 'color_name', 'Unnamed Node'))))
+        doc = f'- product: {title}\n'
         if hasattr(node, 'brand'):
             doc += f'- brand: {node.brand}\n'
         try:
@@ -295,38 +313,31 @@ class AmazonSKB(SKB):
             doc += f'- dimensions: {dimensions}\n- weight: {weight}\n'
         except:
             pass
-        if node.description:
-            description = " ".join(node.description).strip(" ")
+        description_attr = getattr(node, 'description', None)
+        if description_attr:
+            description = " ".join(description_attr).strip(" ")
             if description:
                 doc += f'- description: {description}\n'
         
         feature_text = '- features: \n'
-        if node.feature:
-            for feature_idx, feature in enumerate(node.feature):
+        feature_attr = getattr(node, 'feature', None)
+        if feature_attr:
+            for feature_idx, feature in enumerate(feature_attr):
                 if feature and 'asin' not in feature.lower():
                     feature_text += f'#{feature_idx + 1}: {feature}\n'
         else:
             feature_text = ''
         
-        if node.review:
-            review_text = '- reviews: \n'
-            scores = [0 if pd.isnull(review['vote']) else int(review['vote'].replace(",", "")) for review in node.review]
-            ranks = np.argsort(-np.array(scores))
-            for i, review_idx in enumerate(ranks):
-                review = node.review[review_idx]
-                review_text += f'#{review_idx + 1}:\nsummary: {review["summary"]}\ntext: "{review["reviewText"]}"\n'
-                if i > self.max_entries:
-                    break
+        if self.max_entries > 0:
+            review_text = self.get_chunk_info(idx, 'review')
+            if review_text:
+                review_text = '- reviews: ' + review_text + '\n'
+            
+            qa_text = self.get_chunk_info(idx, 'qa')
+            if qa_text:
+                qa_text = '- Q&A: ' + qa_text + '\n'
         else:
             review_text = ''
-        
-        if node.qa:
-            qa_text = '- Q&A: \n'
-            for qa_idx, qa in enumerate(node.qa):
-                qa_text += f'#{qa_idx + 1}:\nquestion: "{qa["question"]}"\nanswer: "{qa["answer"]}"\n'
-                if qa_idx > self.max_entries:
-                    break
-        else:
             qa_text = ''
         
         doc += feature_text + review_text + qa_text
@@ -354,9 +365,18 @@ class AmazonSKB(SKB):
         """
         doc = ''
         rel_types = self.rel_type_lst() if rel_types is None else rel_types
-        n_also_buy = self.get_neighbor_nodes(idx, 'also_buy')
-        n_also_view = self.get_neighbor_nodes(idx, 'also_view')
-        n_has_brand = self.get_neighbor_nodes(idx, 'has_brand')
+        try:
+            n_also_buy = self.get_neighbor_nodes(idx, 'also_buy')
+        except (KeyError, ValueError):
+            n_also_buy = []
+        try:
+            n_also_view = self.get_neighbor_nodes(idx, 'also_view')
+        except (KeyError, ValueError):
+            n_also_view = []
+        try:
+            n_has_brand = self.get_neighbor_nodes(idx, 'has_brand')
+        except (KeyError, ValueError):
+            n_has_brand = []
 
         str_also_buy = [f"#{idx + 1}: " + self[i].title + '\n' for idx, i in enumerate(n_also_buy)]
         str_also_view = [f"#{idx + 1}: " + self[i].title + '\n' for idx, i in enumerate(n_also_view)]
@@ -368,9 +388,10 @@ class AmazonSKB(SKB):
             str_also_buy = ''
         if not str_also_view:
             str_also_view = ''
-        str_has_brand = ''
         if n_has_brand:
-            str_has_brand = f'  brand: {self[n_has_brand[0]].brand_name}\n'
+            brand_node = self[n_has_brand[0]]
+            brand_name = getattr(brand_node, 'brand_name', getattr(brand_node, 'title', 'Unknown Brand'))
+            str_has_brand = f'  brand: {brand_name}\n'
             
         str_also_buy = ''.join(str_also_buy)
         str_also_view = ''.join(str_also_view)
@@ -406,10 +427,61 @@ class AmazonSKB(SKB):
         if self.processed_data_dir is not None and osp.exists(osp.join(self.processed_data_dir, 'node_info.pkl')):
             print(f'Load processed data from {self.processed_data_dir}')
             loaded_files = load_files(self.processed_data_dir)
-            loaded_files.update({
-                'node_types': torch.zeros(len(loaded_files['node_info'])),
-                'node_type_dict': {0: 'product'}
-            })
+            
+            # Detect node-to-type mapping (huge dict) and convert to standard type mapping + tensor
+            node_info = loaded_files['node_info']
+            num_nodes = len(node_info)
+            
+            if 'node_type_dict' in loaded_files and len(loaded_files['node_type_dict']) > 100:
+                print("DEBUG: Converting node-level node_type_dict to standard format")
+                node_to_type = loaded_files['node_type_dict']
+                unique_types = sorted(list(set(node_to_type.values())))
+                type_name_to_id = {t: i for i, t in enumerate(unique_types)}
+                
+                loaded_files['node_type_dict'] = {i: t for i, t in enumerate(unique_types)}
+                node_types = torch.zeros(num_nodes, dtype=torch.long)
+                for nid, tname in node_to_type.items():
+                    if nid < num_nodes:
+                        node_types[nid] = type_name_to_id[tname]
+                loaded_files['node_types'] = node_types
+            
+            # Ensure standard mappings exist
+            if 'node_type_dict' not in loaded_files:
+                loaded_files['node_type_dict'] = {0: 'product'}
+            if 'node_types' not in loaded_files:
+                loaded_files['node_types'] = torch.zeros(num_nodes, dtype=torch.long)
+            
+            # Check for sparse node info and try to join with full data from parent directory
+            first_key = list(node_info.keys())[0] if node_info else None
+            # Robust check for missing attributes - products should have 'title'
+            is_sparse = first_key is not None and node_info[first_key].get('node_type') == 'product' and 'title' not in node_info[first_key]
+            
+            if is_sparse:
+                parent_dir = osp.dirname(self.processed_data_dir)
+                full_ni_path = osp.join(parent_dir, 'node_info.pkl')
+                
+                if not osp.exists(full_ni_path):
+                    # Try searching in cache subdirectories
+                    cache_dir = osp.join(parent_dir, 'cache')
+                    if osp.exists(cache_dir):
+                        for sub in os.listdir(cache_dir):
+                            potential_path = osp.join(cache_dir, sub, 'node_info.pkl')
+                            if osp.exists(potential_path) and os.path.getsize(potential_path) > 100 * 1024 * 1024: # > 100MB
+                                full_ni_path = potential_path
+                                break
+                if osp.exists(full_ni_path):
+                    print(f"DEBUG: Joining sparse product nodes with full metadata from {full_ni_path}")
+                    import pickle
+                    try:
+                        with open(full_ni_path, 'rb') as f:
+                            full_ni = pickle.load(f)
+                        # Update existing nodes with full metadata
+                        for nid, info in full_ni.items():
+                            if nid in node_info:
+                                node_info[nid].update(info)
+                    except Exception as e:
+                        print(f"Warning: Joint metadata load failed: {e}")
+            
             return loaded_files
         
         print('Check data downloading...')
@@ -533,7 +605,19 @@ class AmazonSKB(SKB):
         Returns:
             dict: Post-processed data.
         """
-        print(f'Adding meta link types {meta_link_types}')
+        # Check if post-processed data is already cached
+        if cache_path is not None and osp.exists(cache_path):
+            required_files = ['node_info.pkl', 'edge_index.pt', 'edge_types.pt', 
+                            'edge_type_dict.pkl', 'node_type_dict.pkl', 'node_types.pt']
+            all_exist = all(osp.exists(osp.join(cache_path, f)) for f in required_files)
+            
+            if all_exist:
+                print(f'📦 Loading post-processed data (with meta links) from cache: {cache_path}')
+                cached_data = load_files(cache_path)
+                print(f'✅ Post-processed data loaded from cache')
+                return cached_data
+        
+        print(f'🔨 Adding meta link types {meta_link_types} (will be cached)')
         node_info = raw_info['node_info']
         edge_type_dict = raw_info['edge_type_dict']
         node_type_dict = raw_info['node_type_dict']
@@ -583,6 +667,7 @@ class AmazonSKB(SKB):
             'node_types': node_types
         }
         if cache_path is not None:
+            print(f'💾 Saving post-processed data to cache: {cache_path}')
             save_files(cache_path, **files)
         return files
     

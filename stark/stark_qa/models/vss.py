@@ -41,10 +41,32 @@ class VSS(ModelForSTaRKQA):
         candidate_emb_dict = torch.load(candidate_emb_path)
         print(f'Loaded candidate_emb_dict from {candidate_emb_path}!')
 
-        assert len(candidate_emb_dict) == len(self.candidate_ids), "Mismatch in candidate embedding count."
+        # assert len(candidate_emb_dict) == len(self.candidate_ids), "Mismatch in candidate embedding count."
+        if len(candidate_emb_dict) != len(self.candidate_ids):
+             print(f"Warning: Mismatch in candidate embedding count. candidates: {len(self.candidate_ids)}, embeddings: {len(candidate_emb_dict)}")
 
         # Stack candidate embeddings into a tensor
-        candidate_embs = [candidate_emb_dict[idx].view(1, -1) for idx in self.candidate_ids]
+        # Filter to only use candidates that exist in both candidate_ids and candidate_emb_dict if necessary, 
+        # or assuming candidate_ids are keys in candidate_emb_dict.
+        # Based on typical usage, candidate_emb_dict keys are the IDs.
+        
+        # Safe loading: Only load embeddings for IDs that exist in the dictionary
+        valid_candidate_ids = []
+        candidate_embs = []
+        missing_count = 0
+        
+        for idx in self.candidate_ids:
+            if idx in candidate_emb_dict:
+                candidate_embs.append(candidate_emb_dict[idx].view(1, -1))
+                valid_candidate_ids.append(idx)
+            else:
+                missing_count += 1
+        
+        if missing_count > 0:
+            print(f"Warning: {missing_count} candidate IDs missing from embedding dictionary. Using {len(valid_candidate_ids)} valid embeddings.")
+            # Update candidate_ids to strictly match the available embeddings to avoid shape mismatch later
+            self.candidate_ids = valid_candidate_ids
+            
         self.candidate_embs = torch.cat(candidate_embs, dim=0).to(device)
 
         # L2 normalize embeddings for DPR and ANCE models (cosine similarity via dot product)

@@ -16,14 +16,15 @@ import multiprocessing
 import argparse
 
 
-def create_strategy_dataset(strategy_name):
+def create_strategy_dataset(strategy_name, input_csv=None):
     """Create STaRK-compatible dataset for a specific strategy."""
     import pandas as pd
+    import hashlib
 
     if strategy_name == 'original':
         # For original queries, use the standard STaRK dataset path
         # Return None to indicate using standard dataset loading
-        return None
+        return None, None
 
     if strategy_name == 'synthesized':
         # For synthesized queries, use the original synthesized data file
@@ -62,7 +63,59 @@ def create_strategy_dataset(strategy_name):
             for idx in stark_df['id']:
                 f.write(f"{idx}\n")
 
-        return stark_base_dir
+        return stark_base_dir, stark_qa_file
+
+    if strategy_name == 'kg_query':
+        # For KG-generated queries, use the provided CSV or default
+        if input_csv:
+            query_file = input_csv
+            # Create unique directory for custom CSV to avoid conflicts
+            csv_hash = hashlib.md5(input_csv.encode()).hexdigest()[:8]
+            stark_base_dir = f"/home/wlia0047/ar57/wenyu/stark/data/stark_strategy_kg_query_{csv_hash}_dataset"
+        else:
+            query_file = "/home/wlia0047/ar57/wenyu/result/generated_kg_queries.csv"
+            stark_base_dir = "/home/wlia0047/ar57/wenyu/stark/data/stark_strategy_kg_query_dataset"
+
+        # Create STaRK directory structure
+        qa_dir = os.path.join(stark_base_dir, "qa", "amazon")
+        split_dir = os.path.join(qa_dir, "split")
+        stark_qa_dir = os.path.join(qa_dir, "stark_qa")
+
+        os.makedirs(stark_qa_dir, exist_ok=True)
+        os.makedirs(split_dir, exist_ok=True)
+
+        # Load queries
+        if not os.path.exists(query_file):
+            raise FileNotFoundError(f"Query file not found: {query_file}")
+
+        df = pd.read_csv(query_file)
+
+        # Handle answer_ids_source column name if present
+        if 'answer_ids_source' in df.columns and 'answer_ids' not in df.columns:
+            df['answer_ids'] = df['answer_ids_source']
+
+        # Ensure required columns exist
+        if 'id' not in df.columns:
+            df['id'] = range(len(df))
+
+        # Filter and save STaRK format file
+        stark_df = pd.DataFrame({
+            'id': df['id'],
+            'query': df['query'],
+            'answer_ids': df['answer_ids'],
+            'query_type': ['kg_query'] * len(df)
+        })
+
+        stark_qa_file = os.path.join(stark_qa_dir, "stark_qa.csv")
+        stark_df.to_csv(stark_qa_file, index=False)
+
+        # Create split file
+        split_file = os.path.join(split_dir, "variants.index")
+        with open(split_file, 'w') as f:
+            for idx in stark_df['id']:
+                f.write(f"{idx}\n")
+
+        return stark_base_dir, stark_qa_file
 
     # Paths for variant strategies
     variants_file = f"/home/wlia0047/ar57/wenyu/stark/data/strategy_variants/{strategy_name}_variants_81.csv"
@@ -100,15 +153,21 @@ def create_strategy_dataset(strategy_name):
         for idx in stark_df['id']:
             f.write(f"{idx}\n")
 
-    return stark_base_dir
+    return stark_base_dir, stark_qa_file
 
 
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='STaRK BM25 Evaluation for Query Variants')
-    parser.add_argument('--strategy', type=str, default='all',
-                       choices=['original', 'character', 'dependency', 'embedding', 'other', 'typo', 'wordnet', 'synthesized', 'grammar_aware', 'all'],
-                       help='Attack strategy to evaluate (default: all)')
+    parser.add_argument('--strategy', type=str, default='kg_query',
+                       choices=['original', 'character', 'dependency', 'embedding', 'other', 'typo', 'wordnet', 'synthesized', 'grammar_aware', 'kg_query', 'all'],
+                       help='Attack strategy to evaluate (default: kg_query)')
+    parser.add_argument('--categories', type=str, default='all',
+                       help='Categories to include (default: all)')
+    parser.add_argument('--force_rerun', action='store_true',
+                       help='Force rerun even if results exist')
+    parser.add_argument('--input_csv', type=str, default=None,
+                       help='Path to custom input CSV file (overrides default for kg_query)')
     args = parser.parse_args()
 
     # STaRK project root directory (where stark_qa package is located)
@@ -128,6 +187,7 @@ def main():
 
     # Set up common evaluation parameters
     dataset = "amazon"
+    categories = [args.categories] if args.categories != 'all' else ['all']
     model = "BM25"
     split = "variants"  # Use variants split for our custom datasets
     save_pred = True
@@ -161,13 +221,23 @@ def main():
             elif strategy == 'synthesized':
                 # For synthesized queries, create custom dataset from synthesized data (same as test split)
                 print(f"Creating dataset for synthesized queries: {strategy}")
-                dataset_root = create_strategy_dataset(strategy)
+                dataset_root, _ = create_strategy_dataset(strategy)
                 output_dir = "BM25eval"  # Unified BM25 evaluation directory
                 split = "test"  # Use test split for synthesized queries (same evaluation method as test data)
+            elif strategy == 'kg_query':
+                # For KG queries, use the specific SKB path
+                print(f"Setting up for KG queries with custom SKB: {strategy}")
+                # First create the QA dataset structure
+                dataset_path, stark_qa_path = create_strategy_dataset(strategy, args.input_csv)
+                # Then set the dataset_root to the specific SKB path requested by user
+                dataset_root = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/processed/attribute_kb"
+                output_dir = "BM25eval"
+                split = "variants"
+                print(f"Using SKB from: {dataset_root}")
             else:
                 # Create dataset for variant strategies
                 print(f"Creating dataset for strategy: {strategy}")
-                dataset_root = create_strategy_dataset(strategy)
+                dataset_root, _ = create_strategy_dataset(strategy)
                 output_dir = "BM25eval"  # Unified BM25 evaluation directory
                 split = "variants"  # Use variants split for variant strategies
 
@@ -219,8 +289,14 @@ def main():
 
             # Use single-threaded evaluation for all models (including BM25)
             print("Using single-threaded evaluation (calling eval.py)...")
+            
+            # For kg_query, we need to pass the CSV file path explicitly because dataset_root points to SKB
+            csv_file = None
+            if strategy == 'kg_query':
+                csv_file = stark_qa_path
+            
             result = run_single_threaded_evaluation(
-                dataset, model, split, dataset_root, output_dir, env, strategy
+                dataset, model, split, dataset_root, output_dir, env, strategy, csv_file=csv_file, categories=categories, force_rerun=args.force_rerun
             )
 
             end_time = datetime.now()
@@ -315,7 +391,7 @@ def load_custom_qa_dataset(csv_path):
     return CustomQADataset(df)
 
 
-def run_single_threaded_evaluation(dataset, model, split, dataset_root, output_dir, env, strategy=None):
+def run_single_threaded_evaluation(dataset, model, split, dataset_root, output_dir, env, strategy=None, csv_file=None, categories=None, force_rerun=False):
     """Fallback to original single-threaded evaluation."""
     import shutil
 
@@ -327,16 +403,30 @@ def run_single_threaded_evaluation(dataset, model, split, dataset_root, output_d
                 "--output_dir", output_dir,
                 "--save_pred",
                 "--batch_size", "1",
-                "--device", "cpu",
-                "--force_rerun"]
+                "--device", "cpu"]
 
     # Add dataset_root only if it's not None
     if dataset_root is not None:
         base_cmd.extend(["--dataset_root", dataset_root])
 
+    # Add csv_file if provided
+    if csv_file is not None:
+        base_cmd.extend(["--csv_file", csv_file])
+
     # Add strategy if provided
     if strategy:
         base_cmd.extend(["--strategy", strategy])
+        
+    # Add categories if provided
+    if "categories" in locals() and categories:
+        if isinstance(categories, list):
+            for cat in categories:
+                base_cmd.extend(["--categories", cat])
+        else:
+            base_cmd.extend(["--categories", categories])
+
+    if force_rerun:
+        base_cmd.append("--force_rerun")
 
     if shutil.which('stdbuf'):
         cmd = ["stdbuf", "-oL", "-eL"] + base_cmd  # Line-buffered stdout and stderr

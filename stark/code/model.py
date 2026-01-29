@@ -4,680 +4,383 @@ from openai import OpenAI
 import os
 import json
 import threading
+import time
+import tempfile
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple, Dict, Any, List
 
 # API Provider type
 class ApiProvider:
-    CEREBRAS = 'cerebras'
-    SILICONFLOW = 'siliconflow'  # Keep for fallback
+    SILICONFLOW = 'siliconflow'
 
 class APIErrorException(Exception):
     """Exception raised when any API error occurs to trigger API key switch."""
     pass
 
-# API Keys
+# Simplified API Keys & Configuration
 SILICONFLOW_API_KEY = 'sk-drezmfyckjkmxixpiblvbwdhypjbrsoyvmeertajtupiqnnj'
+DEFAULT_MODEL = 'THUDM/GLM-Z1-9B-0414'
+SILICONFLOW_BASE_URL = 'https://api.siliconflow.cn/v1'
 
-# API key management - single key configuration
-
-# Global lock for thread-safe file writing
 _api_response_lock = threading.Lock()
 _api_responses_file: Optional[str] = None
 
-def set_api_responses_file(file_path: str):
+def set_api_responses_file(file_path: str, overwrite: bool = False):
     """Set the file path for saving API raw responses."""
     global _api_responses_file
     _api_responses_file = file_path
+    if overwrite and os.path.exists(file_path):
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump([], f)
+        except Exception as e:
+            print(f"⚠️ Failed to clear API response file: {e}", flush=True)
 
-def _resolve_thinking_budget(llm_model, default: Optional[int] = 32768) -> Optional[int]:
-    """
-    Resolve SiliconFlow/DeepSeek-R1 thinking budget.
-
-    Priority:
-    1) env var SILICONFLOW_THINKING_BUDGET (supports: unset -> fallback; "none"/"null"/"0" -> None)
-    2) llm_model.extra_body / llm_model.model_kwargs / llm_model.kwargs (if present)
-    3) default
-    """
+def _resolve_thinking_budget(llm_model, default: int = 32768) -> Optional[int]:
+    """Resolve thinking budget from env or model config."""
     env = os.getenv("SILICONFLOW_THINKING_BUDGET")
     if env is not None:
         v = env.strip().lower()
-        if v in {"", "none", "null", "false", "off", "0"}:
-            return None
+        if v in {"", "none", "null", "false", "off", "0"}: return None
         try:
             n = int(v)
             return None if n <= 0 else n
-        except Exception:
-            # If malformed, fall back to other sources/default
-            pass
+        except: pass
 
-    # Try to get thinking_budget from common LangChain storage locations
     for attr in ("extra_body", "model_kwargs", "kwargs"):
         d = getattr(llm_model, attr, None)
         if isinstance(d, dict):
             tb = d.get("thinking_budget")
-            if tb is None:
-                continue
             try:
                 n = int(tb)
                 return None if n <= 0 else n
-            except Exception:
-                continue
-
+            except: continue
     return default
 
-def _save_api_response(
-    context: str,
-    prompt: str,
-    raw_response: dict,
-    api_info: str,
-    success: bool,
-    error: Optional[str] = None,
-    meta: Optional[dict] = None,
-):
-    """Save API raw response to JSON file in a thread-safe manner.
-    
-    Args:
-        raw_response: Dictionary containing 'reasoning_content' and 'content' fields
-    """
+def _save_api_response(context: str, prompt: str, response_dict: dict, api_info: str, success: bool, error: str = None, meta: dict = None):
+    """Save API raw response in a thread-safe manner."""
     global _api_responses_file
-    if not _api_responses_file:
-        return
+    if not _api_responses_file: return
     
     try:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        
-        # Extract reasoning_content and content from raw_response dict
-        reasoning_content = raw_response.get('reasoning_content', '')
-        content = raw_response.get('content', '')
-        
-        # NOTE:
-        # We previously truncated prompts to the first 1000 chars. For prompts where the
-        # actual data is appended at the end (e.g., "... Text: <review>"), this removes
-        # the review text and breaks downstream matching logic that searches the prompt.
-        # Keep a compact but useful slice that preserves the "Text:" section if present.
         def _compact_prompt(p: str, max_len: int = 3000) -> str:
-            if not p:
-                return ""
-            if len(p) <= max_len:
-                return p
+            if not p or len(p) <= max_len: return p
             text_marker = "Text:"
             idx = p.find(text_marker)
             if idx != -1:
-                # Keep a small header for context + the beginning of the Text section
                 head = p[: min(400, idx)]
                 tail = p[idx : idx + (max_len - len(head) - 32)]
                 return f"{head}\n...[TRUNCATED]...\n{tail}"
-            # Fallback: keep both head and tail
-            head = p[: max_len // 2]
-            tail = p[-(max_len - len(head) - 32) :]
-            return f"{head}\n...[TRUNCATED]...\n{tail}"
+            return f"{p[:max_len//2]}\n...[TRUNCATED]...\n{p[-(max_len//2-32):]}"
 
-        compact_prompt = _compact_prompt(prompt, max_len=3000)
+        compact_prompt = _compact_prompt(prompt)
+        content = response_dict.get('content', '')
+        reasoning = response_dict.get('reasoning_content', '')
 
-        response_data = {
-            "timestamp": timestamp,
-            "context": context,
-            "api_info": api_info,
-            "success": success,
-            "prompt": compact_prompt,
-            "prompt_length": len(prompt),
-            "prompt_stored_length": len(compact_prompt),
+        data = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+            "context": context, "api_info": api_info, "success": success,
+            "prompt": compact_prompt, "prompt_length": len(prompt),
             "meta": meta or {},
-            "raw_response": {
-                "reasoning_content": reasoning_content,
-                "content": content
-            },
-            "response_length": len(content) if content else 0,
-            "reasoning_length": len(reasoning_content) if reasoning_content else 0,
+            "raw_response": {"reasoning_content": reasoning, "content": content},
+            "response_length": len(content), "reasoning_length": len(reasoning),
             "error": error if not success else None
         }
         
         with _api_response_lock:
-            # Read existing data if file exists
-            existing_data = []
+            history = []
             if os.path.exists(_api_responses_file):
                 try:
-                    with open(_api_responses_file, 'r', encoding='utf-8') as f:
-                        existing_data = json.load(f)
-                except Exception:
-                    existing_data = []
-            
-            # Append new response
-            existing_data.append(response_data)
-            
-            # Write back to file
+                    with open(_api_responses_file, 'r', encoding='utf-8') as f: history = json.load(f)
+                except: pass
+            history.append(data)
             with open(_api_responses_file, 'w', encoding='utf-8') as f:
-                json.dump(existing_data, f, indent=2, ensure_ascii=False)
-                
+                json.dump(history, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        # Don't fail the main operation if saving fails
-        print(f"⚠️ Failed to save API response to file: {e}", flush=True)
+        print(f"⚠️ Failed to save API response: {e}", flush=True)
 
-def _call_llm_with_openai_client(prompt: str, model_name: str, base_url: str, api_key: str, 
-                                  temperature: float = 0.7, max_tokens: int = 500, 
-                                  timeout: Optional[int] = None, thinking_budget: int = None) -> tuple[dict, Optional[str]]:
-    """Call LLM using OpenAI client directly for better reasoning_content extraction.
-    
-    Returns:
-        tuple: (response_dict with 'reasoning_content' and 'content', error_message)
-    """
-    try:
-        client_kwargs = {
-            "base_url": base_url,
-            "api_key": api_key,
-        }
-        # If timeout is explicitly provided, respect it; otherwise let client use its own defaults
-        if timeout is not None:
-            client_kwargs["timeout"] = timeout / 1000.0
+def _extract_content_and_reasoning(response: Any) -> Tuple[str, str]:
+    """Unified extractor for reasoning_content and content from OpenAI or LangChain responses."""
+    content = ""
+    reasoning = ""
 
-        client = OpenAI(**client_kwargs)
-        
-        messages = [{"role": "user", "content": prompt}]
-        
-        # Build request parameters
-        request_params = {
-            "model": model_name,
-            "messages": messages,
-            "stream": False,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-        
-        # Add thinking_budget via extra_body if provided
-        if thinking_budget is not None:
-            request_params["extra_body"] = {
-                "thinking_budget": thinking_budget
-            }
-        
-        response = client.chat.completions.create(**request_params)
-        
-        # Extract content and reasoning_content directly from response
-        if response.choices and len(response.choices) > 0:
-            choice = response.choices[0]
-            message = choice.message
-            
-            content = message.content if message.content else ""
-            reasoning_content = ""
-            
-            # Debug: Print all available attributes to understand response structure
-            # print(f"🔍 Debug - message attributes: {dir(message)}", flush=True)
-            # print(f"🔍 Debug - choice attributes: {dir(choice)}", flush=True)
-            # print(f"🔍 Debug - response attributes: {[attr for attr in dir(response) if not attr.startswith('_')]}", flush=True)
-            
-            # Extract reasoning_content if available - try multiple methods
-            # Method 1: Direct attribute
-            if hasattr(message, 'reasoning_content') and message.reasoning_content:
-                reasoning_content = message.reasoning_content
-                #print(f"✅ Found reasoning_content in message.reasoning_content (length: {len(reasoning_content)})", flush=True)
-            # Method 2: Alternative attribute name
-            elif hasattr(message, 'reasoning') and message.reasoning:
-                reasoning_content = message.reasoning
-                #print(f"✅ Found reasoning_content in message.reasoning (length: {len(reasoning_content)})", flush=True)
-            # Method 3: Check if it's in the raw response object
-            elif hasattr(choice, 'reasoning_content') and choice.reasoning_content:
-                reasoning_content = choice.reasoning_content
-                #print(f"✅ Found reasoning_content in choice.reasoning_content (length: {len(reasoning_content)})", flush=True)
-            # Method 4: Check response object itself
-            elif hasattr(response, 'reasoning_content') and response.reasoning_content:
-                reasoning_content = response.reasoning_content
-                #print(f"✅ Found reasoning_content in response.reasoning_content (length: {len(reasoning_content)})", flush=True)
-            # Method 5: Try to get from message dict if it's a dict-like object
-            elif isinstance(message, dict) and 'reasoning_content' in message:
-                reasoning_content = message['reasoning_content']
-                #print(f"✅ Found reasoning_content in message dict (length: {len(reasoning_content)})", flush=True)
-            else:
-                print(f"⚠️ No reasoning_content found in response (thinking_budget={thinking_budget})", flush=True)
-            
-            return {
-                "reasoning_content": reasoning_content.strip() if reasoning_content else "",
-                "content": content.strip() if content else ""
-            }, None
-        else:
-            return {"reasoning_content": "", "content": ""}, "No choices in response"
-            
-    except Exception as e:
-        return {"reasoning_content": "", "content": ""}, str(e)
+    # Try OpenAI-style (Choice/Message object)
+    if hasattr(response, 'choices') and len(response.choices) > 0:
+        msg = response.choices[0].message
+        content = getattr(msg, 'content', '') or ''
+        reasoning = (getattr(msg, 'reasoning_content', None) or 
+                     getattr(msg, 'reasoning', None) or 
+                     (msg.get('reasoning_content') if isinstance(msg, dict) else ''))
+    # Try LangChain-style (AIMessage)
+    elif hasattr(response, 'content'):
+        content = response.content
+        reasoning = getattr(response, 'reasoning_content', None)
+        if not reasoning and hasattr(response, 'response_metadata'):
+            meta = response.response_metadata
+            reasoning = meta.get('reasoning_content') or meta.get('reasoning')
+        if not reasoning and hasattr(response, 'additional_kwargs'):
+            kwargs = response.additional_kwargs
+            reasoning = kwargs.get('reasoning_content') or kwargs.get('reasoning')
 
+    return str(content or "").strip(), str(reasoning or "").strip()
 
-def call_llm_with_retry(
-    llm_model,
-    prompt: str,
-    max_retries: int = 3,
-    context: str = "unknown",
-    use_openai_client: bool = True,
-    meta: Optional[dict] = None,
-) -> tuple[str, bool]:
-    """Call LLM without timeout restrictions.
-    
-    Args:
-        llm_model: LangChain model instance (used for config if use_openai_client=True)
-        prompt: The prompt to send
-        max_retries: Maximum number of retry attempts
-        context: Context identifier for logging
-        use_openai_client: If True, use OpenAI client directly for better reasoning_content extraction
-    """
-    # Track API key usage
+def call_llm_with_retry(llm_model, prompt: str, max_retries: int = 3, context: str = "unknown", use_openai_client: bool = True, meta: Optional[dict] = None) -> Tuple[str, bool]:
     api_info = get_current_api_info()
-    error_msg = None
-
-    # If using OpenAI client directly, extract config from model
-    if use_openai_client:
+    
+    for attempt in range(max_retries):
         try:
-            result = get_api_provider()
-            if result['provider'] == ApiProvider.SILICONFLOW:
-                config = get_siliconflow_config()
-                model_name = get_model_name(ApiProvider.SILICONFLOW)
-                api_key = result['api_key']
-                base_url = config['base_url']
-                
-                # Try to get parameters from model if available
-                temperature = getattr(llm_model, 'temperature', 0.7)
-                max_tokens = getattr(llm_model, 'max_tokens', 500)
-                # Do not enforce a client-side timeout here; let the provider handle it.
-                timeout = None
-                # IMPORTANT:
-                # Do NOT hardcode a tiny thinking_budget (it truncates reasoning_content).
-                # Use env/model config; default is large enough for full reasoning.
-                thinking_budget = _resolve_thinking_budget(llm_model, default=32768)
-                
-                for attempt in range(max_retries):
-                    raw_response_dict, error = _call_llm_with_openai_client(
-                        prompt, model_name, base_url, api_key,
-                        temperature, max_tokens, timeout, thinking_budget
-                    )
-                    
-                    if error is None:
-                        # Success
-                        content = raw_response_dict.get('content', '')
-                        if content:
-                            _save_api_response(context, prompt, raw_response_dict, api_info, True, meta=meta)
-                            return content, True
-                        else:
-                            error_msg = f"Empty content in response (attempt {attempt + 1}/{max_retries})"
-                            print(f"LLM error [{api_info}]: {error_msg}", flush=True)
-                            if attempt < max_retries - 1:
-                                continue
-                            _save_api_response(context, prompt, raw_response_dict, api_info, False, error_msg, meta=meta)
-                            raise APIErrorException(f"Empty content with {api_info}")
-                    else:
-                        error_msg = error
-                        error_type = type(error).__name__ if hasattr(error, '__class__') else 'Exception'
-                        print(f"LLM error [{api_info}]: {error_msg} (attempt {attempt + 1}/{max_retries})", flush=True)
-                        
-                        # If it's an authentication error, don't retry
-                        if ("401" in error_msg or
-                            "authentication" in error_msg.lower() or
-                            "api key" in error_msg.lower() or
-                            "AuthenticationError" in error_type or
-                            "invalid" in error_msg.lower()):
-                            print("❌ Authentication failed - API key appears to be invalid", flush=True)
-                            print("💡 请检查您的硅基流动API Key是否正确", flush=True)
-                            _save_api_response(context, prompt, raw_response_dict, api_info, False, error_msg, meta=meta)
-                            raise APIErrorException(f"Authentication error with {api_info}: {error_msg}")
-                        
-                        # For other errors, retry if attempts remain
-                        if attempt < max_retries - 1:
-                            continue
-                        _save_api_response(context, prompt, raw_response_dict, api_info, False, error_msg, meta=meta)
-                        raise APIErrorException(f"API error with {api_info}: {error_msg}")
+            res_dict = {"content": "", "reasoning_content": ""}
+            if use_openai_client:
+                client = OpenAI(base_url=SILICONFLOW_BASE_URL, api_key=SILICONFLOW_API_KEY)
+                resp = client.chat.completions.create(
+                    model=get_model_name(ApiProvider.SILICONFLOW),
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=getattr(llm_model, 'max_tokens', 500),
+                    temperature=getattr(llm_model, 'temperature', 0.7),
+                    extra_body={"thinking_budget": _resolve_thinking_budget(llm_model)} if _resolve_thinking_budget(llm_model) else None
+                )
+                content, reasoning = _extract_content_and_reasoning(resp)
             else:
-                # Fall back to LangChain if not SiliconFlow
-                use_openai_client = False
+                resp = llm_model.invoke([{"role": "user", "content": prompt}])
+                content, reasoning = _extract_content_and_reasoning(resp)
+
+            res_dict = {"content": content, "reasoning_content": reasoning}
+            if content:
+                _save_api_response(context, prompt, res_dict, api_info, True, meta=meta)
+                return content, True
+            
+            raise Exception("Empty content in response")
+
         except Exception as e:
-            # If OpenAI client approach fails, fall back to LangChain
-            print(f"⚠️ OpenAI client approach failed, falling back to LangChain: {e}", flush=True)
-            use_openai_client = False
+            err_msg = str(e)
+            print(f"LLM error [{api_info}]: {err_msg} (attempt {attempt+1}/{max_retries})", flush=True)
+            if any(x in err_msg.lower() for x in ["401", "authentication", "api key", "invalid"]):
+                _save_api_response(context, prompt, res_dict, api_info, False, err_msg, meta=meta)
+                raise APIErrorException(f"Auth error: {err_msg}")
+            
+            if attempt == max_retries - 1:
+                _save_api_response(context, prompt, res_dict, api_info, False, err_msg, meta=meta)
+                raise APIErrorException(f"API error: {err_msg}")
 
-    # Fallback to LangChain approach
-    if not use_openai_client:
-        for attempt in range(max_retries):
-            try:
-                messages = [{"role": "user", "content": prompt}]
-                response = llm_model.invoke(messages)
+def get_all_api_keys_in_order() -> List[Dict[str, Any]]:
+    return [{
+        'provider': ApiProvider.SILICONFLOW, 'api_key': SILICONFLOW_API_KEY,
+        'key_index': 0, 'provider_name': 'SiliconFlow', 'key_id': 'SiliconFlow-Key#1'
+    }]
 
-                # Successful response
-                if response and hasattr(response, "content") and response.content is not None:
-                    # Extract reasoning_content and content from response
-                    reasoning_content = ""
-                    content = str(response.content).strip()
-
-                    # Try multiple ways to extract reasoning_content
-                    # Method 1: Check if response has reasoning_content attribute directly
-                    if hasattr(response, "reasoning_content") and response.reasoning_content:
-                        reasoning_content = str(response.reasoning_content).strip()
-                    # Method 2: Check response_metadata
-                    elif hasattr(response, "response_metadata") and response.response_metadata:
-                        metadata = response.response_metadata
-                        if isinstance(metadata, dict):
-                            if "reasoning_content" in metadata:
-                                reasoning_content = str(metadata["reasoning_content"]).strip()
-                            # Check for other possible keys
-                            elif "reasoning" in metadata:
-                                reasoning_content = str(metadata["reasoning"]).strip()
-                    # Method 3: Check if response has additional_kwargs (for LangChain compatibility)
-                    elif hasattr(response, "additional_kwargs") and response.additional_kwargs:
-                        additional = response.additional_kwargs
-                        if isinstance(additional, dict):
-                            if "reasoning_content" in additional:
-                                reasoning_content = str(additional["reasoning_content"]).strip()
-                            elif "reasoning" in additional:
-                                reasoning_content = str(additional["reasoning"]).strip()
-                    # Method 4: Try to access raw response if available
-                    elif hasattr(response, "response") and hasattr(response.response, "choices"):
-                        # Try to extract from raw API response choices
-                        try:
-                            choices = response.response.choices
-                            if choices and len(choices) > 0:
-                                choice = choices[0]
-                                if hasattr(choice, "message"):
-                                    message = choice.message
-                                    if hasattr(message, "reasoning_content"):
-                                        reasoning_content = str(message.reasoning_content).strip()
-                                    elif hasattr(message, "reasoning"):
-                                        reasoning_content = str(message.reasoning).strip()
-                        except Exception:
-                            pass
-
-                    # Prepare raw_response dict with both fields
-                    raw_response_dict = {
-                        "reasoning_content": reasoning_content,
-                        "content": content,
-                    }
-
-                    # Save successful response
-                    _save_api_response(context, prompt, raw_response_dict, api_info, True, meta=meta)
-                    return content, True
-
-                error_msg = f"Invalid response format (attempt {attempt + 1}/{max_retries})"
-                print(f"LLM error [{api_info}]: {error_msg}", flush=True)
-                if attempt < max_retries - 1:
-                    continue
-                # Save failed response
-                _save_api_response(
-                    context,
-                    prompt,
-                    {"reasoning_content": "", "content": ""},
-                    api_info,
-                    False,
-                    error_msg,
-                    meta=meta,
-                )
-                raise APIErrorException(f"Invalid response format with {api_info}")
-
-            except Exception as e:
-                # API call failed with an exception
-                error_msg = str(e)
-                error_type = type(e).__name__
-                print(f"LLM error [{api_info}]: {error_msg} (attempt {attempt + 1}/{max_retries})", flush=True)
-
-                # If it's an authentication error, don't retry
-                if (
-                    "401" in error_msg
-                    or "authentication" in error_msg.lower()
-                    or "api key" in error_msg.lower()
-                    or "AuthenticationError" in error_type
-                    or "invalid" in error_msg.lower()
-                ):
-                    print("❌ Authentication failed - API key appears to be invalid", flush=True)
-                    print("💡 请检查您的硅基流动API Key是否正确", flush=True)
-                    _save_api_response(
-                        context,
-                        prompt,
-                        {"reasoning_content": "", "content": ""},
-                        api_info,
-                        False,
-                        error_msg,
-                        meta=meta,
-                    )
-                    raise APIErrorException(f"Authentication error with {api_info}: {error_msg}")
-
-                # For other errors, retry if attempts remain
-                if attempt < max_retries - 1:
-                    continue
-                # Save failed response on final attempt
-                _save_api_response(
-                    context,
-                    prompt,
-                    {"reasoning_content": "", "content": ""},
-                    api_info,
-                    False,
-                    error_msg,
-                    meta=meta,
-                )
-                raise APIErrorException(f"API error with {api_info}: {error_msg}")
-
-# Helper function to collect all API keys
-def _collect_all_api_keys():
-    """Collect all available API keys in order of preference."""
-    all_api_keys = []
-    # Only use SiliconFlow
-    all_api_keys.append((ApiProvider.SILICONFLOW, 0, SILICONFLOW_API_KEY))
-
-    return all_api_keys
-
-# Helper function to collect all API keys with full config
-def _collect_all_api_keys_with_config():
-    """Collect all available API keys with full configuration."""
-    all_api_keys = []
-    # Only use SiliconFlow
-    all_api_keys.append({
-        'provider': ApiProvider.SILICONFLOW,
-        'api_key': SILICONFLOW_API_KEY,
-        'key_index': 0,
-        'provider_name': 'SiliconFlow',
-        'key_id': 'SiliconFlow-Key#1'
-    })
-    return all_api_keys
-
-# Public function to get all API keys in order (for main script usage)
-def get_all_api_keys_in_order():
-    """Get all available API keys in order of preference for sequential usage."""
-    return _collect_all_api_keys_with_config()
-
-# Get API provider and key - Simplified (main script handles sequential usage)
 def get_api_provider():
-    all_api_keys = _collect_all_api_keys()
+    return {'provider': ApiProvider.SILICONFLOW, 'api_key': SILICONFLOW_API_KEY, 'key_index': 0}
 
-    if not all_api_keys:
-        print('⚠️  No API keys configured. Using mock configuration for testing')
-        return {'provider': 'mock', 'api_key': 'mock_key'}
-
-    # Default to first available key (main script will override this)
-    provider, key_index, selected_key = all_api_keys[0]
-    return {'provider': provider, 'api_key': selected_key, 'key_index': key_index}
-
-
-
-
-
-# Helper function to get provider display info
-def _get_provider_display_info(result):
-    """Get provider display name and key info from API provider result."""
-    provider_name = result['provider']
-    if provider_name == ApiProvider.SILICONFLOW:
-        display_name = "SiliconFlow"
-        key_index = result.get('key_index', 0)
-        key_info = f"Key #{key_index + 1}"
-        return display_name, key_info
-    else:
-        return provider_name, ""
-
-# Get current API provider info for error reporting
 def get_current_api_info():
-    """Returns information about the currently active API key."""
-    try:
-        result = get_api_provider()
-        display_name, key_info = _get_provider_display_info(result)
-        if key_info:
-            return f"{display_name}-{key_info.replace(' ', '')}"
-        else:
-            return display_name
-    except Exception:
-        return "Unknown"
+    return "SiliconFlow-Key#1"
 
-# Get base URL and headers for provider (env overrides allowed)
-def get_provider_config(provider):
-    """Get configuration for the specified provider."""
-    configs = {
-        ApiProvider.SILICONFLOW: {
-            'env_var': 'SILICONFLOW_BASE_URL',
-            'default_url': 'https://api.siliconflow.cn/v1'
-        }
-    }
-
-    if provider not in configs:
-        raise ValueError(f"Unsupported provider: {provider}")
-
-    config = configs[provider]
-    env_base = os.getenv(config['env_var'], config['default_url'])
-    return {
-        'base_url': env_base,
-        'default_headers': {},  # All providers don't need special headers currently
-    }
-
-# Backward compatibility functions
+def get_model_name(provider=ApiProvider.SILICONFLOW):
+    return os.getenv('SILICONFLOW_MODEL', DEFAULT_MODEL)
 
 def get_siliconflow_config():
-    return get_provider_config(ApiProvider.SILICONFLOW)
+    return {'base_url': os.getenv('SILICONFLOW_BASE_URL', SILICONFLOW_BASE_URL), 'default_headers': {}}
 
+def _create_chat_model(temperature: float = 0.7, max_tokens: int = 500, scope: str = "default", thinking_budget: int = 32768) -> BaseChatModel:
+    os.environ['OPENAI_BASE_URL'] = SILICONFLOW_BASE_URL
+    return ChatOpenAI(
+        model=get_model_name(), temperature=temperature, max_tokens=max_tokens,
+        api_key=SILICONFLOW_API_KEY, base_url=SILICONFLOW_BASE_URL,
+        extra_body={'thinking_budget': thinking_budget} if thinking_budget else None
+    )
 
-def log_model_selection(_scope, _model_name, _base_url=None, _provider=None, _headers=None):
-    # no-op: logging removed for production
-    pass
+def get_router_model(): return _create_chat_model(temperature=0, max_tokens=50, scope="router")
+def get_gm_model(): return _create_chat_model(temperature=0.1, max_tokens=2000, scope="general")
 
-# Get model name for provider (env overrides allowed)
-def get_model_name(provider):
-    """Get model name for provider with environment variable override."""
-    model_configs = {
-        ApiProvider.SILICONFLOW: ('SILICONFLOW_MODEL', 'deepseek-ai/DeepSeek-R1-0528-Qwen3-8B'),
-    }
+# --- Batch Inference Interface ---
 
-    if provider in model_configs:
-        env_var, default_model = model_configs[provider]
-        model_env = os.getenv(env_var)
-        if model_env:
-            return model_env
-        return default_model
-
-    return None
-
-def _create_chat_model(temperature: float = 0.7, max_tokens: int = 500, timeout: int = 60000, scope: str = "default", thinking_budget: int = 32768) -> BaseChatModel:
-    """Create a ChatOpenAI model with the specified parameters.
+def submit_batch_inference(prompts: List[str], model: str = "Qwen/QwQ-32B", max_tokens: int = 4096, thinking_budget: int = 32768, custom_ids: Optional[List[str]] = None) -> str:
+    """
+    Submits a batch inference job to SiliconFlow.
+    Returns the batch job ID.
+    """
+    client = OpenAI(base_url=SILICONFLOW_BASE_URL, api_key=SILICONFLOW_API_KEY)
     
-    Args:
-        temperature: Sampling temperature for the model
-        max_tokens: Maximum number of tokens to generate
-        timeout: Request timeout in milliseconds (default: 60s)
-        scope: Scope identifier for logging
-        thinking_budget: Maximum thinking budget tokens (default: 32768). Set <=0 to disable.
-    """
-    result = get_api_provider()
-
-    if result['provider'] == 'mock':
-        raise ValueError('Mock provider - use InteractionManager fallback logic instead')
-
-    # Single API key configuration - no tracking needed
-
-    # Get provider config and model name
-    if result['provider'] == ApiProvider.SILICONFLOW:
-        config = get_siliconflow_config()
-        model_name = get_model_name(ApiProvider.SILICONFLOW)
-    else:
-        raise ValueError(f"Unsupported API provider: {result['provider']}")
-
-    log_model_selection(scope, model_name, config['base_url'], result['provider'], config['default_headers'])
-    os.environ['OPENAI_BASE_URL'] = config['base_url']
-
-    # Build kwargs for ChatOpenAI initialization
-    chatopenai_kwargs = {
-        'model': model_name,
-        'temperature': temperature,
-        'api_key': result['api_key'],
-        'base_url': config['base_url'],
-        'default_headers': config['default_headers'],
-        'max_tokens': max_tokens,
-    }
-
-    # Add thinking_budget via extra_body for SiliconFlow API
-    # This is a custom parameter for SiliconFlow, not a standard OpenAI parameter
-    if thinking_budget is not None:
-        chatopenai_kwargs['extra_body'] = {
-            'thinking_budget': thinking_budget
-        }
-
-    return ChatOpenAI(**chatopenai_kwargs)
-
-
-
-def get_router_model() -> BaseChatModel:
-    """
-    Returns the LLM used for routing intents.
-    Needs to be fast and structured.
-    """
-    return _create_chat_model(temperature=0, max_tokens=50, timeout=30000, scope="router")
-
-
-def get_gm_model() -> BaseChatModel:
-    """
-    Returns the general LLM model for analysis tasks.
-    Suitable for longer, more complex responses.
-    """
-    return _create_chat_model(temperature=0.1, max_tokens=2000, timeout=60000, scope="general")
-
-
-
-def test_llm_call():
-    """测试LLM调用的主函数"""
-    print("🚀 测试LLM调用功能")
-    print("=" * 50)
-
-    # 检查API配置
-    result = get_api_provider()
-    provider_display, key_info = _get_provider_display_info(result)
-
-    print(f"📊 API Provider: {provider_display} {key_info}")
-    print(f"🔑 API Key: {'已配置' if result['api_key'] != 'mock_key' else 'Mock模式'}")
-
-    if result['provider'] == 'mock':
-        print("⚠️ 使用Mock模式 - 将返回预设响应")
-        return
+    # Create a temporary JSONL file for the batch input
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False, encoding='utf-8') as tmp:
+        for i, prompt in enumerate(prompts):
+            cid = custom_ids[i] if custom_ids and i < len(custom_ids) else f"req-{i}"
+            request = {
+                "custom_id": cid,
+                "method": "POST",
+                "url": "/v1/chat/completions",
+                "body": {
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens,
+                    "thinking_budget": thinking_budget
+                }
+            }
+            tmp.write(json.dumps(request, ensure_ascii=False) + '\n')
+        tmp_path = tmp.name
 
     try:
-        # 初始化路由模型（轻量级，适合测试）
-        print("\n🤖 初始化路由模型...")
-        router_model = get_router_model()
-        print(f"✅ 模型类型: {type(router_model).__name__}")
+        # 1. Upload the file
+        with open(tmp_path, "rb") as f:
+            batch_input_file = client.files.create(file=f, purpose="batch")
+        
+        # Accessing ID safely as some SDK versions/wrappers might differ
+        file_id = getattr(batch_input_file, 'id', None)
+        if not file_id and hasattr(batch_input_file, 'data'):
+            file_id = batch_input_file.data.get('id')
+        
+        if not file_id:
+            raise Exception(f"Failed to get file ID from upload response: {batch_input_file}")
 
-        # 测试简单的查询
-        test_query = "Hello, can you respond with 'LLM test successful'?"
-        print(f"\n📤 发送测试查询: {test_query}")
+        # 2. Create the batch job
+        batch = client.batches.create(
+            input_file_id=file_id,
+            endpoint="/v1/chat/completions",
+            completion_window="24h",
+            extra_body={"replace": {"model": model}}
+        )
+        
+        batch_id = getattr(batch, 'id', None)
+        if not batch_id and hasattr(batch, 'data'):
+            batch_id = batch.data.get('id')
+        
+        # Log batch submission
+        _save_api_response(
+            context="batch_submission",
+            prompt=f"Submitted batch with {len(prompts)} prompts. Model: {model}",
+            response_dict={"content": f"Batch ID: {batch_id}", "batch_id": batch_id},
+            api_info="SiliconFlow-Batch-Submit",
+            success=True,
+            meta={"prompt_count": len(prompts), "model": model, "batch_id": batch_id}
+        )
+            
+        return batch_id
+    finally:
+        # Clean up temporary file
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
-        # 调用LLM (使用改进的错误处理)
-        response_content, success = call_llm_with_retry(router_model, test_query, max_retries=1, context="test")
+def get_batch_status(batch_id: str) -> Dict[str, Any]:
+    """Retrieves the full status object of a batch job."""
+    client = OpenAI(base_url=SILICONFLOW_BASE_URL, api_key=SILICONFLOW_API_KEY)
+    batch = client.batches.retrieve(batch_id)
+    
+    # Convert To Dict if it's an object
+    if hasattr(batch, 'model_dump'):
+        return batch.model_dump()
+    elif hasattr(batch, 'to_dict'):
+        return batch.to_dict()
+    return str(batch) # Fallback
 
-        if not success:
-            print("❌ LLM调用失败")
-            return False
+def retrieve_batch_results(batch_id: str) -> List[Dict[str, Any]]:
+    """
+    Downloads and parses the results of a completed batch job.
+    Returns a list of result dictionaries.
+    """
+    import requests
+    client = OpenAI(base_url=SILICONFLOW_BASE_URL, api_key=SILICONFLOW_API_KEY)
+    batch = client.batches.retrieve(batch_id)
+    
+    status = getattr(batch, 'status', None)
+    if status != "completed":
+        print(f"Batch {batch_id} is not completed (status: {status})")
+        return []
+    
+    output_file_id = getattr(batch, 'output_file_id', None)
+    if not output_file_id:
+        print(f"No output file found for batch {batch_id}")
+        return []
+        
+    # Use direct requests. SiliconFlow output_file_id can be a literal ID or a full URL.
+    headers = {"Authorization": f"Bearer {SILICONFLOW_API_KEY}"}
+    if output_file_id.startswith("http"):
+        url = output_file_id
+    else:
+        url = f"{SILICONFLOW_BASE_URL}/files/{output_file_id}/content"
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers if not output_file_id.startswith("http") else None, timeout=60)
+            response.raise_for_status()
+            content = response.text
+            break # Success
+        except Exception as e:
+            if attempt == max_retries - 1:
+                print(f"Failed to download batch results after {max_retries} attempts: {e}")
+                return []
+            print(f"Attempt {attempt+1} failed to download batch results: {e}. Retrying...")
+            time.sleep(2)
+    
+    results = []
+    for line in content.strip().split('\n'):
+        if line.strip():
+            try:
+                res_item = json.loads(line)
+                results.append(res_item)
+                
+                # Log individual batch result
+                # Extract prompt and response info for logging
+                res_body = res_item.get('response', {}).get('body', {})
+                res_content = ""
+                res_reasoning = ""
+                if 'choices' in res_body and res_body['choices']:
+                    msg = res_body['choices'][0].get('message', {})
+                    res_content = msg.get('content', '')
+                    res_reasoning = msg.get('reasoning_content', '')
+                
+                _save_api_response(
+                    context=f"batch_result_item",
+                    prompt=f"Batch Result for ID: {res_item.get('id')}, Custom ID: {res_item.get('custom_id')}",
+                    response_dict={"content": res_content, "reasoning_content": res_reasoning},
+                    api_info="SiliconFlow-Batch-Result",
+                    success=True,
+                    meta={
+                        "batch_id": batch_id, 
+                        "custom_id": res_item.get('custom_id'),
+                        "request_id": res_item.get('id')
+                    }
+                )
+            except:
+                continue
+    return results
 
-        print(f"📝 响应长度: {len(response_content)} 字符")
-        print(f"📄 响应内容: {response_content[:200]}{'...' if len(response_content) > 200 else ''}")
-
-        # 验证响应
-        if "successful" in response_content.lower() or "test" in response_content.lower():
-            print("✅ LLM响应正常！")
-            return True
-        else:
-            print("⚠️ LLM响应内容可能异常")
-            return False
-
-    except Exception as e:
-        print(f"❌ LLM调用失败: {e}")
-        print(f"❌ 错误类型: {type(e).__name__}")
-        return False
-
-
+async def wait_for_batch_results(batch_id: str, poll_interval: int = 60) -> List[Dict[str, Any]]:
+    """Polls for batch completion and returns results."""
+    import asyncio
+    while True:
+        batch = get_batch_status(batch_id)
+        status = batch.get('status') if isinstance(batch, dict) else getattr(batch, 'status', None)
+        
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Batch {batch_id} status: {status}", flush=True)
+        
+        if status == "completed":
+            return retrieve_batch_results(batch_id)
+        if status in ["failed", "expired", "cancelled"]:
+            print(f"Batch {batch_id} terminated with status: {status}")
+            return []
+            
+        await asyncio.sleep(poll_interval)
 
 if __name__ == "__main__":
-    success = test_llm_call()
-    exit(0 if success else 1)
+    import sys
+    
+    # Check if we want to test batch
+    if "--batch" in sys.argv:
+        print("🚀 Testing Batch Inference...")
+        try:
+            prompts = ["Explain quantum entanglement in one sentence.", "What is the capital of France?"]
+            batch_id = submit_batch_inference(prompts)
+            print(f"Batch submitted! ID: {batch_id}")
+            print("Waiting for results (this may take a while)...")
+            results = wait_for_batch_results(batch_id, poll_interval=10)
+            print(f"Results: {json.dumps(results, indent=2, ensure_ascii=False)}")
+        except Exception as e:
+            print(f"Batch Error: {e}")
+    else:
+        print("🚀 Testing LLM Call (use --batch to test batch inference)...")
+        try:
+            model = get_router_model()
+            content, ok = call_llm_with_retry(model, "Hello, say 'test successful'", max_retries=1)
+            print(f"Result: {content}" if ok else "Failed")
+        except Exception as e:
+            print(f"Error: {e}")

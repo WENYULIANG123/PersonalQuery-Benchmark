@@ -1,0 +1,976 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Entity Matching Graph Explorer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/dist/vis-network.min.js"
+    integrity="sha512-4/EGWWWj7LIr/e+CvsslZkRk0fHDpf04dydJHoHOH32Mpw8jYU28GNI6mruO7fh/1kq15kSvwhKJftMSlgm0FA=="
+    crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/dist/dist/vis-network.min.css"
+    integrity="sha512-WgxfT5LWjfszlPHXRmBWHkV2eceiWTOBvrKCNbdgDYTHrT2AeLCGbF4sZlZw3UMN3WtL0tGUoIAKsu8mllg/XA=="
+    crossorigin="anonymous" referrerpolicy="no-referrer" />
+  <style>
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      margin: 0;
+      background: #0b1020;
+      color: #e8edf7;
+    }
+    header {
+      padding: 18px 22px;
+      font-size: 20px;
+      font-weight: 700;
+      background: linear-gradient(180deg, #101833, #0b1020);
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    .wrap {
+      display: grid;
+      grid-template-columns: 420px 1fr;
+      gap: 14px;
+      padding: 14px;
+      align-items: start;
+    }
+    .leftcol {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      height: calc(100vh - 120px);
+      min-height: 520px;
+    }
+    .text-card {
+      flex: 1;
+      min-height: 260px;
+      display: flex;
+      flex-direction: column;
+    }
+    .card {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px;
+      padding: 12px;
+      box-shadow: 0 10px 24px rgba(0,0,0,0.25);
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    label {
+      display: block;
+      font-size: 12px;
+      color: rgba(232,237,247,0.75);
+      margin-bottom: 6px;
+    }
+    input, select {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 10px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(0,0,0,0.18);
+      color: #e8edf7;
+      outline: none;
+    }
+    button {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 0;
+      font-weight: 700;
+      background: #ff7a2f;
+      color: #111;
+      cursor: pointer;
+    }
+    button:hover { filter: brightness(1.04); }
+    .hint {
+      font-size: 12px;
+      color: rgba(232,237,247,0.7);
+      line-height: 1.45;
+    }
+    #network {
+      width: 100%;
+      height: calc(100vh - 120px);
+      background: #ffffff;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    #info {
+      height: 100%;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.45;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      background: rgba(0,0,0,0.25);
+      border-radius: 10px;
+      padding: 12px;
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .pill {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      margin-left: 8px;
+      background: rgba(255,255,255,0.08);
+      color: rgba(232,237,247,0.85);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    Entity Matching Graph Explorer
+    <span class="pill">static HTML + vis-network</span>
+  </header>
+  <div class="wrap">
+    <div class="leftcol">
+    <div class="card">
+      <div class="row">
+        <div>
+          <label>Number of Hops</label>
+          <select id="hops">
+            <option value="1">1</option>
+            <option value="2" selected>2</option>
+            <option value="inf">inf</option>
+          </select>
+        </div>
+        <div>
+          <label>Max Edges</label>
+          <input id="maxEdges" type="number" min="10" max="5000" step="10" value="250" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Seed</label>
+          <input id="seed" type="number" min="0" step="1" value="7" />
+        </div>
+        <div>
+          <label>遍历限制（避免非product节点回溯拉入大量商品）</label>
+          <select id="traversalMode">
+            <option value="undirected" selected>默认（无向：允许从 category 回到商品）</option>
+            <option value="no_back_to_product">限制（非product节点不走入边）</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>选中商品时展开全部实体值</label>
+          <select id="expandAllEntities">
+            <option value="off" selected>关闭</option>
+            <option value="on">开启</option>
+          </select>
+        </div>
+        <div>
+          <label>Max Entity Values（0=全部）</label>
+          <input id="maxValues" type="number" min="0" max="20000" step="50" value="0" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>自动显示商品完整信息数量（0=关闭）</label>
+          <input id="maxProductInfos" type="number" min="0" max="50" step="1" value="0" />
+        </div>
+        <div class="hint" style="margin-top: 22px;">
+          渲染后在左下角一次性展示前 N 个商品信息
+        </div>
+      </div>
+      <button id="renderBtn">Display Semi-structured Data</button>
+      <div style="height:10px"></div>
+      <div class="hint">
+        - hops=1/2 会做 BFS；hops=inf 会随机采样边。<br/>
+        - 点击节点会在左下角显示文本信息。<br/>
+        - 开启“展开全部实体值”后，点击商品节点会强制显示该商品全部实体节点（可用 Max Entity Values 限制）。<br/>
+        - 开启“遍历限制”后，category 节点不会通过入边回溯到大量 product，从而避免图爆炸。<br/>
+        - 设置“自动显示商品完整信息数量”后，渲染后会自动展示多个商品的完整信息（categories + entities）。<br/>
+      </div>
+    </div>
+
+    <div class="card text-card">
+      <div style="font-weight:700; margin-bottom:10px;">Textual Info</div>
+      <div id="info">点击图里的节点查看信息。</div>
+    </div>
+    </div>
+
+    <div id="network"></div>
+  </div>
+
+  <script>
+    // In scheme B, entity nodes are typed by category name (Brand/Usage/...)
+    // We treat any non-product/category node as an "entity" visually.
+    const NODE_COLORS = {
+      "product": "#ff6b6b",
+      "category": "#4dabf7",
+      "entity": "#adb5bd",
+      "unknown": "#c0c0c0",
+    };
+
+    const edgeTypeDict = {"0":"has_category","1":"has_brand","2":"has_material","3":"has_dimensions","4":"has_quantity","5":"has_color","6":"has_design","7":"has_usage","8":"has_selling_point","9":"has_safety_certification","10":"has_accessories","11":"category_parent_of"};
+    const asin2id = {"B00MRTCPW8":0,"B009F29EBU":23,"B01F8HLF1M":38,"B00JBI05L6":46,"B01EX57LTK":53,"B00H5XHYQI":73,"B001BEV7JC":85,"B001U0152G":90,"B001GQ37ZW":103,"B00114587Y":115,"B00AE25BI0":121,"B001PMI5TA":131,"B000S5OWCO":136,"B01BQWHP12":160,"B00CXL9EZQ":167,"B002AKCDAS":184,"B003TZZ634":187,"B003DQLFPW":196,"B000N2Y6P0":202,"B016KE0CFM":233,"B00BIDB0RK":242,"B014X5C4E2":254,"B005Z43U1C":265,"B007J5YBTK":269,"B01HJ4LAUI":283,"B01FEYYW96":291,"B00ZSQX63O":304,"B00P0ZW274":319,"B00IXWLWMM":330,"B00369ZL2E":350,"B016ZTCDFO":365,"B00E89M3K4":381,"B00ULH76KE":389,"B00TYNY0FA":394,"B01GF0152A":402,"B005TL10AY":411,"B0011UP7BK":415,"B00UD6KTDO":427,"B0052PT2U2":435,"B0052PPJI6":446,"B00P6IS2YC":454,"B00PEJIXLU":463,"B00CXK8CIW":475,"B00B9F21CA":488,"B0052PNUIW":495,"B00ADT9O3W":505,"B0056AE8G6":510,"B00W7BNIOK":528,"B016YRRU82":536,"B0044JOUCC":548,"B019W9EFWI":559,"B00BIBQZVI":574,"B00BIC08QU":579,"B004M59O4C":582,"B001AGZXUA":599,"B00H5X8COG":609,"B00OTXTWD0":614,"B00114OSR0":624,"B00WAVX9LY":632,"B00O35MNC6":644,"B000MATF4A":660,"B0042GZGU2":668,"B00CZ7A0Z6":675,"B01H684F7W":680,"B016OB6LGA":688,"B00WT5VK62":697,"B00BYL3D7Q":734,"B003WD2T06":749,"B000RAYLXK":753,"B00CRXUPOO":763,"B01AMLI74W":771,"B001T2YFCW":781,"B004BNAIHW":786,"B00MNZXXK4":798,"B00VF21D2Q":831,"B00MCZM93W":841,"B00389N8HC":862,"B01A9UE9X4":867,"B003ZS335S":894,"B000I7OIPI":899,"B00H137W0A":904,"B00SPZZ6JM":912,"B00KAYDYE0":916,"B00FHKRP2O":950,"B01F4704XG":951,"B013TBUJY8":961,"B00II5CUIO":970,"B013TBUGVO":977,"B00MVILT36":985,"B005M4UXII":995,"B005P1UZEA":1006,"B000RB1MH2":1024,"B00BYL2W28":1036,"B001C1NMO2":1049,"B002BQ09RA":1053,"B004HE593S":1070,"B01BLEISSY":1084,"B00DMHL9BM":1168,"B000BGSZFU":1184,"B00VWMWXRS":1217,"B00SW39OCC":1230,"B001668EL4":1249};
+
+    // node array indexed by original node id
+    const nodesById = [{"id":0,"ntype":"product","label":"B00MRTCPW8","info":{"type":"product","asin":"B00MRTCPW8","title":"COMIART 5pcs Flexible Fimo Clay Sculpture Tools Silicon Color Shapers Brushes Size 2","main_cat":"Arts, Crafts & Sewing"}},{"id":1,"ntype":"category","label":"Arts, Crafts & Sewing","info":{"type":"category","category_name":"Arts, Crafts & Sewing"}},{"id":2,"ntype":"category","label":"Painting, Drawing & Art Supplies","info":{"type":"category","category_name":"Painting, Drawing & Art Supplies"}},{"id":3,"ntype":"category","label":"Painting","info":{"type":"category","category_name":"Painting"}},{"id":4,"ntype":"category","label":"Paintbrushes","info":{"type":"category","category_name":"Paintbrushes"}},{"id":5,"ntype":"category","label":"Paintbrush Sets","info":{"type":"category","category_name":"Paintbrush Sets"}},{"id":6,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"COMIART CREATE COLOR LIFE"}},{"id":7,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"5"}},{"id":8,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Silicone"}},{"id":9,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Fimo"}},{"id":10,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"Size 2"}},{"id":11,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Cup Chisel"}},{"id":12,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Taper Point"}},{"id":13,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Flat Chisel"}},{"id":14,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Cup Round"}},{"id":15,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Angle Chisel"}},{"id":16,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Clay"}},{"id":17,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Nails"}},{"id":18,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Art projects"}},{"id":19,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Sculpture"}},{"id":20,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Plasticine"}},{"id":21,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Fondant"}},{"id":22,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Cake decorating"}},{"id":23,"ntype":"product","label":"B009F29EBU","info":{"type":"product","asin":"B009F29EBU","title":"Hemingworth 700m Metallic Thread Rose Quartz 9020","main_cat":"Amazon Home"}},{"id":24,"ntype":"category","label":"Sewing","info":{"type":"category","category_name":"Sewing"}},{"id":25,"ntype":"category","label":"Thread & Floss","info":{"type":"category","category_name":"Thread & Floss"}},{"id":26,"ntype":"category","label":"Embroidery Thread & Floss","info":{"type":"category","category_name":"Embroidery Thread & Floss"}},{"id":27,"ntype":"category","label":"Embroidery Machine Thread","info":{"type":"category","category_name":"Embroidery Machine Thread"}},{"id":28,"ntype":"category","label":"Amazon Home","info":{"type":"category","category_name":"Amazon Home"}},{"id":29,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Hemingworth"}},{"id":30,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"700m"}},{"id":31,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"3"}},{"id":32,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Rose Quartz"}},{"id":33,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Embroidery Machine"}},{"id":34,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Prevents tangles"}},{"id":35,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Protects thread"}},{"id":36,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Free Shipping"}},{"id":37,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Protective cap"}},{"id":38,"ntype":"product","label":"B01F8HLF1M","info":{"type":"product","asin":"B01F8HLF1M","title":"HONEYSEW Embroidery Thread Spool Holder Stand Sewing Machine Accessories three spool thread stand White Blue Pink three color for choose (pink)","main_cat":"Arts, Crafts & Sewing"}},{"id":39,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"HONEYSEW"}},{"id":40,"ntype":"Color","label":"Color","info":{"type":"Color","name":"White"}},{"id":41,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Blue"}},{"id":42,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Pink"}},{"id":43,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Sewing"}},{"id":44,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Embroidery"}},{"id":45,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Save 3%"}},{"id":46,"ntype":"product","label":"B00JBI05L6","info":{"type":"product","asin":"B00JBI05L6","title":"Singer Large Hoop for XL400, XL550, XL580 and Quartet Embroidery Machines","main_cat":"Arts, Crafts & Sewing"}},{"id":47,"ntype":"category","label":"Needlework","info":{"type":"category","category_name":"Needlework"}},{"id":48,"ntype":"category","label":"Embroidery","info":{"type":"category","category_name":"Embroidery"}},{"id":49,"ntype":"category","label":"Hoops","info":{"type":"category","category_name":"Hoops"}},{"id":50,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Singer"}},{"id":51,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"7 1/8"}},{"id":52,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"11 1/2"}},{"id":53,"ntype":"product","label":"B01EX57LTK","info":{"type":"product","asin":"B01EX57LTK","title":"Egoshop 72-color Marco Renior Oil Based Colored Pencils Set for Artist Sketching Drawing Writing Art Painting/ Adult Coloring Books Metal Tin Case","main_cat":"Arts, Crafts & Sewing"}},{"id":54,"ntype":"category","label":"Drawing","info":{"type":"category","category_name":"Drawing"}},{"id":55,"ntype":"category","label":"Drawing Media","info":{"type":"category","category_name":"Drawing Media"}},{"id":56,"ntype":"category","label":"Pencils","info":{"type":"category","category_name":"Pencils"}},{"id":57,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Egoshop"}},{"id":58,"ntype":"Material","label":"Material","info":{"type":"Material","name":"oil based"}},{"id":59,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"3.7mm"}},{"id":60,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"72"}},{"id":61,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Sketching"}},{"id":62,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Drawing"}},{"id":63,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Writing"}},{"id":64,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Art Painting"}},{"id":65,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Coloring Books"}},{"id":66,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"easy to sharpen"}},{"id":67,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"brilliant colors"}},{"id":68,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"smooth"}},{"id":69,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"artist grade"}},{"id":70,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"high print effect"}},{"id":71,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"portable"}},{"id":72,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"tin box"}},{"id":73,"ntype":"product","label":"B00H5XHYQI","info":{"type":"product","asin":"B00H5XHYQI","title":"RAYON EMBROIDERY THREAD VARIEGATED SHADES (Multicolored) 820 yards","main_cat":"Arts, Crafts & Sewing"}},{"id":74,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"BULLET THREADS"}},{"id":75,"ntype":"Material","label":"Material","info":{"type":"Material","name":"RAYON"}},{"id":76,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"800 meters"}},{"id":77,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"820 yards"}},{"id":78,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"10"}},{"id":79,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Christmas"}},{"id":80,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"hand embroidery"}},{"id":81,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Quilting"}},{"id":82,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Tapestry"}},{"id":83,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"fast color"}},{"id":84,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"AZO FREE"}},{"id":85,"ntype":"product","label":"B001BEV7JC","info":{"type":"product","asin":"B001BEV7JC","title":"Candle Spray Guest Towels Stamped Cross Stitch-16&quot;x26&quot;","main_cat":"Arts, Crafts & Sewing"}},{"id":86,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Dimensions"}},{"id":87,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"16 inches"}},{"id":88,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"26 inches"}},{"id":89,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Cross Stitch"}},{"id":90,"ntype":"product","label":"B001U0152G","info":{"type":"product","asin":"B001U0152G","title":"25 LARGE Cones Variegated Embroidery Machine Thread 40wt 1100yards Poly120D/2","main_cat":"Arts, Crafts & Sewing"}},{"id":91,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"ThreadNanny"}},{"id":92,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Polyester"}},{"id":93,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1100yards"}},{"id":94,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"40wt"}},{"id":95,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"120D/2"}},{"id":96,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"25"}},{"id":97,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Premium Quality"}},{"id":98,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Bright Colors"}},{"id":99,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"100% Colorfast"}},{"id":100,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"No running"}},{"id":101,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"Colorfast"}},{"id":102,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Shrink wrap"}},{"id":103,"ntype":"product","label":"B001GQ37ZW","info":{"type":"product","asin":"B001GQ37ZW","title":"Holbein Artist Colored Pencil 150 Colors Op945","main_cat":"Arts, Crafts & Sewing"}},{"id":104,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Holbein"}},{"id":105,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"150"}},{"id":106,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Red"}},{"id":107,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Yellow"}},{"id":108,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Brown"}},{"id":109,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Green"}},{"id":110,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Violet"}},{"id":111,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Grey"}},{"id":112,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Black"}},{"id":113,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Gold"}},{"id":114,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Silver"}},{"id":115,"ntype":"product","label":"B00114587Y","info":{"type":"product","asin":"B00114587Y","title":"Metallic Embroidery Floss 8.7yds-Glow-Dark","main_cat":"Amazon Home"}},{"id":116,"ntype":"category","label":"Floss","info":{"type":"category","category_name":"Floss"}},{"id":117,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"DMC"}},{"id":118,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"8.7 yds"}},{"id":119,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"embroidery"}},{"id":120,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"easy to use"}},{"id":121,"ntype":"product","label":"B00AE25BI0","info":{"type":"product","asin":"B00AE25BI0","title":"10-PieceCurvedLobsterClasps,10mm,GoldPlated","main_cat":"Arts, Crafts & Sewing"}},{"id":122,"ntype":"category","label":"Beading & Jewelry Making","info":{"type":"category","category_name":"Beading & Jewelry Making"}},{"id":123,"ntype":"category","label":"Jewelry Findings","info":{"type":"category","category_name":"Jewelry Findings"}},{"id":124,"ntype":"category","label":"Jewelry Clasps","info":{"type":"category","category_name":"Jewelry Clasps"}},{"id":125,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Beadaholique"}},{"id":126,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"10mm"}},{"id":127,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Lobster Clasp"}},{"id":128,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"bracelets"}},{"id":129,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"anklets"}},{"id":130,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"lead-free"}},{"id":131,"ntype":"product","label":"B001PMI5TA","info":{"type":"product","asin":"B001PMI5TA","title":"Beadaholique Sterling Silver Fine Delicate Cable Chain 1.3mm Bulk By the Foot","main_cat":"Arts, Crafts & Sewing"}},{"id":132,"ntype":"category","label":"Jewelry Making Chains","info":{"type":"category","category_name":"Jewelry Making Chains"}},{"id":133,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Sterling Silver"}},{"id":134,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1.3mm"}},{"id":135,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Cable Chain"}},{"id":136,"ntype":"product","label":"B000S5OWCO","info":{"type":"product","asin":"B000S5OWCO","title":"Caran d'Ache Classic Neocolor II Water-Soluble Pastels, 30 Colors","main_cat":"Arts, Crafts & Sewing"}},{"id":137,"ntype":"category","label":"Crayons","info":{"type":"category","category_name":"Crayons"}},{"id":138,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Caran d'Ache"}},{"id":139,"ntype":"Material","label":"Material","info":{"type":"Material","name":"wax"}},{"id":140,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"30"}},{"id":141,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"sketching"}},{"id":142,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"figure drawing"}},{"id":143,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"portraits"}},{"id":144,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"textile patterns"}},{"id":145,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"quilts"}},{"id":146,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"tapestries"}},{"id":147,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"fashion illustration"}},{"id":148,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"watercolor effects"}},{"id":149,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"sgraffito"}},{"id":150,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"water-soluble"}},{"id":151,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"high pigment concentration"}},{"id":152,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"bright colors"}},{"id":153,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"opaque colors"}},{"id":154,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Swiss Made"}},{"id":155,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"colorfastness"}},{"id":156,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"lightfastness"}},{"id":157,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"EM-71 (CE)"}},{"id":158,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"ASTM D4236"}},{"id":159,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"metal tin"}},{"id":160,"ntype":"product","label":"B01BQWHP12","info":{"type":"product","asin":"B01BQWHP12","title":"Whiskey Painters Round, Pocket Sized, Retractable Travel Brush - Size 2","main_cat":"Arts, Crafts & Sewing"}},{"id":161,"ntype":"category","label":"Pointed-Round Paintbrushes","info":{"type":"category","category_name":"Pointed-Round Paintbrushes"}},{"id":162,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Whiskey Painters"}},{"id":163,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Round"}},{"id":164,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Retractable"}},{"id":165,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Portable"}},{"id":166,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Fits in pocket"}},{"id":167,"ntype":"product","label":"B00CXL9EZQ","info":{"type":"product","asin":"B00CXL9EZQ","title":"Monalisa Stamped Cross Stitch- Butterfly (Silk Thread, Small)","main_cat":"Arts, Crafts & Sewing"}},{"id":168,"ntype":"category","label":"Cross-Stitch","info":{"type":"category","category_name":"Cross-Stitch"}},{"id":169,"ntype":"category","label":"Stamped Kits","info":{"type":"category","category_name":"Stamped Kits"}},{"id":170,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Mona Lisa"}},{"id":171,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Cotton"}},{"id":172,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Sailcloth"}},{"id":173,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"73x54cm"}},{"id":174,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"28.7x21.3inches"}},{"id":175,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Butterfly"}},{"id":176,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Ornament"}},{"id":177,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Easy-to-follow instructions"}},{"id":178,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Not include frame"}},{"id":179,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"Eco-friendly"}},{"id":180,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Cotton thread"}},{"id":181,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Color-coded thread sorter"}},{"id":182,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Needle"}},{"id":183,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Easy instructions"}},{"id":184,"ntype":"product","label":"B002AKCDAS","info":{"type":"product","asin":"B002AKCDAS","title":"Singer Tiny Tailor Sewing Machine\" />","main_cat":"Arts, Crafts & Sewing"}},{"id":185,"ntype":"category","label":"Sewing Machines","info":{"type":"category","category_name":"Sewing Machines"}},{"id":186,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Portable"}},{"id":187,"ntype":"product","label":"B003TZZ634","info":{"type":"product","asin":"B003TZZ634","title":"Singer Machine Needle Cushion","main_cat":"Arts, Crafts & Sewing"}},{"id":188,"ntype":"category","label":"Sewing Notions & Supplies","info":{"type":"category","category_name":"Sewing Notions & Supplies"}},{"id":189,"ntype":"category","label":"Pins & Pincushions","info":{"type":"category","category_name":"Pins & Pincushions"}},{"id":190,"ntype":"category","label":"Pincushions","info":{"type":"category","category_name":"Pincushions"}},{"id":191,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"SINGER"}},{"id":192,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1-3/4 inches"}},{"id":193,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"2-1/2 inches"}},{"id":194,"ntype":"Color","label":"Color","info":{"type":"Color","name":"pink"}},{"id":195,"ntype":"Color","label":"Color","info":{"type":"Color","name":"black"}},{"id":196,"ntype":"product","label":"B003DQLFPW","info":{"type":"product","asin":"B003DQLFPW","title":"Royal &amp; Langnickel RART-200 Essentials Sketching Pencil Set, 21-Piece","main_cat":"Arts, Crafts & Sewing"}},{"id":197,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"21"}},{"id":198,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Graphite"}},{"id":199,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Charcoal"}},{"id":200,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Eraser"}},{"id":201,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Sharpener"}},{"id":202,"ntype":"product","label":"B000N2Y6P0","info":{"type":"product","asin":"B000N2Y6P0","title":"Prismacolor NuPastel Artists Pastels, Assorted Colors, Pack of 12","main_cat":"Office Products"}},{"id":203,"ntype":"category","label":"Pastels","info":{"type":"category","category_name":"Pastels"}},{"id":204,"ntype":"category","label":"Office Products","info":{"type":"category","category_name":"Office Products"}},{"id":205,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Prismacolor"}},{"id":206,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"3-5/8 inches"}},{"id":207,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1/4 inches"}},{"id":208,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"12"}},{"id":209,"ntype":"Color","label":"Color","info":{"type":"Color","name":"sap green"}},{"id":210,"ntype":"Color","label":"Color","info":{"type":"Color","name":"white"}},{"id":211,"ntype":"Color","label":"Color","info":{"type":"Color","name":"sanguine"}},{"id":212,"ntype":"Color","label":"Color","info":{"type":"Color","name":"violet"}},{"id":213,"ntype":"Color","label":"Color","info":{"type":"Color","name":"iron blue"}},{"id":214,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Hooker's green"}},{"id":215,"ntype":"Color","label":"Color","info":{"type":"Color","name":"cadmium yellow deep"}},{"id":216,"ntype":"Color","label":"Color","info":{"type":"Color","name":"ultramarine blue"}},{"id":217,"ntype":"Color","label":"Color","info":{"type":"Color","name":"pale vermillion"}},{"id":218,"ntype":"Color","label":"Color","info":{"type":"Color","name":"sepia"}},{"id":219,"ntype":"Color","label":"Color","info":{"type":"Color","name":"carnival red"}},{"id":220,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"illustration"}},{"id":221,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"tightly rendered drawings"}},{"id":222,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"broad strokes"}},{"id":223,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"fine lines"}},{"id":224,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"adult coloring projects"}},{"id":225,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"tougher than traditional pastels"}},{"id":226,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"resist breaking"}},{"id":227,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"less powdery mess"}},{"id":228,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"stronger"}},{"id":229,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"easy cleanup"}},{"id":230,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"easy to blend"}},{"id":231,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"dynamic pastels"}},{"id":232,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"Non-toxic"}},{"id":233,"ntype":"product","label":"B016KE0CFM","info":{"type":"product","asin":"B016KE0CFM","title":"HoneyGlass Handmade Glass Dip Pen - Gift","main_cat":"Arts, Crafts & Sewing"}},{"id":234,"ntype":"category","label":"Organization, Storage & Transport","info":{"type":"category","category_name":"Organization, Storage & Transport"}},{"id":235,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"HoneyGlass"}},{"id":236,"ntype":"Material","label":"Material","info":{"type":"Material","name":"glass"}},{"id":237,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"writing"}},{"id":238,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"drawing"}},{"id":239,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"glass nib"}},{"id":240,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"smooth writing"}},{"id":241,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"ink compatibility"}},{"id":242,"ntype":"product","label":"B00BIDB0RK","info":{"type":"product","asin":"B00BIDB0RK","title":"OESD C&amp;C Treasure Chest of Embroidery Machine Designs CD Vol. 2 100 DESIGNS","main_cat":"Amazon Home"}},{"id":243,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Embroidex"}},{"id":244,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"100"}},{"id":245,"ntype":"Design","label":"Design","info":{"type":"Design","name":"ART"}},{"id":246,"ntype":"Design","label":"Design","info":{"type":"Design","name":"PES"}},{"id":247,"ntype":"Design","label":"Design","info":{"type":"Design","name":"PCS"}},{"id":248,"ntype":"Design","label":"Design","info":{"type":"Design","name":"DST"}},{"id":249,"ntype":"Design","label":"Design","info":{"type":"Design","name":"HUS"}},{"id":250,"ntype":"Design","label":"Design","info":{"type":"Design","name":"JEF"}},{"id":251,"ntype":"Design","label":"Design","info":{"type":"Design","name":"SEW"}},{"id":252,"ntype":"Design","label":"Design","info":{"type":"Design","name":"XXX"}},{"id":253,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"EXPLORATION SIZER SOFTWARE"}},{"id":254,"ntype":"product","label":"B014X5C4E2","info":{"type":"product","asin":"B014X5C4E2","title":"Mazbot 6 Inch Bent Handle Curved Embroidery Scissors---Perfect for Machine Embroidery","main_cat":"Office Products"}},{"id":255,"ntype":"category","label":"Crafting","info":{"type":"category","category_name":"Crafting"}},{"id":256,"ntype":"category","label":"Craft Supplies","info":{"type":"category","category_name":"Craft Supplies"}},{"id":257,"ntype":"category","label":"Cutting Tools","info":{"type":"category","category_name":"Cutting Tools"}},{"id":258,"ntype":"category","label":"Scissors","info":{"type":"category","category_name":"Scissors"}},{"id":259,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Mazbot"}},{"id":260,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Stainless Steel"}},{"id":261,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"6 Inch"}},{"id":262,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Bent Handle"}},{"id":263,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Curved Design"}},{"id":264,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Machine Embroidery"}},{"id":265,"ntype":"product","label":"B005Z43U1C","info":{"type":"product","asin":"B005Z43U1C","title":"Winsor &amp; Newton Water Color Blending Medium, 75ml","main_cat":"Arts, Crafts & Sewing"}},{"id":266,"ntype":"category","label":"Paints","info":{"type":"category","category_name":"Paints"}},{"id":267,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"75ml"}},{"id":268,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"blending"}},{"id":269,"ntype":"product","label":"B007J5YBTK","info":{"type":"product","asin":"B007J5YBTK","title":"Sennelier L'Aquarelle French Watercolor Paint, Travel Set of 14 Half Pans","main_cat":"Amazon Home"}},{"id":270,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Sennelier"}},{"id":271,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Kordofan Gum Arabic"}},{"id":272,"ntype":"Material","label":"Material","info":{"type":"Material","name":"plastic"}},{"id":273,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"14"}},{"id":274,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"brilliance"}},{"id":275,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"luminosity"}},{"id":276,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"longevity"}},{"id":277,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"honey content"}},{"id":278,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"smooth colours"}},{"id":279,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"intense colours"}},{"id":280,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"sable travel brush"}},{"id":281,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"palette drawer"}},{"id":282,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"plastic case"}},{"id":283,"ntype":"product","label":"B01HJ4LAUI","info":{"type":"product","asin":"B01HJ4LAUI","title":"ZEM BRUSH Artist Brush Holder Wrap or Travel Brush Case","main_cat":"Arts, Crafts & Sewing"}},{"id":284,"ntype":"category","label":"Paint Brush Organizers & Holders","info":{"type":"category","category_name":"Paint Brush Organizers & Holders"}},{"id":285,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"ZEM"}},{"id":286,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Nylon"}},{"id":287,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"9.5 inch"}},{"id":288,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"24 cm"}},{"id":289,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"16.5 inch"}},{"id":290,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"42 cm"}},{"id":291,"ntype":"product","label":"B01FEYYW96","info":{"type":"product","asin":"B01FEYYW96","title":"Cute Glass Dip Pen Vintage Handmade Glass Signature Pen Elegant Crystal Dip Sign Gift Pen for Writing Decoration Purposes Christmas Gift (Black)","main_cat":"Arts, Crafts & Sewing"}},{"id":292,"ntype":"category","label":"Pens","info":{"type":"category","category_name":"Pens"}},{"id":293,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"HOZZQ"}},{"id":294,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Glass"}},{"id":295,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Crystal"}},{"id":296,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"19cm"}},{"id":297,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"3.5cm"}},{"id":298,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"1pc"}},{"id":299,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Vintage"}},{"id":300,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Quill"}},{"id":301,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Signature"}},{"id":302,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Calligraphy"}},{"id":303,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Handwriting"}},{"id":304,"ntype":"product","label":"B00ZSQX63O","info":{"type":"product","asin":"B00ZSQX63O","title":"Silhouette America Mint Stamp Kit, White","main_cat":"Arts, Crafts & Sewing"}},{"id":305,"ntype":"category","label":"Scrapbooking & Stamping","info":{"type":"category","category_name":"Scrapbooking & Stamping"}},{"id":306,"ntype":"category","label":"Stamps & Ink Pads","info":{"type":"category","category_name":"Stamps & Ink Pads"}},{"id":307,"ntype":"category","label":"Stamps","info":{"type":"category","category_name":"Stamps"}},{"id":308,"ntype":"category","label":"Clear Stamps","info":{"type":"category","category_name":"Clear Stamps"}},{"id":309,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Silhouette America"}},{"id":310,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"15x60"}},{"id":311,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"30x30"}},{"id":312,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"4"}},{"id":313,"ntype":"Color","label":"Color","info":{"type":"Color","name":"red"}},{"id":314,"ntype":"Color","label":"Color","info":{"type":"Color","name":"blue"}},{"id":315,"ntype":"Color","label":"Color","info":{"type":"Color","name":"yellow"}},{"id":316,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"power cord"}},{"id":317,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"USB cord"}},{"id":318,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"quick t guide"}},{"id":319,"ntype":"product","label":"B00P0ZW274","info":{"type":"product","asin":"B00P0ZW274","title":"Elbesee Embroidery Seat Frame Includes 6&quot;, 8&quot; and 10&quot; Hoops Made in Great Britain!","main_cat":"Amazon Home"}},{"id":320,"ntype":"category","label":"Quilting","info":{"type":"category","category_name":"Quilting"}},{"id":321,"ntype":"category","label":"Frames","info":{"type":"category","category_name":"Frames"}},{"id":322,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Elbesee"}},{"id":323,"ntype":"Material","label":"Material","info":{"type":"Material","name":"wood"}},{"id":324,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"6 inch"}},{"id":325,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"8 inch"}},{"id":326,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"10 inch"}},{"id":327,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"crewel"}},{"id":328,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"counted thread"}},{"id":329,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"hoops"}},{"id":330,"ntype":"product","label":"B00IXWLWMM","info":{"type":"product","asin":"B00IXWLWMM","title":"Tim Holtz Idea-ology Thrift Shop Ephemera Pack, 54 Pieces, TH93114","main_cat":"Arts, Crafts & Sewing"}},{"id":331,"ntype":"category","label":"Paper & Paper Crafts","info":{"type":"category","category_name":"Paper & Paper Crafts"}},{"id":332,"ntype":"category","label":"Paper","info":{"type":"category","category_name":"Paper"}},{"id":333,"ntype":"category","label":"Card Stock","info":{"type":"category","category_name":"Card Stock"}},{"id":334,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Tim Holtz Idea-ology"}},{"id":335,"ntype":"Material","label":"Material","info":{"type":"Material","name":"paper"}},{"id":336,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1 inch"}},{"id":337,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"7 inch"}},{"id":338,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"54 pieces"}},{"id":339,"ntype":"Design","label":"Design","info":{"type":"Design","name":"butterflies"}},{"id":340,"ntype":"Design","label":"Design","info":{"type":"Design","name":"signs"}},{"id":341,"ntype":"Design","label":"Design","info":{"type":"Design","name":"certificates"}},{"id":342,"ntype":"Design","label":"Design","info":{"type":"Design","name":"calendars"}},{"id":343,"ntype":"Design","label":"Design","info":{"type":"Design","name":"floral arrangements"}},{"id":344,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"layering"}},{"id":345,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"curated collection"}},{"id":346,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"vintage inspired"}},{"id":347,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"eclectic collection"}},{"id":348,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"heavy weight paper"}},{"id":349,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"vintage thrift Store theme"}},{"id":350,"ntype":"product","label":"B00369ZL2E","info":{"type":"product","asin":"B00369ZL2E","title":"Imagine, Pssst Sheer Shimmer, 7 mL Ultra Fine Spray, Sparkle","main_cat":"Arts, Crafts & Sewing"}},{"id":351,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Imagine"}},{"id":352,"ntype":"Material","label":"Material","info":{"type":"Material","name":"ink"}},{"id":353,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"0.618"}},{"id":354,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"4-inch"}},{"id":355,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"7"}},{"id":356,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Frost"}},{"id":357,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Sparkle"}},{"id":358,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Copper"}},{"id":359,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Pewter"}},{"id":360,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"paper"}},{"id":361,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"wood"}},{"id":362,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"fabrics"}},{"id":363,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"cut flowers"}},{"id":364,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"refill bottles"}},{"id":365,"ntype":"product","label":"B016ZTCDFO","info":{"type":"product","asin":"B016ZTCDFO","title":"PH PandaHall 100PCS Clear Plastic Tube Bead Containers, 78x13mm (3.07in long, 0.51in wide)","main_cat":"Arts, Crafts & Sewing"}},{"id":366,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"PH PandaHall"}},{"id":367,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"13mm"}},{"id":368,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"78mm"}},{"id":369,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"0.51in"}},{"id":370,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"3.07in"}},{"id":371,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"100pcs"}},{"id":372,"ntype":"Color","label":"Color","info":{"type":"Color","name":"clear"}},{"id":373,"ntype":"Design","label":"Design","info":{"type":"Design","name":"tube"}},{"id":374,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"seed beads"}},{"id":375,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"needles"}},{"id":376,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"jewellery"}},{"id":377,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"pins"}},{"id":378,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"coins"}},{"id":379,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"buttons"}},{"id":380,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"cover"}},{"id":381,"ntype":"product","label":"B00E89M3K4","info":{"type":"product","asin":"B00E89M3K4","title":"LyonsBlue 39 Assorted Color 200 Yards Per Unit Polyester Sewing Thread Spool Set","main_cat":"Arts, Crafts & Sewing"}},{"id":382,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"LyonsBlue"}},{"id":383,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"200 Yards"}},{"id":384,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"100 Yards"}},{"id":385,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Hand Sewing"}},{"id":386,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Lifetime Warranty"}},{"id":387,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Money Back Guarantee"}},{"id":388,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"3-row case"}},{"id":389,"ntype":"product","label":"B00ULH76KE","info":{"type":"product","asin":"B00ULH76KE","title":"92,000 Embroidery Machine Patterns Designs Collection","main_cat":"Industrial & Scientific"}},{"id":390,"ntype":"category","label":"Industrial & Scientific","info":{"type":"category","category_name":"Industrial & Scientific"}},{"id":391,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Double G Embroidery"}},{"id":392,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"2"}},{"id":393,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"DVD"}},{"id":394,"ntype":"product","label":"B00TYNY0FA","info":{"type":"product","asin":"B00TYNY0FA","title":"Prima Marketing Julie Nutting Hair &amp; Skin Tones Mixed Media Watercolor Pencils (12 Pack)","main_cat":"Arts, Crafts & Sewing"}},{"id":395,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Prima Marketing"}},{"id":396,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"7-1/2 inch"}},{"id":397,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"4-1/2 inch"}},{"id":398,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1/2 inch"}},{"id":399,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Mixed Media"}},{"id":400,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"each sold separately"}},{"id":401,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"tin case"}},{"id":402,"ntype":"product","label":"B01GF0152A","info":{"type":"product","asin":"B01GF0152A","title":"ThreadNanny 3.5&quot; Titanium Stork Bird Embroidery Scissors Sewing Bird Shaped Dressmaker Shears Scissors for Craft Art Work, Embroidery Needle","main_cat":"Amazon Home"}},{"id":403,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Titanium"}},{"id":404,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"3.5\""}},{"id":405,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Bird"}},{"id":406,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Beading"}},{"id":407,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Precision"}},{"id":408,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Control"}},{"id":409,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Longer lasting"}},{"id":410,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Reducing hand fatigue"}},{"id":411,"ntype":"product","label":"B005TL10AY","info":{"type":"product","asin":"B005TL10AY","title":"Janome Sew Mini 2-Stitch Sewing Machine","main_cat":"Arts, Crafts & Sewing"}},{"id":412,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Janome"}},{"id":413,"ntype":"Design","label":"Design","info":{"type":"Design","name":"2-Stitch"}},{"id":414,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"travel"}},{"id":415,"ntype":"product","label":"B0011UP7BK","info":{"type":"product","asin":"B0011UP7BK","title":"Stabilo CarbOthello Pastel Pencil, 60-Color Set","main_cat":"Office Products"}},{"id":416,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Stabilo"}},{"id":417,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"4.4 mm"}},{"id":418,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"60"}},{"id":419,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"artists"}},{"id":420,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"intense pigmentation"}},{"id":421,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"light-proof"}},{"id":422,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"break-resistant"}},{"id":423,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"blendable"}},{"id":424,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"partially soluble"}},{"id":425,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"non-toxic"}},{"id":426,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"fixative"}},{"id":427,"ntype":"product","label":"B00UD6KTDO","info":{"type":"product","asin":"B00UD6KTDO","title":"Mungyo Water-Soluble Oil Pastel Set of 24 - Pearl Set","main_cat":"Arts, Crafts & Sewing"}},{"id":428,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Mungyo"}},{"id":429,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Oil"}},{"id":430,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"3 inches"}},{"id":431,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"24"}},{"id":432,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"shading"}},{"id":433,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Water-Soluble"}},{"id":434,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Brush"}},{"id":435,"ntype":"product","label":"B0052PT2U2","info":{"type":"product","asin":"B0052PT2U2","title":"ThreadNanny 4 MULTICOLOR METALLIC MACHINE EMBROIDERY THREAD CONES","main_cat":"Amazon Home"}},{"id":436,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"ThreadsRus"}},{"id":437,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"1100 yards"}},{"id":438,"ntype":"Color","label":"Color","info":{"type":"Color","name":"silver"}},{"id":439,"ntype":"Design","label":"Design","info":{"type":"Design","name":"sparkle"}},{"id":440,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"machine embroidery"}},{"id":441,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"shiny"}},{"id":442,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"metallic"}},{"id":443,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"dust protected"}},{"id":444,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"cones"}},{"id":445,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"spools"}},{"id":446,"ntype":"product","label":"B0052PPJI6","info":{"type":"product","asin":"B0052PPJI6","title":"20 Metallic Embroidery Threads 1100 yards for Computerized Machines For Brother Babylock Janome Singer Pfaff Husqvaran Bernina Machine","main_cat":"Amazon Home"}},{"id":447,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Metallic"}},{"id":448,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1100 yards"}},{"id":449,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"20"}},{"id":450,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Sparkle"}},{"id":451,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Super Shiny"}},{"id":452,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Original"}},{"id":453,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"New"}},{"id":454,"ntype":"product","label":"B00P6IS2YC","info":{"type":"product","asin":"B00P6IS2YC","title":"Glorious Trees Christmas Holiday Redwork Embroidery Machine Designs on CD - Multiformat Pattern CD","main_cat":"Amazon Home"}},{"id":455,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"StitchX Embroidery"}},{"id":456,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"4x4"}},{"id":457,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"5x7"}},{"id":458,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Glorious Trees"}},{"id":459,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"outline quilting"}},{"id":460,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"quilt"}},{"id":461,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"wall hanging"}},{"id":462,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"CD"}},{"id":463,"ntype":"product","label":"B00PEJIXLU","info":{"type":"product","asin":"B00PEJIXLU","title":"Neoviva Fabric Coated Pumpkin Shaped Wrist Wearable Pin Cushion for Needlework, Pack of 2, Floral Alice's Secret Garden","main_cat":"Arts, Crafts & Sewing"}},{"id":464,"ntype":"category","label":"Fabric","info":{"type":"category","category_name":"Fabric"}},{"id":465,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Neoviva"}},{"id":466,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"3.9 inch"}},{"id":467,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1.6 inch"}},{"id":468,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"5.5 inch"}},{"id":469,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Pumpkin"}},{"id":470,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Floral"}},{"id":471,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Alice's Secret Garden"}},{"id":472,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Needlework"}},{"id":473,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Wrist Tie"}},{"id":474,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Pearl Button"}},{"id":475,"ntype":"product","label":"B00CXK8CIW","info":{"type":"product","asin":"B00CXK8CIW","title":"Monalisa Stamped Cross Stitch- Flowers (Cotton Thread)","main_cat":"Arts, Crafts & Sewing"}},{"id":476,"ntype":"Material","label":"Material","info":{"type":"Material","name":"cotton"}},{"id":477,"ntype":"Material","label":"Material","info":{"type":"Material","name":"sailcloth"}},{"id":478,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"44x48cm"}},{"id":479,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"17.3x18.9inches"}},{"id":480,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Flowers"}},{"id":481,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"ornament"}},{"id":482,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"easy instructions"}},{"id":483,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"full embroidery design"}},{"id":484,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"eco-friendly"}},{"id":485,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"thread sorter"}},{"id":486,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"needle"}},{"id":487,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"instructions"}},{"id":488,"ntype":"product","label":"B00B9F21CA","info":{"type":"product","asin":"B00B9F21CA","title":"Hemingworth Color Card","main_cat":"Arts, Crafts & Sewing"}},{"id":489,"ntype":"Material","label":"Material","info":{"type":"Material","name":"thread"}},{"id":490,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"300"}},{"id":491,"ntype":"Design","label":"Design","info":{"type":"Design","name":"spiral binding"}},{"id":492,"ntype":"Design","label":"Design","info":{"type":"Design","name":"flip book"}},{"id":493,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"easy to match"}},{"id":494,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"handy index"}},{"id":495,"ntype":"product","label":"B0052PNUIW","info":{"type":"product","asin":"B0052PNUIW","title":"New ThreadNanny 58 Spools of ALL PURPOSE Polyester Sewing Quilting Serger thread 880yds","main_cat":"Amazon Home"}},{"id":496,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"800 Meters"}},{"id":497,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"880 Yards"}},{"id":498,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"58"}},{"id":499,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Piecing"}},{"id":500,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Applique"}},{"id":501,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Serger"}},{"id":502,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"High tensile strength"}},{"id":503,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Will not Break at High Speed Machines"}},{"id":504,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Best Quality"}},{"id":505,"ntype":"product","label":"B00ADT9O3W","info":{"type":"product","asin":"B00ADT9O3W","title":"Caran D'ache Set of 84 Pastel Pencils In A Wood Box (788.484)","main_cat":"Office Products"}},{"id":506,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"84"}},{"id":507,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Wood"}},{"id":508,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Pastels"}},{"id":509,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Box"}},{"id":510,"ntype":"product","label":"B0056AE8G6","info":{"type":"product","asin":"B0056AE8G6","title":"Dr. Ph. Martin's BOMB10OZSET1 Bombay India 1 Ink Set, 1.0 oz, Colors","main_cat":"Arts, Crafts & Sewing"}},{"id":511,"ntype":"category","label":"Inks","info":{"type":"category","category_name":"Inks"}},{"id":512,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Dr. Ph. Martin's"}},{"id":513,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1.0 oz"}},{"id":514,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Magenta"}},{"id":515,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Bright Red"}},{"id":516,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Teal"}},{"id":517,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Grass Green"}},{"id":518,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"dip pens"}},{"id":519,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"technical drawing pens"}},{"id":520,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"airbrushes"}},{"id":521,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"lightfast"}},{"id":522,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"permanent"}},{"id":523,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"waterproof when dry"}},{"id":524,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"non-clogging"}},{"id":525,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"lightfast"}},{"id":526,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"permanent"}},{"id":527,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"mixing palette"}},{"id":528,"ntype":"product","label":"B00W7BNIOK","info":{"type":"product","asin":"B00W7BNIOK","title":"Sargent Art 22-1500 10-count Metallic Gel Pens","main_cat":"Arts, Crafts & Sewing"}},{"id":529,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Sargent Art"}},{"id":530,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Gel"}},{"id":531,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"scrapbooking"}},{"id":532,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"detailing"}},{"id":533,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"classroom use"}},{"id":534,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"cushion grip"}},{"id":535,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"clear pouch"}},{"id":536,"ntype":"product","label":"B016YRRU82","info":{"type":"product","asin":"B016YRRU82","title":"Colorfin Panpastel 17 Metallic/Pearl/Medium Set, Multi","main_cat":"Amazon Home"}},{"id":537,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Colorfin"}},{"id":538,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Orange"}},{"id":539,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"painting"}},{"id":540,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"mixed media art"}},{"id":541,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Highly pigmented"}},{"id":542,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"erasable"}},{"id":543,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"low dust"}},{"id":544,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Made in the USA"}},{"id":545,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Palette Tray"}},{"id":546,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Colorless Blender"}},{"id":547,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Sofft Tools"}},{"id":548,"ntype":"product","label":"B0044JOUCC","info":{"type":"product","asin":"B0044JOUCC","title":"LYRA Aqua Color Water-Soluble Wax Crayons, Set of 24, Assorted Colors (5611240)","main_cat":"Office Products"}},{"id":549,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Lyra"}},{"id":550,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Wax"}},{"id":551,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Aqua"}},{"id":552,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Water soluble"}},{"id":553,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Easy to blend"}},{"id":554,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Intense pigmentation"}},{"id":555,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Highly light-fast"}},{"id":556,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Unlimited range of shades"}},{"id":557,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"AP certified"}},{"id":558,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Tin"}},{"id":559,"ntype":"product","label":"B019W9EFWI","info":{"type":"product","asin":"B019W9EFWI","title":"Damero Design Canvas Wrap Holder for 48 Colored Pencil, Roll Case for Pencils, Travel Organizer Pouch for Artist, Multi-purpose (No Pencils Included), 48 Holes, Elephants","main_cat":"Arts, Crafts & Sewing"}},{"id":560,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Damero"}},{"id":561,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Canvas"}},{"id":562,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"48"}},{"id":563,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Elephants"}},{"id":564,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Pencil"}},{"id":565,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Artist"}},{"id":566,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Travel"}},{"id":567,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Thick Quality"}},{"id":568,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Well Done Stitching"}},{"id":569,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Elastic Bands"}},{"id":570,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Roll Up"}},{"id":571,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Full View"}},{"id":572,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Easier Selection"}},{"id":573,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Elastic Bands"}},{"id":574,"ntype":"product","label":"B00BIBQZVI","info":{"type":"product","asin":"B00BIBQZVI","title":"OESD C&amp;C Treasure Chest of Embroidery Machine Designs CD FLORAL 100 DESIGNS","main_cat":"Amazon Home"}},{"id":575,"ntype":"Design","label":"Design","info":{"type":"Design","name":"FLORAL"}},{"id":576,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"EMBROIDERY"}},{"id":577,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"SOFTWARE"}},{"id":578,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"SOFTWARE"}},{"id":579,"ntype":"product","label":"B00BIC08QU","info":{"type":"product","asin":"B00BIC08QU","title":"OESD C&amp;C Treasure Chest of Embroidery Machine Designs CD borders 100 DESIGNS","main_cat":"Amazon Home"}},{"id":580,"ntype":"Design","label":"Design","info":{"type":"Design","name":"BORDERS"}},{"id":581,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"SIZER SOFTWARE"}},{"id":582,"ntype":"product","label":"B004M59O4C","info":{"type":"product","asin":"B004M59O4C","title":"Canson XL Series Watercolor Textured Paper Pad for Paint, Pencil, Ink, Charcoal, Pastel, and Acrylic, Fold Over, 140 Pound, 9 x 12 Inch, 30 Sheets (100510941)","main_cat":"Arts, Crafts & Sewing"}},{"id":583,"ntype":"category","label":"Art Paper","info":{"type":"category","category_name":"Art Paper"}},{"id":584,"ntype":"category","label":"Watercolor Paper","info":{"type":"category","category_name":"Watercolor Paper"}},{"id":585,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Canson"}},{"id":586,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"9 Inch"}},{"id":587,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"12 Inch"}},{"id":588,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"30 Sheets"}},{"id":589,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Fold over"}},{"id":590,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Cold press"}},{"id":591,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Paint"}},{"id":592,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Ink"}},{"id":593,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Charcoal"}},{"id":594,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Pastel"}},{"id":595,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Acrylic"}},{"id":596,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Durable surface"}},{"id":597,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"Acid free"}},{"id":598,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"Sustainable processes"}},{"id":599,"ntype":"product","label":"B001AGZXUA","info":{"type":"product","asin":"B001AGZXUA","title":"Widget Products The Thread Lite Lighted Needle Threader-","main_cat":"Arts, Crafts & Sewing"}},{"id":600,"ntype":"category","label":"Sewing Tools","info":{"type":"category","category_name":"Sewing Tools"}},{"id":601,"ntype":"category","label":"Threaders","info":{"type":"category","category_name":"Threaders"}},{"id":602,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Widget Products"}},{"id":603,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"threading needle"}},{"id":604,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"lighted"}},{"id":605,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"protective cover"}},{"id":606,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"batteries"}},{"id":607,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"protective cover"}},{"id":608,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"batteries"}},{"id":609,"ntype":"product","label":"B00H5X8COG","info":{"type":"product","asin":"B00H5X8COG","title":"Coats 230A-1 Dual Duty All-Purpose Thread 400yd - White","main_cat":"Arts, Crafts & Sewing"}},{"id":610,"ntype":"Material","label":"Material","info":{"type":"Material","name":"rayon"}},{"id":611,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"art projects"}},{"id":612,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"AZO FREE"}},{"id":613,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"FAST COLOR"}},{"id":614,"ntype":"product","label":"B00OTXTWD0","info":{"type":"product","asin":"B00OTXTWD0","title":"Elbesee Versatile Clamp Allows Flexibility For Elbesee Frames Made In Great Britain!","main_cat":"Arts, Crafts & Sewing"}},{"id":615,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"12\""}},{"id":616,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"9\""}},{"id":617,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Seat Frame"}},{"id":618,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Table Clamp"}},{"id":619,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Table Stand"}},{"id":620,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Elbesee Seat"}},{"id":621,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Ring Floor Stand"}},{"id":622,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Versatile"}},{"id":623,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Flexibility"}},{"id":624,"ntype":"product","label":"B00114OSR0","info":{"type":"product","asin":"B00114OSR0","title":"Tobin Forget Me Not Stamped Napkins for Embroidery, 17 by 17-Inch","main_cat":"Arts, Crafts & Sewing"}},{"id":625,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Tobin"}},{"id":626,"ntype":"Material","label":"Material","info":{"type":"Material","name":"polyester"}},{"id":627,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"17 Inch"}},{"id":628,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"58 Inch"}},{"id":629,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"104 Inch"}},{"id":630,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Forget Me Not"}},{"id":631,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Embroidery instructions"}},{"id":632,"ntype":"product","label":"B00WAVX9LY","info":{"type":"product","asin":"B00WAVX9LY","title":"simthread Glow in The Dark Thread, Polyester Embroidery Thread, 5 Spools 550 Yards Each, for Home Embroidery and Sewing Machine","main_cat":"Amazon Home"}},{"id":633,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"simthread"}},{"id":634,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"550 Yards"}},{"id":635,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"40 weight"}},{"id":636,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"5 Spools"}},{"id":637,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Home Embroidery"}},{"id":638,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Sewing Machine"}},{"id":639,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Glow in the Dark"}},{"id":640,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Eco-Friendly"}},{"id":641,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"FREE EXTRA BOBBIN CORES"}},{"id":642,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"original warranty"}},{"id":643,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Extra Bobbin Cores"}},{"id":644,"ntype":"product","label":"B00O35MNC6","info":{"type":"product","asin":"B00O35MNC6","title":"Derwent Sketch Book, Graphik Inspire Me, 80 Pages of Bleed Proof Patterned Paper, Small (2302236)","main_cat":"Office Products"}},{"id":645,"ntype":"category","label":"Sketchbooks & Notebooks","info":{"type":"category","category_name":"Sketchbooks & Notebooks"}},{"id":646,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Derwent"}},{"id":647,"ntype":"Material","label":"Material","info":{"type":"Material","name":"marker paper"}},{"id":648,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"5-1/2x5-1/2 inch"}},{"id":649,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"80 pages"}},{"id":650,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"48 blank pages"}},{"id":651,"ntype":"Design","label":"Design","info":{"type":"Design","name":"dots"}},{"id":652,"ntype":"Design","label":"Design","info":{"type":"Design","name":"triangles"}},{"id":653,"ntype":"Design","label":"Design","info":{"type":"Design","name":"squares"}},{"id":654,"ntype":"Design","label":"Design","info":{"type":"Design","name":"hexagons"}},{"id":655,"ntype":"Design","label":"Design","info":{"type":"Design","name":"patterned"}},{"id":656,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"illustrations"}},{"id":657,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"doodles"}},{"id":658,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"bleed-proof"}},{"id":659,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"patterned paper"}},{"id":660,"ntype":"product","label":"B000MATF4A","info":{"type":"product","asin":"B000MATF4A","title":"Pearlescent Chalk Set by Pebbles Inc. | Jewel Tones | Includes 30 chalks in various colors, applicator tool, and reusable pom-poms","main_cat":"Arts, Crafts & Sewing"}},{"id":661,"ntype":"category","label":"Chalk","info":{"type":"category","category_name":"Chalk"}},{"id":662,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Pebbles Inc."}},{"id":663,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"rubber stamping"}},{"id":664,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"acid-free"}},{"id":665,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"archival-safe"}},{"id":666,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"applicator tool"}},{"id":667,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"reusable pom-poms"}},{"id":668,"ntype":"product","label":"B0042GZGU2","info":{"type":"product","asin":"B0042GZGU2","title":"6.1mm Sterling Silver 19 Gauge Open Jump Rings (12)","main_cat":"Arts, Crafts & Sewing"}},{"id":669,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"BeadLiquidators"}},{"id":670,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"6.1mm"}},{"id":671,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"19 gauge"}},{"id":672,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Open"}},{"id":673,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Jewelry"}},{"id":674,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Anti-tarnish finish"}},{"id":675,"ntype":"product","label":"B00CZ7A0Z6","info":{"type":"product","asin":"B00CZ7A0Z6","title":"Monalisa Stamped Cross Stitch- Gardenia (Silk Thread)","main_cat":"Arts, Crafts & Sewing"}},{"id":676,"ntype":"Material","label":"Material","info":{"type":"Material","name":"silk"}},{"id":677,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"47x37cm"}},{"id":678,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"18.5x14.6inches"}},{"id":679,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Gardenia"}},{"id":680,"ntype":"product","label":"B01H684F7W","info":{"type":"product","asin":"B01H684F7W","title":"Prima Marketing SP Watercolor Card Kit","main_cat":"Arts, Crafts & Sewing"}},{"id":681,"ntype":"category","label":"Card Making Kits","info":{"type":"category","category_name":"Card Making Kits"}},{"id":682,"ntype":"Material","label":"Material","info":{"type":"Material","name":"art paper"}},{"id":683,"ntype":"Design","label":"Design","info":{"type":"Design","name":"images"}},{"id":684,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"all ages"}},{"id":685,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"stress reliever"}},{"id":686,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"exclusive images"}},{"id":687,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"envelopes"}},{"id":688,"ntype":"product","label":"B016OB6LGA","info":{"type":"product","asin":"B016OB6LGA","title":"Mungyo Gallery Artists' Oil Pastels - 24 Metallic Colors","main_cat":"Office Products"}},{"id":689,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"70 mm"}},{"id":690,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"11mm"}},{"id":691,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Gradation"}},{"id":692,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Scrapping"}},{"id":693,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Blending"}},{"id":694,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Stipping"}},{"id":695,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Fade-resistant"}},{"id":696,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Smooth touch"}},{"id":697,"ntype":"product","label":"B00WT5VK62","info":{"type":"product","asin":"B00WT5VK62","title":"DANIEL SMITH 285610006 Extra Fine Primatek Introductory Watercolor, 6 Tubes, 5ml","main_cat":"Arts, Crafts & Sewing"}},{"id":698,"ntype":"category","label":"Kits","info":{"type":"category","category_name":"Kits"}},{"id":699,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"DANIEL SMITH"}},{"id":700,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Lapis Lazuli"}},{"id":701,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Amethyst"}},{"id":702,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Piemontite"}},{"id":703,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Serpentine"}},{"id":704,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Rhodonite"}},{"id":705,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Jadeite"}},{"id":706,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Hematite"}},{"id":707,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"5ml"}},{"id":708,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"6"}},{"id":709,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Lapis Lazuli"}},{"id":710,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Amethyst"}},{"id":711,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Piemontite"}},{"id":712,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Serpentine"}},{"id":713,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Rhodonite"}},{"id":714,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Jadeite"}},{"id":715,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Mayan Blue"}},{"id":716,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Hematite"}},{"id":717,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Cascade Green"}},{"id":718,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Green Gold"}},{"id":719,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Moonglow"}},{"id":720,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Mayan Red"}},{"id":721,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Lunar Blue"}},{"id":722,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Red Iron Oxide"}},{"id":723,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Burgundy Yellow Ochre"}},{"id":724,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Monte Amiata Natural Sienna"}},{"id":725,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Roasted French Ochre"}},{"id":726,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Granulating Effects"}},{"id":727,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Luminescent Colors"}},{"id":728,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Lightfastness"}},{"id":729,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Made in USA"}},{"id":730,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Cadmium Hues"}},{"id":731,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Watercolor Grounds"}},{"id":732,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Masking Fluid"}},{"id":733,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Walnut Ink"}},{"id":734,"ntype":"product","label":"B00BYL3D7Q","info":{"type":"product","asin":"B00BYL3D7Q","title":"Darice DT-GX-7400-10 36-Pack David Tutera Celebrate Step 1 Card/Envelope Set, A2, Embossed Metallic","main_cat":"Arts, Crafts & Sewing"}},{"id":735,"ntype":"category","label":"Embossing","info":{"type":"category","category_name":"Embossing"}},{"id":736,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Darice"}},{"id":737,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"36"}},{"id":738,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"4-1/4-inch"}},{"id":739,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"5-1/2-inch"}},{"id":740,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"4-3/8-inch"}},{"id":741,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"5-3/4-inch"}},{"id":742,"ntype":"Design","label":"Design","info":{"type":"Design","name":"die cuts"}},{"id":743,"ntype":"Design","label":"Design","info":{"type":"Design","name":"scallops"}},{"id":744,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"invitations"}},{"id":745,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"holiday cards"}},{"id":746,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"birthday cards"}},{"id":747,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"thank you notes"}},{"id":748,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"announcements"}},{"id":749,"ntype":"product","label":"B003WD2T06","info":{"type":"product","asin":"B003WD2T06","title":"20 Spools White &amp; Black Embroidery Machine Thread","main_cat":"Arts, Crafts & Sewing"}},{"id":750,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Kolors Embroidery"}},{"id":751,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"550 yards"}},{"id":752,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"40 Weight"}},{"id":753,"ntype":"product","label":"B000RAYLXK","info":{"type":"product","asin":"B000RAYLXK","title":"2 14K White Gold Lever Back w/ Loop Earring Findings","main_cat":"Arts, Crafts & Sewing"}},{"id":754,"ntype":"category","label":"Earring Backs & Findings","info":{"type":"category","category_name":"Earring Backs & Findings"}},{"id":755,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Generic"}},{"id":756,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Gold"}},{"id":757,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"16 mm"}},{"id":758,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"5/8"}},{"id":759,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Lever Back"}},{"id":760,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Open Hoop"}},{"id":761,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Earring Findings"}},{"id":762,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Loop"}},{"id":763,"ntype":"product","label":"B00CRXUPOO","info":{"type":"product","asin":"B00CRXUPOO","title":"Monalisa Stamped Cross Stitch- Plum, Orchid, Bamboo &amp; Chrysanthemum (Design B)","main_cat":"Arts, Crafts & Sewing"}},{"id":764,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"29cm"}},{"id":765,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"78cm"}},{"id":766,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"11.4inches"}},{"id":767,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"30.7inches"}},{"id":768,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Plum"}},{"id":769,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Orchid"}},{"id":770,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Design B"}},{"id":771,"ntype":"product","label":"B01AMLI74W","info":{"type":"product","asin":"B01AMLI74W","title":"Prima Marketing 584160 Tales of You &amp; Me Paintable Watercolor Paper Pad (12/Pack), 6&quot; by 6&quot;, Multicolor","main_cat":"Arts, Crafts & Sewing"}},{"id":772,"ntype":"Material","label":"Material","info":{"type":"Material","name":"watercolor paper"}},{"id":773,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"6 inches"}},{"id":774,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"6 sheets"}},{"id":775,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"watercolor paintings"}},{"id":776,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"watercolor pencils"}},{"id":777,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"pastels"}},{"id":778,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"paintable"}},{"id":779,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"lignin-free"}},{"id":780,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"resist sheets"}},{"id":781,"ntype":"product","label":"B001T2YFCW","info":{"type":"product","asin":"B001T2YFCW","title":"New ThreadNanny 24 Skeins of 100% Cotton Metallic Thread for Hand Embroidery - Assorted Colors","main_cat":"Arts, Crafts & Sewing"}},{"id":782,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"8 Yards"}},{"id":783,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Metallic"}},{"id":784,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Hand Embroidery"}},{"id":785,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"High Quality"}},{"id":786,"ntype":"product","label":"B004BNAIHW","info":{"type":"product","asin":"B004BNAIHW","title":"Silver Brush 3000S-8 Black Velvet Short Handle Blend Squirrel and Risslon Brush, Round, Size 8","main_cat":"Arts, Crafts & Sewing"}},{"id":787,"ntype":"category","label":"Round Paintbrushes","info":{"type":"category","category_name":"Round Paintbrushes"}},{"id":788,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Silver Brush Limited"}},{"id":789,"ntype":"Material","label":"Material","info":{"type":"Material","name":"squirrel hair"}},{"id":790,"ntype":"Material","label":"Material","info":{"type":"Material","name":"synthetic"}},{"id":791,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"8-inch"}},{"id":792,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"3/8-inch"}},{"id":793,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Short Handle"}},{"id":794,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"multiple layer glazing"}},{"id":795,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"color holding"}},{"id":796,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"ferrule"}},{"id":797,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"neck band"}},{"id":798,"ntype":"product","label":"B00MNZXXK4","info":{"type":"product","asin":"B00MNZXXK4","title":"Embroidex 32 Sewing Feet in Deluxe Plastic Storage Case - Works with all Low Shank Embroidery Machines Brother Babylock Bernina New Home Janome Juki Kenmore Singer","main_cat":"Arts, Crafts & Sewing"}},{"id":799,"ntype":"category","label":"Sewing Machine Parts & Accessories","info":{"type":"category","category_name":"Sewing Machine Parts & Accessories"}},{"id":800,"ntype":"category","label":"Presser Feet","info":{"type":"category","category_name":"Presser Feet"}},{"id":801,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"32"}},{"id":802,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Braiding Foot"}},{"id":803,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Fringe Foot"}},{"id":804,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"5 Hole Cording Foot"}},{"id":805,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"7 Hole Cording Foot"}},{"id":806,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Edge Joining Foot"}},{"id":807,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"1/4 Quilting Foot"}},{"id":808,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Straight Stitch Foot"}},{"id":809,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Open Toe Embroidery Foot"}},{"id":810,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Round Bead Foot"}},{"id":811,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Zig Zag Foot"}},{"id":812,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Cording Foot"}},{"id":813,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Pintuck Foot 9 Grooves"}},{"id":814,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Overcast Foot"}},{"id":815,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Stitch Guide Foot"}},{"id":816,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Pintuck Foot 5 Grooves"}},{"id":817,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Satin Stitch Foot"}},{"id":818,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Double Welting Foot"}},{"id":819,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Invisible Zipper Foot"}},{"id":820,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Roller Foot"}},{"id":821,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Blind Stitch Foot"}},{"id":822,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Applique Foot"}},{"id":823,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Open Toe Foot"}},{"id":824,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Darning Foot - Low Shank"}},{"id":825,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Hemmer Foot"}},{"id":826,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Round Hemmer Foot"}},{"id":827,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Adjustable Bias Binder Foot"}},{"id":828,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Knit Foot"}},{"id":829,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Deluxe Plastic Storage Case"}},{"id":830,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Plastic Storage Case"}},{"id":831,"ntype":"product","label":"B00VF21D2Q","info":{"type":"product","asin":"B00VF21D2Q","title":"Elegant Flowers Embroidery Machine Designs on CD - 10 Beautiful Patterns - 2 Sizes Each - PES JEF EXP XXX VIP HUS DST","main_cat":"Amazon Home"}},{"id":832,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Redwork"}},{"id":833,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Wall Hanging"}},{"id":834,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"PES"}},{"id":835,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"JEF"}},{"id":836,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"EXP"}},{"id":837,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"XXX"}},{"id":838,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"VIP"}},{"id":839,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"HUS"}},{"id":840,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"DST"}},{"id":841,"ntype":"product","label":"B00MCZM93W","info":{"type":"product","asin":"B00MCZM93W","title":"Singer | Futura XL-580 Embroidery and Sewing Machine including 250 Embroidery Designs, 215 Built-in Sewing Stitches, Automatic Thread Cutter, perfect for sewing all types of fabrics with ease","main_cat":"Arts, Crafts & Sewing"}},{"id":842,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"250"}},{"id":843,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"215"}},{"id":844,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"50"}},{"id":845,"ntype":"Design","label":"Design","info":{"type":"Design","name":"block letters"}},{"id":846,"ntype":"Design","label":"Design","info":{"type":"Design","name":"numbers"}},{"id":847,"ntype":"Design","label":"Design","info":{"type":"Design","name":"monograms"}},{"id":848,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"quilting"}},{"id":849,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"automatic thread cutter"}},{"id":850,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"SwiftSmart threading system"}},{"id":851,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"LED lights"}},{"id":852,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Independent Bobbin Winding System"}},{"id":853,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Electronic Thread Trimmer"}},{"id":854,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"buttonholes"}},{"id":855,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"USB Key"}},{"id":856,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Endless Hoop"}},{"id":857,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"multi-hooping capability"}},{"id":858,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"USB cable"}},{"id":859,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"AutoPunch"}},{"id":860,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"HyperFont"}},{"id":861,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Advanced Editing"}},{"id":862,"ntype":"product","label":"B00389N8HC","info":{"type":"product","asin":"B00389N8HC","title":"Smooch Pearlized Top Coat, Illuminate","main_cat":"Arts, Crafts & Sewing"}},{"id":863,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Smooch"}},{"id":864,"ntype":"Design","label":"Design","info":{"type":"Design","name":"pearlescent"}},{"id":865,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"applicator"}},{"id":866,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"archival"}},{"id":867,"ntype":"product","label":"B01A9UE9X4","info":{"type":"product","asin":"B01A9UE9X4","title":"DSYJ Pack of 5 Clay Color Shaping Modeling Wipe Out Tools Rubber Tip Paint Brushes for Sculpture Pottery","main_cat":"Amazon Home"}},{"id":868,"ntype":"category","label":"Ceramics & Pottery","info":{"type":"category","category_name":"Ceramics & Pottery"}},{"id":869,"ntype":"category","label":"Ceramic & Pottery Tools","info":{"type":"category","category_name":"Ceramic & Pottery Tools"}},{"id":870,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"DSYJ"}},{"id":871,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"BCP"}},{"id":872,"ntype":"Material","label":"Material","info":{"type":"Material","name":"rubber"}},{"id":873,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1/4 inch"}},{"id":874,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"6 1/4 inch"}},{"id":875,"ntype":"Design","label":"Design","info":{"type":"Design","name":"rubber tip"}},{"id":876,"ntype":"Design","label":"Design","info":{"type":"Design","name":"taper point"}},{"id":877,"ntype":"Design","label":"Design","info":{"type":"Design","name":"angle chisel"}},{"id":878,"ntype":"Design","label":"Design","info":{"type":"Design","name":"flat chisel"}},{"id":879,"ntype":"Design","label":"Design","info":{"type":"Design","name":"cup chisel"}},{"id":880,"ntype":"Design","label":"Design","info":{"type":"Design","name":"cup round"}},{"id":881,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"color shaping"}},{"id":882,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"fine detail"}},{"id":883,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"touch-up work"}},{"id":884,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"remove fingerprints"}},{"id":885,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"sculpture"}},{"id":886,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"pottery"}},{"id":887,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"remove fingerprints"}},{"id":888,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"fine detail"}},{"id":889,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"touch-up work"}},{"id":890,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"angle chisel"}},{"id":891,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"flat chisel"}},{"id":892,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"cup chisel"}},{"id":893,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"cup round"}},{"id":894,"ntype":"product","label":"B003ZS335S","info":{"type":"product","asin":"B003ZS335S","title":"61 Thread for Brother Disney Embroidery Machine + 60 SPOOL WOODEN THREAD RACK","main_cat":"Amazon Home"}},{"id":895,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"61"}},{"id":896,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Disney Designs"}},{"id":897,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Embroidery Machine Thread"}},{"id":898,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Thread Rack"}},{"id":899,"ntype":"product","label":"B000I7OIPI","info":{"type":"product","asin":"B000I7OIPI","title":"Staedtler Karat Aquarell Premium Watercolor Crayons (223M24)","main_cat":"Office Products"}},{"id":900,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Staedtler"}},{"id":901,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"color washes"}},{"id":902,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"scratch art"}},{"id":903,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"dramatic look"}},{"id":904,"ntype":"product","label":"B00H137W0A","info":{"type":"product","asin":"B00H137W0A","title":"Chinese Yingxing Zisha Tea Strainers with Four Sheep Statue Shape Duan Ni","main_cat":"Arts, Crafts & Sewing"}},{"id":905,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Charming China Zisha Tea Set"}},{"id":906,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Zisha"}},{"id":907,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Duan ni"}},{"id":908,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"8cm"}},{"id":909,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Four Sheep Statue"}},{"id":910,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Tea strainer"}},{"id":911,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"sweetens tea"}},{"id":912,"ntype":"product","label":"B00SPZZ6JM","info":{"type":"product","asin":"B00SPZZ6JM","title":"60,000+ Embroidery Machine Patterns Designs Collection in PES Format","main_cat":"Amazon Home"}},{"id":913,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"60000"}},{"id":914,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Embroidery Designs"}},{"id":915,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"3 DVD Set"}},{"id":916,"ntype":"product","label":"B00KAYDYE0","info":{"type":"product","asin":"B00KAYDYE0","title":"SINGER | Studio S16 Industrial-Grade True Straight Stitch Only Portable Sewing and Quilting Machine","main_cat":"Amazon Home"}},{"id":917,"ntype":"category","label":"Industrial Machines","info":{"type":"category","category_name":"Industrial Machines"}},{"id":918,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Long arm design"}},{"id":919,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Extra-High Presser Foot Lifter"}},{"id":920,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Automatic Reverse"}},{"id":921,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Built-In Sewing Space Lights"}},{"id":922,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Adjustable Presser Foot Pressure"}},{"id":923,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Professional Sewing"}},{"id":924,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Dry Cleaning"}},{"id":925,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Alteration"}},{"id":926,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Seamstress"}},{"id":927,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Industrial Strength"}},{"id":928,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"1600 Stitches Per Minute"}},{"id":929,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Straight Stitch Only"}},{"id":930,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Adjustable Thread Tension"}},{"id":931,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"25-Year Warranty"}},{"id":932,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"110 Volts Only"}},{"id":933,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Darning Plate"}},{"id":934,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Needles"}},{"id":935,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Bobbins"}},{"id":936,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Thread Spool Cap"}},{"id":937,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Thread Spool Net"}},{"id":938,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Thread Spool Holder"}},{"id":939,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Screwdrivers"}},{"id":940,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Fabric Guide"}},{"id":941,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Setscrew"}},{"id":942,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Accessory Storage Box"}},{"id":943,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Bottle of Sewing Machine Oil"}},{"id":944,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Knee Lifter"}},{"id":945,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Instruction Manual"}},{"id":946,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Quick t Guide"}},{"id":947,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Power Cord"}},{"id":948,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Foot Controller"}},{"id":949,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Soft-Sided Dust Cover"}},{"id":950,"ntype":"product","label":"B00FHKRP2O","info":{"type":"product","asin":"B00FHKRP2O","title":"NEW ThreadNanny 4 WHITE GOLD METALLIC MACHINE EMBROIDERY THREAD CONES","main_cat":"Amazon Home"}},{"id":951,"ntype":"product","label":"B01F4704XG","info":{"type":"product","asin":"B01F4704XG","title":"Sennelier La Petite Aquarelle 12 10Ml Tubes","main_cat":"Arts, Crafts & Sewing"}},{"id":952,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"9.25 inches"}},{"id":953,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"4.75 inches"}},{"id":954,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1.5 inches"}},{"id":955,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"outdoor"}},{"id":956,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"field painting"}},{"id":957,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"elastic strap"}},{"id":958,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"inside mixing tray"}},{"id":959,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"elastic strap"}},{"id":960,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"inside mixing tray"}},{"id":961,"ntype":"product","label":"B013TBUJY8","info":{"type":"product","asin":"B013TBUJY8","title":"DANIEL SMITH 285250077 Extra Fine Secondary Watercolor Set, 3 Tubes, 15ml","main_cat":"Arts, Crafts & Sewing"}},{"id":962,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Daniel Smith"}},{"id":963,"ntype":"Material","label":"Material","info":{"type":"Material","name":"gum arabic"}},{"id":964,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"15ml"}},{"id":965,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"3 Tubes"}},{"id":966,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Quinacridone Burnt Orange"}},{"id":967,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Undersea Green"}},{"id":968,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Carbazole Violet"}},{"id":969,"ntype":"Design","label":"Design","info":{"type":"Design","name":"granulating"}},{"id":970,"ntype":"product","label":"B00II5CUIO","info":{"type":"product","asin":"B00II5CUIO","title":"Zig Clean Color Real Brush Marker, Green Shadow","main_cat":"Arts, Crafts & Sewing"}},{"id":971,"ntype":"category","label":"Markers","info":{"type":"category","category_name":"Markers"}},{"id":972,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Zig"}},{"id":973,"ntype":"Material","label":"Material","info":{"type":"Material","name":"water"}},{"id":974,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"six"}},{"id":975,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"illustrating"}},{"id":976,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"ASTM D 4236"}},{"id":977,"ntype":"product","label":"B013TBUGVO","info":{"type":"product","asin":"B013TBUGVO","title":"DANIEL SMITH Extra Fine Primary Watercolor Set, 3 Tubes, 15ml","main_cat":"Arts, Crafts & Sewing"}},{"id":978,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Perylene Red"}},{"id":979,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Hansa Yellow Medium"}},{"id":980,"ntype":"Color","label":"Color","info":{"type":"Color","name":"French Ultramarine"}},{"id":981,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Enviro-Friendly Red Iron Oxide"}},{"id":982,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"watercolorists"}},{"id":983,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"permanence"}},{"id":984,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"Enviro-Friendly"}},{"id":985,"ntype":"product","label":"B00MVILT36","info":{"type":"product","asin":"B00MVILT36","title":"Dove Products Blender Kit","main_cat":"Arts, Crafts & Sewing"}},{"id":986,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Dove Products"}},{"id":987,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"1oz"}},{"id":988,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"floating"}},{"id":989,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"refillable"}},{"id":990,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"replaceable"}},{"id":991,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"Made in USA"}},{"id":992,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"blending pen"}},{"id":993,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"blending medium"}},{"id":994,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"replacement nibs"}},{"id":995,"ntype":"product","label":"B005M4UXII","info":{"type":"product","asin":"B005M4UXII","title":"Janlynn Candle Wicking Embroidery Kit, Wildflowers and Butterfly Pillow","main_cat":"Arts, Crafts & Sewing"}},{"id":996,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Janlynn"}},{"id":997,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Muslin"}},{"id":998,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Cotton floss"}},{"id":999,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"14 inch"}},{"id":1000,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"35.6 cm"}},{"id":1001,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Wildflowers"}},{"id":1002,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Candle Wicking"}},{"id":1003,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Multilingual instructions"}},{"id":1004,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Lace"}},{"id":1005,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Backing fabric"}},{"id":1006,"ntype":"product","label":"B005P1UZEA","info":{"type":"product","asin":"B005P1UZEA","title":"Stampers Anonymous Gamsol Odorless Mineral Spirits Painting Kit (GAMSOLKT)","main_cat":"Arts, Crafts & Sewing"}},{"id":1007,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Stampers Anonymous"}},{"id":1008,"ntype":"Material","label":"Material","info":{"type":"Material","name":"mineral spirits"}},{"id":1009,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"two ounce"}},{"id":1010,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1/2x1/2 inch"}},{"id":1011,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"two"}},{"id":1012,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"one"}},{"id":1013,"ntype":"Design","label":"Design","info":{"type":"Design","name":"stamped image"}},{"id":1014,"ntype":"Design","label":"Design","info":{"type":"Design","name":"watercolor look"}},{"id":1015,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"blending medium"}},{"id":1016,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"colored pencils"}},{"id":1017,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"odorless"}},{"id":1018,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"convenient"}},{"id":1019,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"pretty almost watercolor look"}},{"id":1020,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"erases grainy appearance"}},{"id":1021,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"made in USA"}},{"id":1022,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"blending stumps"}},{"id":1023,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"sandpaper pad"}},{"id":1024,"ntype":"product","label":"B000RB1MH2","info":{"type":"product","asin":"B000RB1MH2","title":"3 14K White Gold Jump Rings for Chain or Charm Pendant 22 Gauge","main_cat":null}},{"id":1025,"ntype":"category","label":"Jump Rings","info":{"type":"category","category_name":"Jump Rings"}},{"id":1026,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"4 mm"}},{"id":1027,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"3/16 inch"}},{"id":1028,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"3.5 inches"}},{"id":1029,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"2.1 inches"}},{"id":1030,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"0.3 inches"}},{"id":1031,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"22 Gauge"}},{"id":1032,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Clasp"}},{"id":1033,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Charm"}},{"id":1034,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Link"}},{"id":1035,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Full Refund"}},{"id":1036,"ntype":"product","label":"B00BYL2W28","info":{"type":"product","asin":"B00BYL2W28","title":"Darice DT-GX-7200-19 12-Pack David Tutera Celebrate Step 2 Layer Card for Scrapbooking, A2, Lace Combo","main_cat":"Arts, Crafts & Sewing"}},{"id":1037,"ntype":"category","label":"Scrapbooking Embellishments","info":{"type":"category","category_name":"Scrapbooking Embellishments"}},{"id":1038,"ntype":"category","label":"Embellishments","info":{"type":"category","category_name":"Embellishments"}},{"id":1039,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"4-1/8-inch"}},{"id":1040,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"5-3/8-inch"}},{"id":1041,"ntype":"Design","label":"Design","info":{"type":"Design","name":"A2"}},{"id":1042,"ntype":"Design","label":"Design","info":{"type":"Design","name":"lace"}},{"id":1043,"ntype":"Design","label":"Design","info":{"type":"Design","name":"decorative edge"}},{"id":1044,"ntype":"Design","label":"Design","info":{"type":"Design","name":"fancy edges"}},{"id":1045,"ntype":"Design","label":"Design","info":{"type":"Design","name":"embossed"}},{"id":1046,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"custom look"}},{"id":1047,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"perfect card"}},{"id":1048,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"die cuts"}},{"id":1049,"ntype":"product","label":"B001C1NMO2","info":{"type":"product","asin":"B001C1NMO2","title":"DMC COLORCRD Needlework Threads 12-Page Printed Color Card","main_cat":"Arts, Crafts & Sewing"}},{"id":1050,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"8"}},{"id":1051,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Light Effects"}},{"id":1052,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Satin"}},{"id":1053,"ntype":"product","label":"B002BQ09RA","info":{"type":"product","asin":"B002BQ09RA","title":"Smart Stitch - A Portable Mini Sewing Machine","main_cat":"Arts, Crafts & Sewing"}},{"id":1054,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Smart Stitch"}},{"id":1055,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Plastic"}},{"id":1056,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"9-1/2 inches"}},{"id":1057,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"7-1/2 inches"}},{"id":1058,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"5 inches"}},{"id":1059,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Double Thread Sewing"}},{"id":1060,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Easy to Use"}},{"id":1061,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Powerful Motor"}},{"id":1062,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Compact"}},{"id":1063,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Light Weight"}},{"id":1064,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Threader"}},{"id":1065,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Spool Holder"}},{"id":1066,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Foot Paddle"}},{"id":1067,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Bobbin Holder"}},{"id":1068,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Plastic Bobbin Container"}},{"id":1069,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Bobbin"}},{"id":1070,"ntype":"product","label":"B004HE593S","info":{"type":"product","asin":"B004HE593S","title":"Distinctive Large Floral Pattern Premium Sewing Machine Universal Tote Bag","main_cat":"Arts, Crafts & Sewing"}},{"id":1071,"ntype":"category","label":"Sewing Patterns & Templates","info":{"type":"category","category_name":"Sewing Patterns & Templates"}},{"id":1072,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Distinctive"}},{"id":1073,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"16.5 Long"}},{"id":1074,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"12 High"}},{"id":1075,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"7.25 Deep"}},{"id":1076,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Floral Pattern"}},{"id":1077,"ntype":"Design","label":"Design","info":{"type":"Design","name":"Simplistic Design"}},{"id":1078,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Strong Zippers"}},{"id":1079,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Heavy-Duty Straps"}},{"id":1080,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Velcro Handle Grip"}},{"id":1081,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Large Pocket"}},{"id":1082,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Velcro Handle Grip"}},{"id":1083,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"Large Pocket"}},{"id":1084,"ntype":"product","label":"B01BLEISSY","info":{"type":"product","asin":"B01BLEISSY","title":"Kuretake ZIG Clean Color Real Watercolor Brush Pens, 80 Color Set (RB-6000AT/80V)","main_cat":"Office Products"}},{"id":1085,"ntype":"category","label":"Paint Pens, Markers & Daubers","info":{"type":"category","category_name":"Paint Pens, Markers & Daubers"}},{"id":1086,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Kuretake"}},{"id":1087,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Aqueous Pigment"}},{"id":1088,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"0.40 inches"}},{"id":1089,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"0.46 inches"}},{"id":1090,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1.0 inches"}},{"id":1091,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"80"}},{"id":1092,"ntype":"Color","label":"Color","info":{"type":"Color","name":"pale Pink"}},{"id":1093,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Almond Pink"}},{"id":1094,"ntype":"Color","label":"Color","info":{"type":"Color","name":"FL Pink"}},{"id":1095,"ntype":"Color","label":"Color","info":{"type":"Color","name":"light Pink"}},{"id":1096,"ntype":"Color","label":"Color","info":{"type":"Color","name":"tea Rose"}},{"id":1097,"ntype":"Color","label":"Color","info":{"type":"Color","name":"light Carmine"}},{"id":1098,"ntype":"Color","label":"Color","info":{"type":"Color","name":"dark Pink"}},{"id":1099,"ntype":"Color","label":"Color","info":{"type":"Color","name":"peach Pink"}},{"id":1100,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Pink Flamingo"}},{"id":1101,"ntype":"Color","label":"Color","info":{"type":"Color","name":"pale Rose"}},{"id":1102,"ntype":"Color","label":"Color","info":{"type":"Color","name":"deep Red"}},{"id":1103,"ntype":"Color","label":"Color","info":{"type":"Color","name":"wine Red"}},{"id":1104,"ntype":"Color","label":"Color","info":{"type":"Color","name":"geranium Red"}},{"id":1105,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Carmine Red"}},{"id":1106,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Scarlet Red"}},{"id":1107,"ntype":"Color","label":"Color","info":{"type":"Color","name":"bright Yellow"}},{"id":1108,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Lemon Yellow"}},{"id":1109,"ntype":"Color","label":"Color","info":{"type":"Color","name":"FL Yellow"}},{"id":1110,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Yellow Green"}},{"id":1111,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Green shadow"}},{"id":1112,"ntype":"Color","label":"Color","info":{"type":"Color","name":"pale Green"}},{"id":1113,"ntype":"Color","label":"Color","info":{"type":"Color","name":"FL Green"}},{"id":1114,"ntype":"Color","label":"Color","info":{"type":"Color","name":"light Green"}},{"id":1115,"ntype":"Color","label":"Color","info":{"type":"Color","name":"may Green"}},{"id":1116,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Mid Green"}},{"id":1117,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Olive Green"}},{"id":1118,"ntype":"Color","label":"Color","info":{"type":"Color","name":"marine Green"}},{"id":1119,"ntype":"Color","label":"Color","info":{"type":"Color","name":"deep Green"}},{"id":1120,"ntype":"Color","label":"Color","info":{"type":"Color","name":"turquoise Green"}},{"id":1121,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Emerald Green"}},{"id":1122,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Persian Green"}},{"id":1123,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Peacock Blue"}},{"id":1124,"ntype":"Color","label":"Color","info":{"type":"Color","name":"deep Blue"}},{"id":1125,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Persian Blue"}},{"id":1126,"ntype":"Color","label":"Color","info":{"type":"Color","name":"dull Blue"}},{"id":1127,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Cobalt Blue"}},{"id":1128,"ntype":"Color","label":"Color","info":{"type":"Color","name":"corn flour Blue"}},{"id":1129,"ntype":"Color","label":"Color","info":{"type":"Color","name":"light Blue"}},{"id":1130,"ntype":"Color","label":"Color","info":{"type":"Color","name":"shadow Mauve"}},{"id":1131,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Haze Blue"}},{"id":1132,"ntype":"Color","label":"Color","info":{"type":"Color","name":"English Lavender"}},{"id":1133,"ntype":"Color","label":"Color","info":{"type":"Color","name":"light Violet"}},{"id":1134,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Lilac"}},{"id":1135,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Purple"}},{"id":1136,"ntype":"Color","label":"Color","info":{"type":"Color","name":"deep Violet"}},{"id":1137,"ntype":"Color","label":"Color","info":{"type":"Color","name":"deep Brown"}},{"id":1138,"ntype":"Color","label":"Color","info":{"type":"Color","name":"dark Brown"}},{"id":1139,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Mid Brown"}},{"id":1140,"ntype":"Color","label":"Color","info":{"type":"Color","name":"dark Oatmeal"}},{"id":1141,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Brick Beige"}},{"id":1142,"ntype":"Color","label":"Color","info":{"type":"Color","name":"pale dawn gray"}},{"id":1143,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Mud"}},{"id":1144,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Beige"}},{"id":1145,"ntype":"Color","label":"Color","info":{"type":"Color","name":"light Brown"}},{"id":1146,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Ochre"}},{"id":1147,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Oatmeal"}},{"id":1148,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Mid gray"}},{"id":1149,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Green gray"}},{"id":1150,"ntype":"Color","label":"Color","info":{"type":"Color","name":"gray Brown"}},{"id":1151,"ntype":"Color","label":"Color","info":{"type":"Color","name":"dark gray"}},{"id":1152,"ntype":"Color","label":"Color","info":{"type":"Color","name":"natural gray"}},{"id":1153,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Blue gray"}},{"id":1154,"ntype":"Color","label":"Color","info":{"type":"Color","name":"light gray"}},{"id":1155,"ntype":"Color","label":"Color","info":{"type":"Color","name":"cool gray 1"}},{"id":1156,"ntype":"Color","label":"Color","info":{"type":"Color","name":"pale gray"}},{"id":1157,"ntype":"Color","label":"Color","info":{"type":"Color","name":"gray tint"}},{"id":1158,"ntype":"Color","label":"Color","info":{"type":"Color","name":"warm gray 2"}},{"id":1159,"ntype":"Color","label":"Color","info":{"type":"Color","name":"blush"}},{"id":1160,"ntype":"Color","label":"Color","info":{"type":"Color","name":"flesh color"}},{"id":1161,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Illustrations"}},{"id":1162,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Sketches"}},{"id":1163,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"Manga Art"}},{"id":1164,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Soft Brush Tips"}},{"id":1165,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Water-Based Ink"}},{"id":1166,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Fade Effect"}},{"id":1167,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"Ink Blending"}},{"id":1168,"ntype":"product","label":"B00DMHL9BM","info":{"type":"product","asin":"B00DMHL9BM","title":"Madeira Incredible Threadable Embroidery Box 40 Spools 1100YD/1000M 20928042","main_cat":"Amazon Home"}},{"id":1169,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Madeira"}},{"id":1170,"ntype":"Material","label":"Material","info":{"type":"Material","name":"Bobbinfil"}},{"id":1171,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1100YD"}},{"id":1172,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1000M"}},{"id":1173,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1650YD"}},{"id":1174,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1500M"}},{"id":1175,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"40"}},{"id":1176,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"home machine"}},{"id":1177,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"carry strap"}},{"id":1178,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"thread guide"}},{"id":1179,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"design CD"}},{"id":1180,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"color card"}},{"id":1181,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"carry strap"}},{"id":1182,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"box"}},{"id":1183,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"thread guide"}},{"id":1184,"ntype":"product","label":"B000BGSZFU","info":{"type":"product","asin":"B000BGSZFU","title":"Jacquard Pearl EX Powder Pigments (32-Color Set)","main_cat":"Arts, Crafts & Sewing"}},{"id":1185,"ntype":"category","label":"Fabric Decorating","info":{"type":"category","category_name":"Fabric Decorating"}},{"id":1186,"ntype":"category","label":"Dyes","info":{"type":"category","category_name":"Dyes"}},{"id":1187,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Jacquard"}},{"id":1188,"ntype":"Material","label":"Material","info":{"type":"Material","name":"powder"}},{"id":1189,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Brilliant Gold"}},{"id":1190,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Sparkle Gold"}},{"id":1191,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Aztec Gold"}},{"id":1192,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Antique Gold"}},{"id":1193,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Antique Bronze"}},{"id":1194,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Antique Copper"}},{"id":1195,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Antique Silver"}},{"id":1196,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Bright Yellow"}},{"id":1197,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Flamingo Pink"}},{"id":1198,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Spring Green"}},{"id":1199,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Turquoise"}},{"id":1200,"ntype":"Color","label":"Color","info":{"type":"Color","name":"True Blue"}},{"id":1201,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Misty Lavender"}},{"id":1202,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Russet"}},{"id":1203,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"water color projects"}},{"id":1204,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"faux finishes"}},{"id":1205,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"metallic look"}},{"id":1206,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"tarnish-free"}},{"id":1207,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"fade-resistant"}},{"id":1208,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"safe"}},{"id":1209,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"non-toxic"}},{"id":1210,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"inert"}},{"id":1211,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"colorfast"}},{"id":1212,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"stable"}},{"id":1213,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"safe"}},{"id":1214,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"inert"}},{"id":1215,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"colorfast"}},{"id":1216,"ntype":"Safety/Certification","label":"Safety/Certification","info":{"type":"Safety/Certification","name":"stable"}},{"id":1217,"ntype":"product","label":"B00VWMWXRS","info":{"type":"product","asin":"B00VWMWXRS","title":"Simthread Ms Type 150d Metallic Thread for Embroidery Machine 500m/spool 32 Color with Free Gift (12 a Type Pre-wound Bobbin Thread)","main_cat":"Arts, Crafts & Sewing"}},{"id":1218,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"150d"}},{"id":1219,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"500m"}},{"id":1220,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"550Y"}},{"id":1221,"ntype":"Design","label":"Design","info":{"type":"Design","name":"metallic"}},{"id":1222,"ntype":"Design","label":"Design","info":{"type":"Design","name":"shiny"}},{"id":1223,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"embroidery machine"}},{"id":1224,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"new"}},{"id":1225,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"sparkle"}},{"id":1226,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"free gift"}},{"id":1227,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"pre-wound bobbin thread"}},{"id":1228,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"pre-wound bobbin thread"}},{"id":1229,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"free gift"}},{"id":1230,"ntype":"product","label":"B00SW39OCC","info":{"type":"product","asin":"B00SW39OCC","title":"Brother PE525 Embroidery Machine","main_cat":"Arts, Crafts & Sewing"}},{"id":1231,"ntype":"category","label":"Embroidery Machines","info":{"type":"category","category_name":"Embroidery Machines"}},{"id":1232,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Brother"}},{"id":1233,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"4 inch"}},{"id":1234,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"2.7 inches"}},{"id":1235,"ntype":"Dimensions","label":"Dimensions","info":{"type":"Dimensions","name":"1.4 inches"}},{"id":1236,"ntype":"Design","label":"Design","info":{"type":"Design","name":"embroidery"}},{"id":1237,"ntype":"Design","label":"Design","info":{"type":"Design","name":"lettering"}},{"id":1238,"ntype":"Design","label":"Design","info":{"type":"Design","name":"monogramming"}},{"id":1239,"ntype":"Design","label":"Design","info":{"type":"Design","name":"frame patterns"}},{"id":1240,"ntype":"Design","label":"Design","info":{"type":"Design","name":"touch screen"}},{"id":1241,"ntype":"Design","label":"Design","info":{"type":"Design","name":"LCD display"}},{"id":1242,"ntype":"Design","label":"Design","info":{"type":"Design","name":"built-in designs"}},{"id":1243,"ntype":"Design","label":"Design","info":{"type":"Design","name":"font styles"}},{"id":1244,"ntype":"Usage","label":"Usage","info":{"type":"Usage","name":"personalization"}},{"id":1245,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"25-year warranty"}},{"id":1246,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"technical support"}},{"id":1247,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"user manual"}},{"id":1248,"ntype":"Accessories","label":"Accessories","info":{"type":"Accessories","name":"computer connectivity"}},{"id":1249,"ntype":"product","label":"B001668EL4","info":{"type":"product","asin":"B001668EL4","title":"Global Art Genuine Leather Pencil Case 48 Pencil Capacity in Black","main_cat":"Arts, Crafts & Sewing"}},{"id":1250,"ntype":"Brand","label":"Brand","info":{"type":"Brand","name":"Global Art Materials"}},{"id":1251,"ntype":"Material","label":"Material","info":{"type":"Material","name":"leather"}},{"id":1252,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"96"}},{"id":1253,"ntype":"Quantity","label":"Quantity","info":{"type":"Quantity","name":"120"}},{"id":1254,"ntype":"Color","label":"Color","info":{"type":"Color","name":"Saddle Brown"}},{"id":1255,"ntype":"Design","label":"Design","info":{"type":"Design","name":"zip closure"}},{"id":1256,"ntype":"Design","label":"Design","info":{"type":"Design","name":"zipper pull"}},{"id":1257,"ntype":"Design","label":"Design","info":{"type":"Design","name":"elastic bands"}},{"id":1258,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"fully protects contents"}},{"id":1259,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"securely closed"}},{"id":1260,"ntype":"Selling Point","label":"Selling Point","info":{"type":"Selling Point","name":"holds contents securely"}}];
+    const edgesTriples = [[0,1,0],[0,2,0],[0,3,0],[0,4,0],[0,5,0],[0,6,1],[0,7,4],[0,8,2],[0,9,2],[0,10,3],[0,11,6],[0,12,6],[0,13,6],[0,14,6],[0,15,6],[0,16,7],[0,17,7],[0,18,7],[0,19,7],[0,20,7],[0,21,7],[0,22,7],[1,2,11],[1,24,11],[1,47,11],[1,122,11],[1,234,11],[1,255,11],[1,305,11],[1,464,11],[1,1185,11],[2,3,11],[2,54,11],[2,583,11],[3,4,11],[3,266,11],[3,698,11],[3,1085,11],[4,5,11],[4,161,11],[4,787,11],[23,1,0],[23,24,0],[23,25,0],[23,26,0],[23,27,0],[23,28,0],[23,29,1],[23,30,3],[23,31,4],[23,32,5],[23,33,7],[23,34,8],[23,35,8],[23,36,8],[23,37,10],[24,25,11],[24,185,11],[24,188,11],[24,320,11],[24,799,11],[24,917,11],[24,1071,11],[24,1231,11],[25,24,11],[25,26,11],[26,27,11],[26,116,11],[38,1,0],[38,24,0],[38,25,0],[38,26,0],[38,31,4],[38,39,1],[38,40,5],[38,41,5],[38,42,5],[38,43,7],[38,44,7],[38,45,8],[46,1,0],[46,47,0],[46,48,0],[46,49,0],[46,50,1],[46,51,3],[46,52,3],[47,48,11],[47,168,11],[48,49,11],[48,698,11],[53,1,0],[53,2,0],[53,54,0],[53,55,0],[53,56,0],[53,57,1],[53,58,2],[53,59,3],[53,60,4],[53,61,7],[53,62,7],[53,63,7],[53,64,7],[53,65,7],[53,66,8],[53,67,8],[53,68,8],[53,69,8],[53,70,8],[53,71,8],[53,72,10],[54,55,11],[55,56,11],[55,137,11],[55,203,11],[55,292,11],[55,511,11],[55,661,11],[55,971,11],[73,1,0],[73,24,0],[73,25,0],[73,26,0],[73,27,0],[73,74,1],[73,75,2],[73,76,3],[73,77,3],[73,78,4],[73,79,7],[73,80,7],[73,81,7],[73,82,7],[73,83,8],[73,84,9],[85,1,0],[85,86,1],[85,87,3],[85,88,3],[85,89,6],[90,1,0],[90,24,0],[90,25,0],[90,26,0],[90,27,0],[90,33,7],[90,91,1],[90,92,2],[90,93,3],[90,94,3],[90,95,3],[90,96,4],[90,97,8],[90,98,8],[90,99,8],[90,100,8],[90,101,9],[90,102,10],[103,1,0],[103,2,0],[103,40,5],[103,41,5],[103,54,0],[103,55,0],[103,56,0],[103,104,1],[103,105,4],[103,106,5],[103,107,5],[103,108,5],[103,109,5],[103,110,5],[103,111,5],[103,112,5],[103,113,5],[103,114,5],[115,1,0],[115,24,0],[115,25,0],[115,26,0],[115,28,0],[115,116,0],[115,117,1],[115,118,3],[115,119,7],[115,120,8],[121,1,0],[121,78,4],[121,113,5],[121,122,0],[121,123,0],[121,124,0],[121,125,1],[121,126,3],[121,127,6],[121,128,7],[121,129,7],[121,130,9],[122,123,11],[123,124,11],[123,132,11],[123,754,11],[123,1025,11],[131,1,0],[131,122,0],[131,123,0],[131,125,1],[131,132,0],[131,133,2],[131,134,3],[131,135,6],[136,1,0],[136,2,0],[136,54,0],[136,55,0],[136,137,0],[136,138,1],[136,139,2],[136,140,4],[136,141,7],[136,142,7],[136,143,7],[136,144,7],[136,145,7],[136,146,7],[136,147,7],[136,148,7],[136,149,7],[136,150,8],[136,151,8],[136,152,8],[136,153,8],[136,154,8],[136,155,8],[136,156,8],[136,157,9],[136,158,9],[136,159,10],[160,1,0],[160,2,0],[160,3,0],[160,4,0],[160,10,3],[160,161,0],[160,162,1],[160,163,6],[160,164,8],[160,165,8],[160,166,8],[167,1,0],[167,40,5],[167,47,0],[167,168,0],[167,169,0],[167,170,1],[167,171,2],[167,172,2],[167,173,3],[167,174,3],[167,175,6],[167,176,7],[167,177,8],[167,178,8],[167,179,9],[167,180,10],[167,181,10],[167,182,10],[167,183,10],[168,169,11],[184,1,0],[184,24,0],[184,50,1],[184,185,0],[184,186,7],[187,1,0],[187,24,0],[187,188,0],[187,189,0],[187,190,0],[187,191,1],[187,192,3],[187,193,3],[187,194,5],[187,195,5],[188,189,11],[188,600,11],[189,190,11],[196,1,0],[196,2,0],[196,40,5],[196,54,0],[196,55,0],[196,56,0],[196,61,7],[196,197,4],[196,198,2],[196,199,2],[196,200,10],[196,201,10],[202,1,0],[202,2,0],[202,54,0],[202,55,0],[202,195,5],[202,203,0],[202,204,0],[202,205,1],[202,206,3],[202,207,3],[202,208,4],[202,209,5],[202,210,5],[202,211,5],[202,212,5],[202,213,5],[202,214,5],[202,215,5],[202,216,5],[202,217,5],[202,218,5],[202,219,5],[202,220,7],[202,221,7],[202,222,7],[202,223,7],[202,224,7],[202,225,8],[202,226,8],[202,227,8],[202,228,8],[202,229,8],[202,230,8],[202,231,8],[202,232,9],[233,1,0],[233,234,0],[233,235,1],[233,236,2],[233,237,7],[233,238,7],[233,239,8],[233,240,8],[233,241,8],[234,284,11],[242,1,0],[242,24,0],[242,28,0],[242,44,7],[242,243,1],[242,244,4],[242,245,6],[242,246,6],[242,247,6],[242,248,6],[242,249,6],[242,250,6],[242,251,6],[242,252,6],[242,253,10],[254,1,0],[254,204,0],[254,255,0],[254,256,0],[254,257,0],[254,258,0],[254,259,1],[254,260,2],[254,261,3],[254,262,6],[254,263,6],[254,264,7],[255,256,11],[255,331,11],[255,868,11],[256,257,11],[257,258,11],[265,1,0],[265,2,0],[265,3,0],[265,266,0],[265,267,4],[265,268,7],[269,1,0],[269,2,0],[269,3,0],[269,28,0],[269,266,0],[269,270,1],[269,271,2],[269,272,2],[269,273,4],[269,274,8],[269,275,8],[269,276,8],[269,277,8],[269,278,8],[269,279,8],[269,280,10],[269,281,10],[269,282,10],[283,1,0],[283,92,2],[283,234,0],[283,284,0],[283,285,1],[283,286,2],[283,287,3],[283,288,3],[283,289,3],[283,290,3],[291,1,0],[291,2,0],[291,54,0],[291,55,0],[291,63,7],[291,112,5],[291,292,0],[291,293,1],[291,294,2],[291,295,2],[291,296,3],[291,297,3],[291,298,4],[291,299,6],[291,300,6],[291,301,7],[291,302,7],[291,303,7],[304,1,0],[304,40,5],[304,195,5],[304,305,0],[304,306,0],[304,307,0],[304,308,0],[304,309,1],[304,310,3],[304,311,3],[304,312,4],[304,313,5],[304,314,5],[304,315,5],[304,316,10],[304,317,10],[304,318,10],[305,306,11],[305,1037,11],[306,307,11],[307,308,11],[319,1,0],[319,24,0],[319,28,0],[319,119,7],[319,320,0],[319,321,0],[319,322,1],[319,323,2],[319,324,3],[319,325,3],[319,326,3],[319,327,7],[319,328,7],[319,329,10],[320,321,11],[330,1,0],[330,255,0],[330,331,0],[330,332,0],[330,333,0],[330,334,1],[330,335,2],[330,336,3],[330,337,3],[330,338,4],[330,339,6],[330,340,6],[330,341,6],[330,342,6],[330,343,6],[330,344,7],[330,345,8],[330,346,8],[330,347,8],[330,348,8],[330,349,8],[331,332,11],[331,681,11],[331,735,11],[332,333,11],[350,1,0],[350,2,0],[350,3,0],[350,113,5],[350,114,5],[350,266,0],[350,272,2],[350,351,1],[350,352,2],[350,353,3],[350,354,3],[350,355,4],[350,356,5],[350,357,5],[350,358,5],[350,359,5],[350,360,7],[350,361,7],[350,362,7],[350,363,7],[350,364,10],[365,1,0],[365,272,2],[365,366,1],[365,367,3],[365,368,3],[365,369,3],[365,370,3],[365,371,4],[365,372,5],[365,373,6],[365,374,7],[365,375,7],[365,376,7],[365,377,7],[365,378,7],[365,379,7],[365,380,10],[381,1,0],[381,24,0],[381,25,0],[381,92,2],[381,113,5],[381,114,5],[381,382,1],[381,383,4],[381,384,4],[381,385,7],[381,386,8],[381,387,8],[381,388,10],[389,1,0],[389,24,0],[389,31,4],[389,246,6],[389,249,6],[389,390,0],[389,391,1],[389,392,4],[389,393,10],[394,1,0],[394,2,0],[394,54,0],[394,55,0],[394,56,0],[394,208,4],[394,238,7],[394,395,1],[394,396,3],[394,397,3],[394,398,3],[394,399,6],[394,400,8],[394,401,10],[402,1,0],[402,28,0],[402,43,7],[402,44,7],[402,91,1],[402,182,10],[402,255,0],[402,256,0],[402,257,0],[402,258,0],[402,260,2],[402,403,2],[402,404,3],[402,405,6],[402,406,7],[402,407,8],[402,408,8],[402,409,8],[402,410,8],[411,1,0],[411,24,0],[411,185,0],[411,412,1],[411,413,6],[411,414,7],[415,1,0],[415,2,0],[415,54,0],[415,55,0],[415,203,0],[415,204,0],[415,416,1],[415,417,3],[415,418,4],[415,419,7],[415,420,8],[415,421,8],[415,422,8],[415,423,8],[415,424,8],[415,425,9],[415,426,10],[427,1,0],[427,2,0],[427,54,0],[427,55,0],[427,62,7],[427,141,7],[427,203,0],[427,428,1],[427,429,2],[427,430,3],[427,431,4],[427,432,7],[427,433,8],[427,434,10],[435,1,0],[435,24,0],[435,25,0],[435,26,0],[435,27,0],[435,28,0],[435,91,1],[435,119,7],[435,312,4],[435,436,1],[435,437,4],[435,438,5],[435,439,6],[435,440,7],[435,441,8],[435,442,8],[435,443,9],[435,444,10],[435,445,10],[446,1,0],[446,24,0],[446,25,0],[446,26,0],[446,27,0],[446,28,0],[446,91,1],[446,447,2],[446,448,3],[446,449,4],[446,450,6],[446,451,8],[446,452,8],[446,453,8],[454,1,0],[454,24,0],[454,28,0],[454,78,4],[454,455,1],[454,456,3],[454,457,3],[454,458,6],[454,459,7],[454,460,7],[454,461,7],[454,462,10],[463,1,0],[463,92,2],[463,171,2],[463,392,4],[463,464,0],[463,465,1],[463,466,3],[463,467,3],[463,468,3],[463,469,6],[463,470,6],[463,471,6],[463,472,7],[463,473,10],[463,474,10],[475,1,0],[475,47,0],[475,168,0],[475,169,0],[475,170,1],[475,210,5],[475,476,2],[475,477,2],[475,478,3],[475,479,3],[475,480,6],[475,481,7],[475,482,8],[475,483,8],[475,484,9],[475,485,10],[475,486,10],[475,487,10],[488,1,0],[488,24,0],[488,25,0],[488,29,1],[488,489,2],[488,490,4],[488,491,6],[488,492,6],[488,493,8],[488,494,10],[495,1,0],[495,24,0],[495,25,0],[495,26,0],[495,27,0],[495,28,0],[495,43,7],[495,81,7],[495,91,1],[495,92,2],[495,94,3],[495,102,10],[495,496,3],[495,497,3],[495,498,4],[495,499,7],[495,500,7],[495,501,7],[495,502,8],[495,503,8],[495,504,8],[505,1,0],[505,2,0],[505,54,0],[505,55,0],[505,138,1],[505,203,0],[505,204,0],[505,506,4],[505,507,2],[505,508,7],[505,509,10],[510,1,0],[510,2,0],[510,40,5],[510,41,5],[510,54,0],[510,55,0],[510,106,5],[510,107,5],[510,108,5],[510,109,5],[510,110,5],[510,112,5],[510,208,4],[510,236,2],[510,511,0],[510,512,1],[510,513,3],[510,514,5],[510,515,5],[510,516,5],[510,517,5],[510,518,7],[510,519,7],[510,520,7],[510,521,8],[510,522,8],[510,523,8],[510,524,8],[510,525,9],[510,526,9],[510,527,10],[528,1,0],[528,2,0],[528,54,0],[528,55,0],[528,78,4],[528,292,0],[528,529,1],[528,530,2],[528,531,7],[528,532,7],[528,533,7],[528,534,8],[528,535,10],[536,1,0],[536,2,0],[536,28,0],[536,40,5],[536,41,5],[536,54,0],[536,55,0],[536,106,5],[536,107,5],[536,109,5],[536,110,5],[536,112,5],[536,203,0],[536,358,5],[536,537,1],[536,538,5],[536,539,7],[536,540,7],[536,541,8],[536,542,8],[536,543,8],[536,544,8],[536,545,10],[536,546,10],[536,547,10],[548,1,0],[548,2,0],[548,54,0],[548,55,0],[548,61,7],[548,62,7],[548,137,0],[548,204,0],[548,232,9],[548,431,4],[548,549,1],[548,550,2],[548,551,5],[548,552,8],[548,553,8],[548,554,8],[548,555,8],[548,556,8],[548,557,9],[548,558,10],[559,1,0],[559,165,8],[559,234,0],[559,560,1],[559,561,2],[559,562,4],[559,563,6],[559,564,7],[559,565,7],[559,566,7],[559,567,8],[559,568,8],[559,569,8],[559,570,8],[559,571,8],[559,572,8],[559,573,10],[574,1,0],[574,24,0],[574,28,0],[574,243,1],[574,245,6],[574,246,6],[574,247,6],[574,248,6],[574,249,6],[574,250,6],[574,251,6],[574,252,6],[574,575,6],[574,576,7],[574,577,8],[574,578,10],[579,1,0],[579,24,0],[579,28,0],[579,243,1],[579,244,4],[579,462,10],[579,580,6],[579,581,10],[582,1,0],[582,2,0],[582,335,2],[582,564,7],[582,583,0],[582,584,0],[582,585,1],[582,586,3],[582,587,3],[582,588,4],[582,589,6],[582,590,6],[582,591,7],[582,592,7],[582,593,7],[582,594,7],[582,595,7],[582,596,8],[582,597,9],[582,598,9],[583,584,11],[583,645,11],[599,1,0],[599,24,0],[599,188,0],[599,600,0],[599,601,0],[599,602,1],[599,603,7],[599,604,8],[599,605,8],[599,606,8],[599,607,10],[599,608,10],[600,601,11],[609,1,0],[609,24,0],[609,25,0],[609,26,0],[609,27,0],[609,40,5],[609,74,1],[609,76,3],[609,77,3],[609,79,7],[609,80,7],[609,81,7],[609,82,7],[609,84,9],[609,119,7],[609,610,2],[609,611,7],[609,612,8],[609,613,8],[614,1,0],[614,24,0],[614,320,0],[614,321,0],[614,322,1],[614,615,3],[614,616,3],[614,617,7],[614,618,7],[614,619,7],[614,620,7],[614,621,7],[614,622,8],[614,623,8],[624,1,0],[624,44,7],[624,47,0],[624,48,0],[624,625,1],[624,626,2],[624,627,3],[624,628,3],[624,629,3],[624,630,6],[624,631,10],[632,1,0],[632,24,0],[632,25,0],[632,26,0],[632,27,0],[632,28,0],[632,92,2],[632,633,1],[632,634,3],[632,635,3],[632,636,4],[632,637,7],[632,638,7],[632,639,8],[632,640,8],[632,641,8],[632,642,8],[632,643,10],[644,1,0],[644,2,0],[644,112,5],[644,158,9],[644,204,0],[644,238,7],[644,583,0],[644,645,0],[644,646,1],[644,647,2],[644,648,3],[644,649,4],[644,650,4],[644,651,6],[644,652,6],[644,653,6],[644,654,6],[644,655,6],[644,656,7],[644,657,7],[644,658,8],[644,659,8],[660,1,0],[660,2,0],[660,54,0],[660,55,0],[660,140,4],[660,230,8],[660,425,9],[660,531,7],[660,611,7],[660,661,0],[660,662,1],[660,663,7],[660,664,9],[660,665,9],[660,666,10],[660,667,10],[668,1,0],[668,122,0],[668,123,0],[668,133,2],[668,163,6],[668,208,4],[668,544,8],[668,669,1],[668,670,3],[668,671,3],[668,672,6],[668,673,7],[668,674,8],[675,1,0],[675,47,0],[675,168,0],[675,169,0],[675,170,1],[675,210,5],[675,477,2],[675,481,7],[675,482,8],[675,484,9],[675,485,10],[675,486,10],[675,676,2],[675,677,3],[675,678,3],[675,679,6],[680,1,0],[680,255,0],[680,331,0],[680,395,1],[680,681,0],[680,682,2],[680,683,6],[680,684,7],[680,685,8],[680,686,8],[680,687,10],[688,1,0],[688,2,0],[688,54,0],[688,55,0],[688,163,6],[688,203,0],[688,204,0],[688,428,1],[688,689,3],[688,690,3],[688,691,6],[688,692,6],[688,693,6],[688,694,6],[688,695,8],[688,696,8],[697,1,0],[697,2,0],[697,3,0],[697,698,0],[697,699,1],[697,700,2],[697,701,2],[697,702,2],[697,703,2],[697,704,2],[697,705,2],[697,706,2],[697,707,3],[697,708,4],[697,709,5],[697,710,5],[697,711,5],[697,712,5],[697,713,5],[697,714,5],[697,715,5],[697,716,5],[697,717,5],[697,718,5],[697,719,5],[697,720,5],[697,721,5],[697,722,5],[697,723,5],[697,724,5],[697,725,5],[697,726,8],[697,727,8],[697,728,8],[697,729,8],[697,730,8],[697,731,10],[697,732,10],[697,733,10],[734,1,0],[734,255,0],[734,331,0],[734,531,7],[734,735,0],[734,736,1],[734,737,4],[734,738,3],[734,739,3],[734,740,3],[734,741,3],[734,742,6],[734,743,6],[734,744,7],[734,745,7],[734,746,7],[734,747,7],[734,748,7],[749,1,0],[749,24,0],[749,25,0],[749,40,5],[749,44,7],[749,92,2],[749,112,5],[749,449,4],[749,750,1],[749,751,3],[749,752,3],[753,1,0],[753,40,5],[753,122,0],[753,123,0],[753,392,4],[753,754,0],[753,755,1],[753,756,2],[753,757,3],[753,758,3],[753,759,6],[753,760,6],[753,761,7],[753,762,10],[763,1,0],[763,47,0],[763,168,0],[763,169,0],[763,170,1],[763,210,5],[763,476,2],[763,477,2],[763,481,7],[763,482,8],[763,484,9],[763,485,10],[763,486,10],[763,764,3],[763,765,3],[763,766,3],[763,767,3],[763,768,5],[763,769,5],[763,770,6],[771,1,0],[771,2,0],[771,395,1],[771,583,0],[771,584,0],[771,664,9],[771,772,2],[771,773,3],[771,774,4],[771,775,7],[771,776,7],[771,777,7],[771,778,8],[771,779,9],[771,780,10],[781,1,0],[781,24,0],[781,25,0],[781,26,0],[781,27,0],[781,91,1],[781,171,2],[781,392,4],[781,431,4],[781,782,3],[781,783,6],[781,784,7],[781,785,8],[786,1,0],[786,2,0],[786,3,0],[786,4,0],[786,112,5],[786,114,5],[786,163,6],[786,787,0],[786,788,1],[786,789,2],[786,790,2],[786,791,3],[786,792,3],[786,793,6],[786,794,8],[786,795,8],[786,796,10],[786,797,10],[798,1,0],[798,24,0],[798,243,1],[798,799,0],[798,800,0],[798,801,4],[798,802,7],[798,803,7],[798,804,7],[798,805,7],[798,806,7],[798,807,7],[798,808,7],[798,809,7],[798,810,7],[798,811,7],[798,812,7],[798,813,7],[798,814,7],[798,815,7],[798,816,7],[798,817,7],[798,818,7],[798,819,7],[798,820,7],[798,821,7],[798,822,7],[798,823,7],[798,824,7],[798,825,7],[798,826,7],[798,827,7],[798,828,7],[798,829,8],[798,830,10],[799,800,11],[831,1,0],[831,24,0],[831,28,0],[831,78,4],[831,81,7],[831,455,1],[831,456,3],[831,457,3],[831,462,10],[831,480,6],[831,832,6],[831,833,7],[831,834,10],[831,835,10],[831,836,10],[831,837,10],[831,838,10],[831,839,10],[831,840,10],[841,1,0],[841,24,0],[841,119,7],[841,191,1],[841,708,4],[841,842,4],[841,843,4],[841,844,4],[841,845,6],[841,846,6],[841,847,6],[841,848,7],[841,849,8],[841,850,8],[841,851,8],[841,852,8],[841,853,8],[841,854,8],[841,855,8],[841,856,8],[841,857,8],[841,858,10],[841,859,10],[841,860,10],[841,861,10],[862,1,0],[862,305,0],[862,372,5],[862,863,1],[862,864,6],[862,865,10],[862,866,9],[867,1,0],[867,7,4],[867,28,0],[867,238,7],[867,255,0],[867,268,7],[867,323,2],[867,398,3],[867,868,0],[867,869,0],[867,870,1],[867,871,1],[867,872,2],[867,873,3],[867,874,3],[867,875,6],[867,876,6],[867,877,6],[867,878,6],[867,879,6],[867,880,6],[867,881,7],[867,882,7],[867,883,7],[867,884,7],[867,885,7],[867,886,7],[867,887,8],[867,888,8],[867,889,8],[867,890,10],[867,891,10],[867,892,10],[867,893,10],[868,869,11],[894,1,0],[894,24,0],[894,25,0],[894,26,0],[894,27,0],[894,28,0],[894,92,2],[894,243,1],[894,418,4],[894,448,3],[894,635,3],[894,895,4],[894,896,6],[894,897,7],[894,898,10],[899,1,0],[899,2,0],[899,54,0],[899,55,0],[899,137,0],[899,204,0],[899,268,7],[899,431,4],[899,432,7],[899,900,1],[899,901,7],[899,902,7],[899,903,8],[904,1,0],[904,255,0],[904,868,0],[904,905,1],[904,906,2],[904,907,2],[904,908,3],[904,909,6],[904,910,7],[904,911,8],[912,1,0],[912,24,0],[912,28,0],[912,391,1],[912,913,4],[912,914,6],[912,915,10],[916,1,0],[916,7,4],[916,24,0],[916,28,0],[916,43,7],[916,81,7],[916,165,8],[916,191,1],[916,392,4],[916,917,0],[916,918,6],[916,919,6],[916,920,6],[916,921,6],[916,922,6],[916,923,7],[916,924,7],[916,925,7],[916,926,7],[916,927,8],[916,928,8],[916,929,8],[916,930,8],[916,931,8],[916,932,9],[916,933,10],[916,934,10],[916,935,10],[916,936,10],[916,937,10],[916,938,10],[916,939,10],[916,940,10],[916,941,10],[916,942,10],[916,943,10],[916,944,10],[916,945,10],[916,946,10],[916,947,10],[916,948,10],[916,949,10],[950,1,0],[950,24,0],[950,25,0],[950,26,0],[950,27,0],[950,28,0],[950,40,5],[950,91,1],[950,113,5],[950,264,7],[950,312,4],[950,437,4],[950,450,6],[951,1,0],[951,2,0],[951,3,0],[951,208,4],[951,270,1],[951,414,7],[951,698,0],[951,952,3],[951,953,3],[951,954,3],[951,955,7],[951,956,7],[951,957,8],[951,958,8],[951,959,10],[951,960,10],[961,1,0],[961,2,0],[961,3,0],[961,156,8],[961,266,0],[961,962,1],[961,963,2],[961,964,3],[961,965,4],[961,966,5],[961,967,5],[961,968,5],[961,969,6],[970,1,0],[970,2,0],[970,54,0],[970,55,0],[970,109,5],[970,141,7],[970,324,3],[970,971,0],[970,972,1],[970,973,2],[970,974,4],[970,975,7],[970,976,9],[977,1,0],[977,2,0],[977,3,0],[977,156,8],[977,266,0],[977,699,1],[977,709,5],[977,710,5],[977,711,5],[977,712,5],[977,720,5],[977,721,5],[977,723,5],[977,724,5],[977,725,5],[977,731,10],[977,732,10],[977,733,10],[977,963,2],[977,964,3],[977,965,4],[977,969,6],[977,978,5],[977,979,5],[977,980,5],[977,981,5],[977,982,7],[977,983,8],[977,984,9],[985,1,0],[985,268,7],[985,986,1],[985,987,4],[985,988,7],[985,989,8],[985,990,8],[985,991,9],[985,992,10],[985,993,10],[985,994,10],[995,1,0],[995,47,0],[995,48,0],[995,171,2],[995,175,6],[995,182,10],[995,698,0],[995,729,8],[995,996,1],[995,997,2],[995,998,2],[995,999,3],[995,1000,3],[995,1001,6],[995,1002,7],[995,1003,8],[995,1004,10],[995,1005,10],[1006,1,0],[1006,2,0],[1006,3,0],[1006,698,0],[1006,1007,1],[1006,1008,2],[1006,1009,3],[1006,1010,3],[1006,1011,4],[1006,1012,4],[1006,1013,6],[1006,1014,6],[1006,1015,7],[1006,1016,7],[1006,1017,8],[1006,1018,8],[1006,1019,8],[1006,1020,8],[1006,1021,9],[1006,1022,10],[1006,1023,10],[1024,1,0],[1024,31,4],[1024,122,0],[1024,123,0],[1024,672,6],[1024,755,1],[1024,756,2],[1024,1025,0],[1024,1026,3],[1024,1027,3],[1024,1028,3],[1024,1029,3],[1024,1030,3],[1024,1031,3],[1024,1032,7],[1024,1033,7],[1024,1034,7],[1024,1035,8],[1036,1,0],[1036,208,4],[1036,305,0],[1036,335,2],[1036,531,7],[1036,736,1],[1036,743,6],[1036,744,7],[1036,745,7],[1036,746,7],[1036,747,7],[1036,748,7],[1036,1037,0],[1036,1038,0],[1036,1039,3],[1036,1040,3],[1036,1041,6],[1036,1042,6],[1036,1043,6],[1036,1044,6],[1036,1045,6],[1036,1046,8],[1036,1047,8],[1036,1048,10],[1037,1038,11],[1049,1,0],[1049,7,4],[1049,24,0],[1049,25,0],[1049,26,0],[1049,31,4],[1049,117,1],[1049,208,4],[1049,472,7],[1049,708,4],[1049,783,6],[1049,1050,4],[1049,1051,6],[1049,1052,6],[1053,1,0],[1053,7,4],[1053,24,0],[1053,165,8],[1053,182,10],[1053,185,0],[1053,312,4],[1053,1054,1],[1053,1055,2],[1053,1056,3],[1053,1057,3],[1053,1058,3],[1053,1059,8],[1053,1060,8],[1053,1061,8],[1053,1062,8],[1053,1063,8],[1053,1064,10],[1053,1065,10],[1053,1066,10],[1053,1067,10],[1053,1068,10],[1053,1069,10],[1070,1,0],[1070,24,0],[1070,638,7],[1070,1071,0],[1070,1072,1],[1070,1073,3],[1070,1074,3],[1070,1075,3],[1070,1076,6],[1070,1077,6],[1070,1078,8],[1070,1079,8],[1070,1080,8],[1070,1081,8],[1070,1082,10],[1070,1083,10],[1084,1,0],[1084,2,0],[1084,3,0],[1084,41,5],[1084,42,5],[1084,106,5],[1084,107,5],[1084,108,5],[1084,109,5],[1084,110,5],[1084,111,5],[1084,195,5],[1084,204,0],[1084,538,5],[1084,1085,0],[1084,1086,1],[1084,1087,2],[1084,1088,3],[1084,1089,3],[1084,1090,3],[1084,1091,4],[1084,1092,5],[1084,1093,5],[1084,1094,5],[1084,1095,5],[1084,1096,5],[1084,1097,5],[1084,1098,5],[1084,1099,5],[1084,1100,5],[1084,1101,5],[1084,1102,5],[1084,1103,5],[1084,1104,5],[1084,1105,5],[1084,1106,5],[1084,1107,5],[1084,1108,5],[1084,1109,5],[1084,1110,5],[1084,1111,5],[1084,1112,5],[1084,1113,5],[1084,1114,5],[1084,1115,5],[1084,1116,5],[1084,1117,5],[1084,1118,5],[1084,1119,5],[1084,1120,5],[1084,1121,5],[1084,1122,5],[1084,1123,5],[1084,1124,5],[1084,1125,5],[1084,1126,5],[1084,1127,5],[1084,1128,5],[1084,1129,5],[1084,1130,5],[1084,1131,5],[1084,1132,5],[1084,1133,5],[1084,1134,5],[1084,1135,5],[1084,1136,5],[1084,1137,5],[1084,1138,5],[1084,1139,5],[1084,1140,5],[1084,1141,5],[1084,1142,5],[1084,1143,5],[1084,1144,5],[1084,1145,5],[1084,1146,5],[1084,1147,5],[1084,1148,5],[1084,1149,5],[1084,1150,5],[1084,1151,5],[1084,1152,5],[1084,1153,5],[1084,1154,5],[1084,1155,5],[1084,1156,5],[1084,1157,5],[1084,1158,5],[1084,1159,5],[1084,1160,5],[1084,1161,7],[1084,1162,7],[1084,1163,7],[1084,1164,8],[1084,1165,8],[1084,1166,8],[1084,1167,8],[1168,1,0],[1168,24,0],[1168,25,0],[1168,26,0],[1168,27,0],[1168,28,0],[1168,119,7],[1168,392,4],[1168,462,10],[1168,610,2],[1168,1169,1],[1168,1170,2],[1168,1171,3],[1168,1172,3],[1168,1173,3],[1168,1174,3],[1168,1175,4],[1168,1176,7],[1168,1177,8],[1168,1178,8],[1168,1179,8],[1168,1180,10],[1168,1181,10],[1168,1182,10],[1168,1183,10],[1184,1,0],[1184,41,5],[1184,106,5],[1184,107,5],[1184,109,5],[1184,110,5],[1184,113,5],[1184,358,5],[1184,425,9],[1184,663,7],[1184,801,4],[1184,1185,0],[1184,1186,0],[1184,1187,1],[1184,1188,2],[1184,1189,5],[1184,1190,5],[1184,1191,5],[1184,1192,5],[1184,1193,5],[1184,1194,5],[1184,1195,5],[1184,1196,5],[1184,1197,5],[1184,1198,5],[1184,1199,5],[1184,1200,5],[1184,1201,5],[1184,1202,5],[1184,1203,7],[1184,1204,7],[1184,1205,8],[1184,1206,8],[1184,1207,8],[1184,1208,8],[1184,1209,8],[1184,1210,8],[1184,1211,8],[1184,1212,8],[1184,1213,9],[1184,1214,9],[1184,1215,9],[1184,1216,9],[1185,1186,11],[1217,1,0],[1217,24,0],[1217,25,0],[1217,26,0],[1217,27,0],[1217,208,4],[1217,439,6],[1217,441,8],[1217,633,1],[1217,1218,3],[1217,1219,3],[1217,1220,3],[1217,1221,6],[1217,1222,6],[1217,1223,7],[1217,1224,8],[1217,1225,8],[1217,1226,8],[1217,1227,8],[1217,1228,10],[1217,1229,10],[1230,1,0],[1230,24,0],[1230,1231,0],[1230,1232,1],[1230,1233,3],[1230,1234,3],[1230,1235,3],[1230,1236,6],[1230,1237,6],[1230,1238,6],[1230,1239,6],[1230,1240,6],[1230,1241,6],[1230,1242,6],[1230,1243,6],[1230,1244,7],[1230,1245,8],[1230,1246,8],[1230,1247,10],[1230,1248,10],[1249,1,0],[1249,2,0],[1249,54,0],[1249,55,0],[1249,60,4],[1249,112,5],[1249,431,4],[1249,562,4],[1249,1250,1],[1249,1251,2],[1249,1252,4],[1249,1253,4],[1249,1254,5],[1249,1255,6],[1249,1256,6],[1249,1257,6],[1249,1258,8],[1249,1259,8],[1249,1260,8]];
+
+    function rand(seed) {
+      // mulberry32
+      let t = seed >>> 0;
+      return function() {
+        t += 0x6D2B79F5;
+        let r = Math.imul(t ^ (t >>> 15), 1 | t);
+        r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+        return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+      }
+    }
+
+    function pickFirstNProductsByAsin(n) {
+      const asins = Object.keys(asin2id || {});
+      asins.sort();
+      const out = [];
+      for (const a of asins) {
+        const pid = asin2id[a];
+        if (pid === undefined || pid === null) continue;
+        out.push(pid);
+        if (out.length >= n) break;
+      }
+      return out;
+    }
+
+    function buildAdj() {
+      const out = new Map();
+      const inn = new Map();
+      for (const [s,d,t] of edgesTriples) {
+        if (!out.has(s)) out.set(s, []);
+        if (!inn.has(d)) inn.set(d, []);
+        out.get(s).push([d,t]);
+        inn.get(d).push([s,t]);
+      }
+      return {out, inn};
+    }
+
+    const ADJ = buildAdj();
+
+    function neighborsByMode(nid, mode) {
+      // mode:
+      // - undirected: use out + in
+      // - no_back_to_product: for non-product nodes, only use out edges (prevents backtracking to many products)
+      const rec = nodesById[nid];
+      const ntype = rec ? rec.ntype : "unknown";
+
+      const res = [];
+      const o = ADJ.out.get(nid) || [];
+      for (const [d,t] of o) res.push(d);
+
+      if (mode === "undirected") {
+        const i = ADJ.inn.get(nid) || [];
+        for (const [s,t] of i) res.push(s);
+      } else if (mode === "no_back_to_product") {
+        if (ntype === "product") {
+          const i = ADJ.inn.get(nid) || [];
+          for (const [s,t] of i) res.push(s);
+        }
+      }
+
+      return res;
+    }
+
+    function collectSubgraph(center, hops, maxEdges, seed, traversalMode) {
+      const nodeSet = new Set();
+      const edgeIdx = [];
+
+      if (hops === "inf") {
+        const r = rand(seed);
+        const idxs = [...Array(edgesTriples.length).keys()];
+        for (let i = idxs.length - 1; i > 0; i--) {
+          const j = Math.floor(r() * (i + 1));
+          [idxs[i], idxs[j]] = [idxs[j], idxs[i]];
+        }
+        const picked = idxs.slice(0, Math.min(maxEdges, idxs.length));
+        for (const k of picked) edgeIdx.push(k);
+        for (let k = 0; k < edgesTriples.length; k++) {
+          const [s,d,t] = edgesTriples[k];
+          if (s === center || d === center) edgeIdx.push(k);
+        }
+      } else {
+        const k = parseInt(hops, 10);
+        const q = [center];
+        const dist = new Map([[center, 0]]);
+        nodeSet.add(center);
+        while (q.length) {
+          const cur = q.shift();
+          const cd = dist.get(cur);
+          if (cd >= k) continue;
+          for (const nb of neighborsByMode(cur, traversalMode)) {
+            if (!dist.has(nb)) {
+              dist.set(nb, cd + 1);
+              q.push(nb);
+              nodeSet.add(nb);
+            }
+          }
+        }
+        for (let k = 0; k < edgesTriples.length; k++) {
+          const [s,d,t] = edgesTriples[k];
+          if (nodeSet.has(s) && nodeSet.has(d)) edgeIdx.push(k);
+        }
+        if (edgeIdx.length > maxEdges) {
+          const keep = [];
+          const rest = [];
+          for (const k of edgeIdx) {
+            const [s,d,t] = edgesTriples[k];
+            if (s === center || d === center) keep.push(k);
+            else rest.push(k);
+          }
+          const r = rand(seed);
+          for (let i = rest.length - 1; i > 0; i--) {
+            const j = Math.floor(r() * (i + 1));
+            [rest[i], rest[j]] = [rest[j], rest[i]];
+          }
+          edgeIdx.length = 0;
+          for (const k of keep) edgeIdx.push(k);
+          for (const k of rest.slice(0, Math.max(0, maxEdges - keep.length))) edgeIdx.push(k);
+        }
+      }
+
+      for (const k of edgeIdx) {
+        const [s,d,t] = edgesTriples[k];
+        nodeSet.add(s); nodeSet.add(d);
+      }
+      return {nodeSet, edgeIdx};
+    }
+
+    function collectSubgraphMulti(centers, hops, maxEdges, seed, traversalMode) {
+      // centers: array of node ids
+      const nodeSet = new Set();
+      const edgeIdx = [];
+      const centerSet = new Set(centers || []);
+
+      if (centerSet.size === 0) {
+        return {nodeSet, edgeIdx};
+      }
+
+      if (hops === "inf") {
+        const r = rand(seed);
+        const idxs = [...Array(edgesTriples.length).keys()];
+        for (let i = idxs.length - 1; i > 0; i--) {
+          const j = Math.floor(r() * (i + 1));
+          [idxs[i], idxs[j]] = [idxs[j], idxs[i]];
+        }
+        const picked = idxs.slice(0, Math.min(maxEdges, idxs.length));
+        for (const k of picked) edgeIdx.push(k);
+        // ensure all centers appear by adding incident edges
+        for (let k = 0; k < edgesTriples.length; k++) {
+          const [s,d,t] = edgesTriples[k];
+          if (centerSet.has(s) || centerSet.has(d)) edgeIdx.push(k);
+        }
+      } else {
+        const k = parseInt(hops, 10);
+        const q = [];
+        const dist = new Map();
+        for (const c of centerSet) {
+          q.push(c);
+          dist.set(c, 0);
+          nodeSet.add(c);
+        }
+        while (q.length) {
+          const cur = q.shift();
+          const cd = dist.get(cur);
+          if (cd >= k) continue;
+          for (const nb of neighborsByMode(cur, traversalMode)) {
+            if (!dist.has(nb)) {
+              dist.set(nb, cd + 1);
+              q.push(nb);
+              nodeSet.add(nb);
+            }
+          }
+        }
+        // collect all edges inside nodeSet
+        for (let k = 0; k < edgesTriples.length; k++) {
+          const [s,d,t] = edgesTriples[k];
+          if (nodeSet.has(s) && nodeSet.has(d)) edgeIdx.push(k);
+        }
+        // sample edges if too many, but keep those incident to ANY center
+        if (edgeIdx.length > maxEdges) {
+          const keep = [];
+          const rest = [];
+          for (const k of edgeIdx) {
+            const [s,d,t] = edgesTriples[k];
+            if (centerSet.has(s) || centerSet.has(d)) keep.push(k);
+            else rest.push(k);
+          }
+          const r = rand(seed);
+          for (let i = rest.length - 1; i > 0; i--) {
+            const j = Math.floor(r() * (i + 1));
+            [rest[i], rest[j]] = [rest[j], rest[i]];
+          }
+          edgeIdx.length = 0;
+          for (const k of keep) edgeIdx.push(k);
+          for (const k of rest.slice(0, Math.max(0, maxEdges - keep.length))) edgeIdx.push(k);
+        }
+      }
+
+      // derive nodeSet from chosen edges (for inf mode)
+      for (const k of edgeIdx) {
+        const [s,d,t] = edgesTriples[k];
+        nodeSet.add(s); nodeSet.add(d);
+      }
+      return {nodeSet, edgeIdx};
+    }
+
+    function collectProductAllEntities(center, maxValues) {
+      // Designed for Scheme B:
+      // product --(0)--> category
+      // product --(has_*)--> entity nodes (typed by category name)
+      // category --(category_parent_of)--> category (optional)
+      const nodeSet = new Set();
+      const edgeTriples = [];
+      nodeSet.add(center);
+
+      const categories = [];
+      const entities = [];
+
+      const out = ADJ.out.get(center) || [];
+      for (const [d,t] of out) {
+        if (t === 0) {
+          categories.push(d);
+          nodeSet.add(d);
+          edgeTriples.push([center, d, t]);
+        } else {
+          // treat all non-category edges as entity edges
+          entities.push([d, t]);
+        }
+      }
+
+      let cnt = 0;
+      for (const [eid, etype] of entities) {
+        if (maxValues > 0 && cnt >= maxValues) break;
+        cnt += 1;
+        nodeSet.add(eid);
+        edgeTriples.push([center, eid, etype]);
+      }
+
+      // category hierarchy edges among included categories
+      const catSet = new Set(categories);
+      for (const c of categories) {
+        const cout = ADJ.out.get(c) || [];
+        for (const [d,t] of cout) {
+          // last edge type in our builder is category_parent_of; treat by name if possible
+          // but here we just keep numeric 11 (default) and ignore others.
+          if (edgeTypeDict[t] === "category_parent_of" && catSet.has(d)) {
+            edgeTriples.push([c, d, t]);
+          }
+        }
+      }
+
+      return {nodeSet, edgeTriples};
+    }
+
+    function collectProductsAllEntities(centers, maxValuesPerProduct) {
+      const nodeSet = new Set();
+      const edgeKey = new Set();
+      const edgeTriples = [];
+
+      for (const c of centers) {
+        const rec = nodesById[c];
+        if (!rec || rec.ntype !== "product") continue;
+        const one = collectProductAllEntities(c, maxValuesPerProduct);
+        for (const nid of one.nodeSet) nodeSet.add(nid);
+        for (const e of one.edgeTriples) {
+          const key = e[0] + "|" + e[1] + "|" + e[2];
+          if (!edgeKey.has(key)) {
+            edgeKey.add(key);
+            edgeTriples.push(e);
+          }
+        }
+      }
+      return {nodeSet, edgeTriples};
+    }
+
+    function edgeLabelWithSentiment(s, d, t) {
+      // If the edge connects a product to an entity node (non-product/non-category),
+      // use the entity node's sentiment field as the edge label (the attitude towards that entity).
+      const src = nodesById[s];
+      const dst = nodesById[d];
+      const srcType = src?.ntype || "unknown";
+      const dstType = dst?.ntype || "unknown";
+
+      const normalizeSentimentLabel = (raw) => {
+        if (typeof raw !== "string") return null;
+        let s = raw.trim();
+        if (!s) return null;
+        // Handle "sentiment:positive" / "sentiment：positive" -> "positive"
+        const lower = s.toLowerCase();
+        if (lower.startsWith("sentiment:")) s = s.slice("sentiment:".length).trim();
+        if (lower.startsWith("sentiment：")) s = s.slice("sentiment：".length).trim();
+        // Common typo seen in some outputs
+        if (s.toLowerCase() === "posotive") s = "positive";
+        return s || null;
+      };
+
+      const getSent = (node) => normalizeSentimentLabel(node?.info?.sentiment);
+
+      const isEntity = (nt) => nt !== "product" && nt !== "category";
+      const connectsProductEntity =
+        (srcType === "product" && isEntity(dstType)) ||
+        (dstType === "product" && isEntity(srcType));
+
+      if (connectsProductEntity) {
+        const sent = getSent(isEntity(dstType) ? dst : src);
+        if (sent) return sent;  // Directly show: positive/negative/neutral
+      }
+
+      return edgeTypeDict[t] || String(t);
+    }
+
+    function buildVisData(center, nodeSet, edgeIdx, centersSet) {
+      const idMap = new Map();
+      let cur = 0;
+      for (const nid of nodeSet) {
+        idMap.set(nid, cur++);
+      }
+
+      const visNodes = [];
+      for (const nid of nodeSet) {
+        const rec = nodesById[nid];
+        const ntype = rec?.ntype || "unknown";
+        const baseColor = (ntype === "product" || ntype === "category") ? (NODE_COLORS[ntype] || NODE_COLORS.unknown) : NODE_COLORS.entity;
+        let size = 16;
+        if (ntype === "product") size = 28;
+        else if (ntype === "category") size = 20;
+        else size = 14;
+        const label = rec?.label || String(nid);
+
+        let color = baseColor;
+        let borderWidth = 1;
+        if (centersSet && centersSet.has(nid)) {
+          borderWidth = 3;
+          size = size + 6;
+          color = { background: baseColor, border: "#111111" };
+        }
+
+        // show value in tooltip for entity nodes
+        let title = "";
+        if (ntype !== "product" && ntype !== "category") {
+          const v = rec?.info?.name;
+          title = (v !== undefined && v !== null) ? (ntype + ": " + v) : ntype;
+        } else {
+          title = label;
+        }
+
+        visNodes.push({
+          id: idMap.get(nid),
+          node_id: nid,
+          label: label,
+          title: title,
+          color: color,
+          borderWidth: borderWidth,
+          size: size,
+          font: { align: "middle", size: (ntype === "entity_value" ? 10 : 12) },
+        });
+      }
+
+      const visEdges = [];
+      for (const k of edgeIdx) {
+        const [s,d,t] = edgesTriples[k];
+        if (!idMap.has(s) || !idMap.has(d)) continue;
+        visEdges.push({
+          from: idMap.get(s),
+          to: idMap.get(d),
+          color: "#555",
+          arrows: "to",
+          arrowStrikethrough: false,
+          label: edgeLabelWithSentiment(s, d, t),
+          font: { align: "middle", size: 10 },
+          width: 1,
+        });
+      }
+      return {visNodes, visEdges};
+    }
+
+    function buildVisDataFromTriples(center, nodeSet, edgeTriples, centersSet) {
+      const idMap = new Map();
+      let cur = 0;
+      for (const nid of nodeSet) {
+        idMap.set(nid, cur++);
+      }
+
+      const visNodes = [];
+      for (const nid of nodeSet) {
+        const rec = nodesById[nid];
+        const ntype = rec?.ntype || "unknown";
+        const baseColor = (ntype === "product" || ntype === "category") ? (NODE_COLORS[ntype] || NODE_COLORS.unknown) : NODE_COLORS.entity;
+        let size = 16;
+        if (ntype === "product") size = 28;
+        else if (ntype === "category") size = 20;
+        else size = 14;
+        const label = rec?.label || String(nid);
+
+        let color = baseColor;
+        let borderWidth = 1;
+        if (centersSet && centersSet.has(nid)) {
+          borderWidth = 3;
+          size = size + 6;
+          color = { background: baseColor, border: "#111111" };
+        }
+
+        // show value in tooltip for entity nodes
+        let title = "";
+        if (ntype !== "product" && ntype !== "category") {
+          const v = rec?.info?.name;
+          title = (v !== undefined && v !== null) ? (ntype + ": " + v) : ntype;
+        } else {
+          title = label;
+        }
+
+        visNodes.push({
+          id: idMap.get(nid),
+          node_id: nid,
+          label: label,
+          title: title,
+          color: color,
+          borderWidth: borderWidth,
+          size: size,
+          font: { align: "middle", size: (ntype === "entity_value" ? 10 : 12) },
+        });
+      }
+
+      const visEdges = [];
+      for (const [s,d,t] of edgeTriples) {
+        if (!idMap.has(s) || !idMap.has(d)) continue;
+        visEdges.push({
+          from: idMap.get(s),
+          to: idMap.get(d),
+          color: "#555",
+          arrows: "to",
+          arrowStrikethrough: false,
+          label: edgeLabelWithSentiment(s, d, t),
+          font: { align: "middle", size: 10 },
+          width: 1,
+        });
+      }
+      return {visNodes, visEdges};
+    }
+
+    function prettyNodeInfo(nid) {
+      const rec = nodesById[nid];
+      if (!rec) return "node not found: " + nid;
+      const ntype = rec.ntype || "unknown";
+      const info = rec.info || {};
+      const lines = [];
+      lines.push("node_id: " + nid);
+      lines.push("type: " + ntype);
+      lines.push("label: " + rec.label);
+      lines.push("");
+      for (const [k,v] of Object.entries(info)) {
+        // matched_entities is now a dict in latest outputs; pretty print it for readability.
+        if (k === "matched_entities" && v && typeof v === "object") {
+          lines.push(k + ": " + JSON.stringify(v, null, 2));
+          continue;
+        }
+        lines.push(k + ": " + (typeof v === "object" ? JSON.stringify(v) : v));
+      }
+      return lines.join("\n");
+    }
+
+    function prettyProductFullInfo(pid, maxValues) {
+      const rec = nodesById[pid];
+      if (!rec) return "node not found: " + pid;
+      if ((rec.ntype || "unknown") !== "product") return prettyNodeInfo(pid);
+
+      const info = rec.info || {};
+      const lines = [];
+      lines.push("======== PRODUCT ========");
+      lines.push("node_id: " + pid);
+      if (info.asin !== undefined) lines.push("asin: " + info.asin);
+      if (info.title !== undefined) lines.push("title: " + info.title);
+      lines.push("");
+
+      // raw fields
+      for (const [k,v] of Object.entries(info)) {
+        if (k === "asin" || k === "title") continue;
+        lines.push(k + ": " + (typeof v === "object" ? JSON.stringify(v) : v));
+      }
+
+      // categories + entities from outgoing edges (full, independent of maxEdges sampling)
+      const out = ADJ.out.get(pid) || [];
+      const catNames = [];
+      const groups = new Map(); // entityType -> [values]
+
+      let seenEnt = 0;
+      let truncated = false;
+      for (const [d,t] of out) {
+        const drec = nodesById[d];
+        if (!drec) continue;
+        if (t === 0 || drec.ntype === "category") {
+          const cn = (drec.info && drec.info.category_name) ? String(drec.info.category_name) : (drec.label || String(d));
+          catNames.push(cn);
+          continue;
+        }
+        if (maxValues > 0 && seenEnt >= maxValues) {
+          truncated = true;
+          continue;
+        }
+        seenEnt += 1;
+        const et = drec.ntype || "entity";
+        const val = (drec.info && drec.info.name !== undefined && drec.info.name !== null) ? String(drec.info.name) : (drec.label || String(d));
+        if (!groups.has(et)) groups.set(et, []);
+        groups.get(et).push(val);
+      }
+
+      // categories
+      const catSet = new Set(catNames.filter(Boolean));
+      const catList = Array.from(catSet);
+      catList.sort();
+      lines.push("");
+      lines.push("-------- categories (" + catList.length + ") --------");
+      for (const cn of catList) lines.push("- " + cn);
+
+      // entities grouped
+      const keys = Array.from(groups.keys());
+      keys.sort();
+      lines.push("");
+      lines.push("-------- entities --------");
+      for (const k of keys) {
+        const vals = groups.get(k) || [];
+        const set = new Set(vals.filter(Boolean));
+        const arr = Array.from(set);
+        arr.sort();
+        lines.push(k + " (" + arr.length + "): " + arr.join("; "));
+      }
+      if (truncated) {
+        lines.push("");
+        lines.push("[截断提示] 实体数量超过 Max Entity Values=" + maxValues + "，已截断显示。");
+      }
+      return lines.join("\n");
+    }
+
+    function pickProductsForInfo(nodeSet, centers, maxN) {
+      const picked = [];
+      const seen = new Set();
+      function add(pid) {
+        if (picked.length >= maxN) return;
+        if (seen.has(pid)) return;
+        const r = nodesById[pid];
+        if (!r || r.ntype !== "product") return;
+        seen.add(pid);
+        picked.push(pid);
+      }
+
+      // prefer centers first (in order)
+      for (const c of (centers || [])) add(c);
+      if (picked.length >= maxN) return picked;
+
+      // then any other product nodes in current subgraph (sorted by asin then id)
+      const others = [];
+      for (const nid of (nodeSet || [])) {
+        const r = nodesById[nid];
+        if (r && r.ntype === "product" && !seen.has(nid)) {
+          const asin = (r.info && r.info.asin) ? String(r.info.asin) : "";
+          others.push([asin, nid]);
+        }
+      }
+      others.sort((a,b) => {
+        if (a[0] < b[0]) return -1;
+        if (a[0] > b[0]) return 1;
+        return a[1] - b[1];
+      });
+      for (const [asin, nid] of others) add(nid);
+      return picked;
+    }
+
+    function maybeAutoShowProductInfos(nodeSet, centers) {
+      const n = parseInt(document.getElementById("maxProductInfos").value, 10) || 0;
+      if (n <= 0) return false;
+      const mv = parseInt(document.getElementById("maxValues").value, 10) || 0;
+      const pids = pickProductsForInfo(nodeSet, centers, n);
+      if (!pids.length) return false;
+      const parts = [];
+      for (const pid of pids) {
+        parts.push(prettyProductFullInfo(pid, mv));
+      }
+      document.getElementById("info").textContent = parts.join("\n\n");
+      return true;
+    }
+
+    function drawMulti(centers, hops, maxEdges, seed, traversalMode) {
+      const centerArr = centers || [];
+      const centersSet = new Set(centerArr);
+      const primary = centerArr.length ? centerArr[0] : null;
+
+      const {nodeSet, edgeIdx} = collectSubgraphMulti(centerArr, hops, maxEdges, seed, traversalMode);
+      const {visNodes, visEdges} = buildVisData(primary, nodeSet, edgeIdx, centersSet);
+
+      const container = document.getElementById("network");
+      const data = {
+        nodes: new vis.DataSet(visNodes),
+        edges: new vis.DataSet(visEdges),
+      };
+      const options = {
+        edges: {
+          smooth: { enabled: true, type: "dynamic" },
+          color: { inherit: true },
+        },
+        interaction: {
+          dragNodes: true,
+          zoomSpeed: 0.7,
+        },
+        physics: {
+          enabled: true,
+          stabilization: {
+            enabled: true,
+            fit: true,
+            iterations: 800,
+          },
+        },
+      };
+
+      const network = new vis.Network(container, data, options);
+      if (primary !== null) {
+        document.getElementById("info").textContent = prettyNodeInfo(primary);
+      }
+      maybeAutoShowProductInfos(nodeSet, centerArr);
+
+      network.on("selectNode", (e) => {
+        const vid = e.nodes[0];
+        const node = data.nodes.get(vid);
+        const nid = node.node_id;
+        document.getElementById("info").textContent = prettyNodeInfo(nid);
+
+        const expand = document.getElementById("expandAllEntities").value === "on";
+        const rec = nodesById[nid];
+        if (expand && rec && rec.ntype === "product") {
+          const mv = parseInt(document.getElementById("maxValues").value, 10) || 0;
+          drawAllEntitiesForProduct(nid, mv, parseInt(document.getElementById("seed").value, 10) || 7);
+        }
+      });
+    }
+
+    function drawAllEntitiesForProduct(center, maxValues, seed) {
+      const {nodeSet, edgeTriples} = collectProductAllEntities(center, maxValues);
+      const {visNodes, visEdges} = buildVisDataFromTriples(center, nodeSet, edgeTriples, new Set([center]));
+
+      const container = document.getElementById("network");
+      const data = {
+        nodes: new vis.DataSet(visNodes),
+        edges: new vis.DataSet(visEdges),
+      };
+      const options = {
+        edges: {
+          smooth: { enabled: true, type: "dynamic" },
+          color: { inherit: true },
+        },
+        interaction: {
+          dragNodes: true,
+          zoomSpeed: 0.7,
+        },
+        physics: {
+          enabled: true,
+          stabilization: {
+            enabled: true,
+            fit: true,
+            iterations: 800,
+          },
+        },
+      };
+
+      const network = new vis.Network(container, data, options);
+      document.getElementById("info").textContent = prettyNodeInfo(center);
+      maybeAutoShowProductInfos(nodeSet, [center]);
+
+      network.on("selectNode", (e) => {
+        const vid = e.nodes[0];
+        const node = data.nodes.get(vid);
+        const nid = node.node_id;
+        document.getElementById("info").textContent = prettyNodeInfo(nid);
+
+        const expand = document.getElementById("expandAllEntities").value === "on";
+        const rec = nodesById[nid];
+        if (expand && rec && rec.ntype === "product") {
+          const mv = parseInt(document.getElementById("maxValues").value, 10) || 0;
+          drawAllEntitiesForProduct(nid, mv, parseInt(document.getElementById("seed").value, 10) || 7);
+        }
+      });
+    }
+
+    function drawAllEntitiesForProducts(centers, maxValuesPerProduct, seed) {
+      const centerArr = centers || [];
+      const centersSet = new Set(centerArr);
+      const primary = centerArr.length ? centerArr[0] : null;
+
+      const {nodeSet, edgeTriples} = collectProductsAllEntities(centerArr, maxValuesPerProduct);
+      const {visNodes, visEdges} = buildVisDataFromTriples(primary, nodeSet, edgeTriples, centersSet);
+
+      const container = document.getElementById("network");
+      const data = {
+        nodes: new vis.DataSet(visNodes),
+        edges: new vis.DataSet(visEdges),
+      };
+      const options = {
+        edges: {
+          smooth: { enabled: true, type: "dynamic" },
+          color: { inherit: true },
+        },
+        interaction: {
+          dragNodes: true,
+          zoomSpeed: 0.7,
+        },
+        physics: {
+          enabled: true,
+          stabilization: {
+            enabled: true,
+            fit: true,
+            iterations: 800,
+          },
+        },
+      };
+
+      const network = new vis.Network(container, data, options);
+      if (primary !== null) {
+        document.getElementById("info").textContent = prettyNodeInfo(primary);
+      }
+      maybeAutoShowProductInfos(nodeSet, centerArr);
+
+      network.on("selectNode", (e) => {
+        const vid = e.nodes[0];
+        const node = data.nodes.get(vid);
+        const nid = node.node_id;
+        document.getElementById("info").textContent = prettyNodeInfo(nid);
+
+        const expand = document.getElementById("expandAllEntities").value === "on";
+        const rec = nodesById[nid];
+        if (expand && rec && rec.ntype === "product") {
+          const mv = parseInt(document.getElementById("maxValues").value, 10) || 0;
+          drawAllEntitiesForProduct(nid, mv, parseInt(document.getElementById("seed").value, 10) || 7);
+        }
+      });
+    }
+
+    document.getElementById("renderBtn").addEventListener("click", () => {
+      const hops = document.getElementById("hops").value;
+      const maxEdges = parseInt(document.getElementById("maxEdges").value, 10) || 250;
+      const seed = parseInt(document.getElementById("seed").value, 10) || 7;
+      const expand = document.getElementById("expandAllEntities").value === "on";
+      const maxValues = parseInt(document.getElementById("maxValues").value, 10) || 0;
+      const traversalMode = document.getElementById("traversalMode").value || "undirected";
+      const n = parseInt(document.getElementById("maxProductInfos").value, 10) || 0;
+
+      // If maxProductInfos>0, deterministically pick first N products by ASIN and show their full entities.
+      if (n > 0) {
+        const centers = pickFirstNProductsByAsin(n);
+        if (!centers.length) {
+          alert("没有可用的商品 ASIN（asin2id 为空）");
+          return;
+        }
+        drawAllEntitiesForProducts(centers, maxValues, seed);
+      } else {
+        // fallback: render a default product's local neighborhood
+        drawMulti([899], hops, maxEdges, seed, traversalMode);
+      }
+    });
+
+    // initial render
+    drawMulti([899], "2", 250, 7, "undirected");
+  </script>
+</body>
+</html>

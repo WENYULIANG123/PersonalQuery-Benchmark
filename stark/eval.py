@@ -21,6 +21,8 @@ try:
     from stark_qa.tools.args import load_args, merge_args
     print("DEBUG: All imports successful")
 except ImportError as e:
+    import traceback
+    traceback.print_exc()
     print(f"FATAL ERROR: Import failed: {e}")
     print("This usually means the conda environment is not properly activated or torch is not installed.")
     exit(1)
@@ -37,6 +39,7 @@ def parse_args():
     parser.add_argument("--model", default="VSS", choices=["BM25", "Colbertv2", "ColBERT", "GritLM", "VSS", "MultiVSS", "LLMReranker"])
     parser.add_argument("--split", default="test", choices=["train", "val", "test", "test-0.1", "human_generated_eval", "variants"])
     parser.add_argument("--strategy", type=str, default="original", help="Strategy for variants evaluation")
+    parser.add_argument("--categories", nargs="+", default=['Arts_Crafts_and_Sewing'], help="Categories to load for Amazon dataset")
 
     # Path settings
     parser.add_argument("--output_dir", type=str, default='output/')
@@ -106,7 +109,7 @@ if __name__ == "__main__":
     # Set document embedding directories (skip for ColBERT/ColBERTv2 models)
     if args.model not in ['ColBERT', 'Colbertv2']:
         # For DPR and ANCE models, use the default document embedding directory with no_rel_no_compact suffix
-        if args.emb_model.startswith('facebook/dpr') or args.emb_model.startswith('sentence-transformers/facebook-dpr') or args.emb_model.startswith('castorini/ance'):
+        if args.emb_model.startswith(('facebook/dpr', 'sentence-transformers/facebook-dpr', 'castorini/ance', 'alibaba-nlp')):
             args.node_emb_dir = osp.join(args.emb_dir, args.dataset, args.emb_model, "doc_no_rel_no_compact")
         else:
             args.node_emb_dir = osp.join(args.emb_dir, args.dataset, args.emb_model, f"doc{args.surfix}")
@@ -162,7 +165,7 @@ if __name__ == "__main__":
     print(f"📄 Results will be saved to: {eval_csv_path}")
     print(f"📊 Metrics will be saved to: {final_eval_path}")
 
-    skb = load_skb(args.dataset, root=args.dataset_root)
+    skb = load_skb(args.dataset, root=args.dataset_root, categories=args.categories)
 
     # Handle different split types
     if args.split == 'variants':
@@ -181,6 +184,11 @@ if __name__ == "__main__":
 
         # Load the dataset
         df = pd.read_csv(csv_path)
+
+        # Handle answer_ids_source column name if present
+        if 'answer_ids_source' in df.columns and 'answer_ids' not in df.columns:
+            df['answer_ids'] = df['answer_ids_source']
+            print("📝 Renamed 'answer_ids_source' to 'answer_ids'")
 
         # For strategy-specific datasets, no need to filter by attack_strategy
         # The dataset should already contain only queries for the specified strategy

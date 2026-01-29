@@ -61,7 +61,18 @@ def complete_text_hf(message: str,
         if device.type == "cuda" and not hasattr(hf_model, 'hf_device_map'):
             hf_model = hf_model.to(device)
 
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+        except Exception as e:
+            print(f"⚠️ AutoTokenizer failed: {e}. Trying LlamaTokenizer as fallback...")
+            try:
+                from transformers import LlamaTokenizer
+                tokenizer = LlamaTokenizer.from_pretrained(model_name)
+            except (ImportError, Exception):
+                # If LlamaTokenizer also fails or is not found in old version
+                print("⚠️ LlamaTokenizer also failed. Trying AutoTokenizer with use_fast=False...")
+                tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
+        
         loaded_hf_models[model_name] = (hf_model, tokenizer)
 
         if device.type == "cuda":

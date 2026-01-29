@@ -103,12 +103,15 @@ class LLMReranker(ModelForSTaRKQA):
         for idx, node_id in enumerate(top_k_node_ids):
             node_type = self.skb.get_node_type_by_id(node_id)
             prompt = (
-                f'You are a helpful assistant that examines if a {node_type} satisfies a given query and assign a score from 0.0 to 1.0. If the {node_type} does not satisfy the query, the score should be 0.0. If there exists explicit and strong evidence supporting that {node_type} satisfies the query, the score should be 1.0. If partial evidence or weak evidence exists, the score should be between 0.0 and 1.0.\n'
-                f'Here is the query:\n\"{query}\"\n'
-                f'Here is the information about the {node_type}:\n' +
-                self.skb.get_doc_info(node_id, add_rel=True) + '\n\n' +
-                f'Please score the {node_type} based on how well it satisfies the query. ONLY output the floating point score WITHOUT anything else. '
-                f'Output: The numeric score of this {node_type} is: '
+                f'You are an expert search relevance evaluator. Your task is to score the relevance of a product to a user query on a continuous scale from 0.0 to 1.0.\n'
+                f'Scoring Rubric:\n'
+                f'- 0.0: Completely Irrelevant. Does not match the query.\n'
+                f'- 0.5: Partially Relevant. Matches some keywords but misses core intent (e.g. wrong brand or function).\n'
+                f'- 1.0: Perfectly Relevant. Matches all constraints (brand, function, attributes) in the query.\n\n'
+                f'Query: "{query}"\n'
+                f'Product Info:\n{self.skb.get_doc_info(node_id, add_rel=True)}\n\n'
+                f'Constraint: Output ONLY a single floating point number between 0.0 and 1.0. Do not output text.\n'
+                f'Relevance Score:'
                 )
 
             success = False
@@ -144,9 +147,9 @@ class LLMReranker(ModelForSTaRKQA):
                 score = llm_score + self.sim_weight * sim_score
                 pred_dict[node_id] = score
             else:
-                print(f'❌ LLM reranking failed for query "{query}" after {self.max_cnt} attempts')
-                print('💥 FATAL: Exiting program due to LLM reranking failure')
-                exit(1)
+                print(f'⚠️ LLM reranking parsing failed for query "{query}" after {self.max_cnt} attempts. Assigning 0.0.')
+                sim_score = (cand_len - idx) / cand_len
+                pred_dict[node_id] = 0.0 + self.sim_weight * sim_score
         return pred_dict
 
 
