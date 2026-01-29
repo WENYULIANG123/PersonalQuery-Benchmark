@@ -96,5 +96,6 @@ def load_files(save_path):
         elif file_ext == '.pt':
             loaded_dict[file_name] = torch.load(file_path)
         else:
-            raise NotImplementedError(f'File type not supported: {file}')
+            # Skip unsupported file types instead of raising error
+            continue
     return loaded_dict

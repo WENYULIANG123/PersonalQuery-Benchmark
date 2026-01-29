@@ -26,8 +26,19 @@ def get_gte_qwen_embeddings(text: Union[str, List[str]],
     if model_name in loaded_gte_models:
         tokenizer, model = loaded_gte_models[model_name]
     else:
+        # Pre-load config and patch for older transformers versions
+        from transformers import AutoConfig
+        config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+        if not hasattr(config, "_attn_implementation"):
+            config._attn_implementation = "eager"
+
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
+        model = AutoModel.from_pretrained(model_name, config=config, trust_remote_code=True)
+        
+        # Patch for older transformers versions where this method is missing but called by remote code
+        if not hasattr(model, "warn_if_padding_and_no_attention_mask"):
+            model.warn_if_padding_and_no_attention_mask = lambda *args, **kwargs: None
+            
         model.eval()
         model.to(device)
 

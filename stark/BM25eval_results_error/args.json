@@ -1,0 +1,32 @@
+{
+    "dataset": "amazon",
+    "model": "BM25",
+    "split": "variants",
+    "strategy": "kg_query",
+    "categories": [
+        "all"
+    ],
+    "output_dir": "BM25eval/eval/amazon/BM25",
+    "download_dir": "output/",
+    "dataset_root": "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/processed/attribute_kb",
+    "csv_file": "/home/wlia0047/ar57/wenyu/stark/data/stark_strategy_kg_query_02127e95_dataset/qa/amazon/stark_qa/stark_qa.csv",
+    "emb_dir": "emb/",
+    "test_ratio": 1.0,
+    "batch_size": 1,
+    "device": "cpu",
+    "max_queries": null,
+    "chunk_size": 256,
+    "multi_vss_topk": 50,
+    "aggregate": "max",
+    "emb_model": "text-embedding-ada-002",
+    "llm_model": "gpt-4-1106-preview",
+    "llm_topk": 10,
+    "max_retry": 3,
+    "save_pred": true,
+    "save_topk": 500,
+    "surfix": "",
+    "force_rerun": true,
+    "query_emb_dir": "emb/amazon/text-embedding-ada-002/query_query_stark_kg_query_variants_dataset",
+    "node_emb_dir": "emb/amazon/text-embedding-ada-002/doc",
+    "chunk_emb_dir": "emb/amazon/text-embedding-ada-002/chunk"
+}

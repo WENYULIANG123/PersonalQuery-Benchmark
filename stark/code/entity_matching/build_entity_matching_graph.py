@@ -569,10 +569,23 @@ def build_graph(
                     if not entity_value:
                         continue
 
-                    
-                    # 优先尝试使用 LLM 映射表
                     mapped_value = None
-                    if etype_label in entity_map:
+
+                    # 1. Check for product-specific normalized entities (HIGHEST PRIORITY)
+                    normalized_entities_local = p.get("normalized_entities") or {}
+                    # Try to find matching key in normalized_entities
+                    # Keys in normalized_entities might be original field names (e.g. "Color") or normalized (e.g. "Color")
+                    # We try matching etype_raw first, then etype_label
+                    local_cat_map = normalized_entities_local.get(etype_raw) or normalized_entities_local.get(etype_label)
+                    
+                    if local_cat_map and isinstance(local_cat_map, dict):
+                         if v in local_cat_map:
+                             mapped_value = local_cat_map[v]
+                         elif entity_value in local_cat_map:
+                             mapped_value = local_cat_map[entity_value]
+                    
+                    # 2. Check global entity map if no local mapping found
+                    if not mapped_value and etype_label in entity_map:
                         # 查找原始值对应的映射 (注意大小写或直接匹配)
                         # entity_map 结构: {Category: {RawValue: NormalizedValue}}
                         cat_map = entity_map[etype_label]
@@ -583,7 +596,7 @@ def build_graph(
 
                     if mapped_value and mapped_value != "Other":
                         entity_value = mapped_value
-                        print(f"DEBUG: LLM mapped '{v}' -> '{entity_value}'")
+                        # print(f"DEBUG: Mapped '{v}' -> '{entity_value}'")
                     else:
                         # Fallback to rule-based categorization if LLM map missed it or returned Other
                         # 对于Color实体，使用颜色系而不是具体颜色名称

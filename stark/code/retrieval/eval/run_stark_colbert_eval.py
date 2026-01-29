@@ -28,6 +28,52 @@ def create_strategy_dataset(strategy_name):
     if strategy_name == 'original':
         return None
 
+    if strategy_name == 'kg_query':
+        # For KG-generated queries, use the specific CSV file
+        query_file = "/home/wlia0047/ar57/wenyu/result/generated_kg_queries.csv"
+        stark_base_dir = "/home/wlia0047/ar57/wenyu/stark/data/stark_strategy_kg_query_dataset"
+
+        # Create STaRK directory structure
+        qa_dir = os.path.join(stark_base_dir, "qa", "amazon")
+        split_dir = os.path.join(qa_dir, "split")
+        stark_qa_dir = os.path.join(qa_dir, "stark_qa")
+
+        os.makedirs(stark_qa_dir, exist_ok=True)
+        os.makedirs(split_dir, exist_ok=True)
+
+        # Load queries
+        if not os.path.exists(query_file):
+            raise FileNotFoundError(f"Query file not found: {query_file}")
+
+        df = pd.read_csv(query_file)
+
+        # Handle answer_ids_source column name if present
+        if 'answer_ids_source' in df.columns and 'answer_ids' not in df.columns:
+            df['answer_ids'] = df['answer_ids_source']
+
+        # Ensure required columns exist
+        if 'id' not in df.columns:
+            df['id'] = range(len(df))
+
+        # Filter and save STaRK format file
+        stark_df = pd.DataFrame({
+            'id': df['id'],
+            'query': df['query'],
+            'answer_ids': df['answer_ids'],
+            'query_type': ['kg_query'] * len(df)
+        })
+
+        stark_qa_file = os.path.join(stark_qa_dir, "stark_qa.csv")
+        stark_df.to_csv(stark_qa_file, index=False)
+
+        # Create split file
+        split_file = os.path.join(split_dir, "variants.index")
+        with open(split_file, 'w') as f:
+            for idx in stark_df['id']:
+                f.write(f"{idx}\n")
+
+        return stark_base_dir
+
 
     variants_file = f"/home/wlia0047/ar57/wenyu/stark/data/strategy_variants/{strategy_name}_variants_81.csv"
     stark_base_dir = f"/home/wlia0047/ar57/wenyu/stark/data/stark_strategy_{strategy_name}_dataset"
@@ -74,7 +120,7 @@ def main():
     parser.add_argument('--model', type=str, default='Colbertv2',
                        help='Model to use (default: Colbertv2)')
     parser.add_argument('--strategy', type=str, default='original',
-                       choices=['original', 'character', 'embedding', 'other', 'typo', 'wordnet', 'error_aware', 'grammar_aware', 'all'],
+                       choices=['original', 'character', 'embedding', 'other', 'typo', 'wordnet', 'error_aware', 'grammar_aware', 'kg_query', 'all'],
                        help='Attack strategy to evaluate (default: original, use "all" for all strategies)')
     parser.add_argument('--save_pred', action='store_true',
                        help='Save predictions (default: False)')
@@ -113,6 +159,12 @@ def main():
             if strategy == 'original':
                 split = "human_generated_eval"
                 dataset_root = None
+            elif strategy == 'kg_query':
+                split = "variants"
+                # Create dataset structure
+                _ = create_strategy_dataset(strategy)
+                # Use SKB path
+                dataset_root = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/processed/attribute_kb"
             else:
                 split = "variants"
                 dataset_root = create_strategy_dataset(strategy)
@@ -140,6 +192,9 @@ def main():
                 cmd.extend(["--dataset_root", dataset_root])
 
             cmd.extend(["--strategy", strategy])
+
+            if strategy == 'kg_query':
+                cmd.extend(["--csv_file", "/home/wlia0047/ar57/wenyu/stark/data/stark_strategy_kg_query_dataset/qa/amazon/stark_qa/stark_qa.csv"])
 
             print(f"Running command: {' '.join(cmd)}")
 

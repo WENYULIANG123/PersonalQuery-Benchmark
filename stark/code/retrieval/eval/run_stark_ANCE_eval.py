@@ -24,12 +24,66 @@ from tqdm import tqdm
 
 
 
-def create_strategy_dataset(strategy_name):
+def create_strategy_dataset(strategy_name, input_csv=None):
     """Create STaRK-compatible dataset for a specific strategy."""
     import pandas as pd
 
+
     if strategy_name == 'original':
         return None
+
+    if strategy_name == 'kg_query':
+        # For KG-generated queries, use the specific CSV file
+        if input_csv:
+            query_file = input_csv
+            # Create a unique directory for this specific CSV run to avoid conflicts
+            import hashlib
+            csv_hash = hashlib.md5(input_csv.encode()).hexdigest()[:8]
+            stark_base_dir = f"/home/wlia0047/ar57/wenyu/stark/data/stark_strategy_kg_query_{csv_hash}_dataset"
+        else:
+            query_file = "/home/wlia0047/ar57/wenyu/result/generated_kg_queries.csv"
+            stark_base_dir = "/home/wlia0047/ar57/wenyu/stark/data/stark_strategy_kg_query_dataset"
+
+        # Create STaRK directory structure
+        qa_dir = os.path.join(stark_base_dir, "qa", "amazon")
+        split_dir = os.path.join(qa_dir, "split")
+        stark_qa_dir = os.path.join(qa_dir, "stark_qa")
+
+        os.makedirs(stark_qa_dir, exist_ok=True)
+        os.makedirs(split_dir, exist_ok=True)
+
+        # Load queries
+        if not os.path.exists(query_file):
+            raise FileNotFoundError(f"Query file not found: {query_file}")
+
+        df = pd.read_csv(query_file)
+
+        # Handle answer_ids_source column name if present
+        if 'answer_ids_source' in df.columns and 'answer_ids' not in df.columns:
+            df['answer_ids'] = df['answer_ids_source']
+
+        # Ensure required columns exist
+        if 'id' not in df.columns:
+            df['id'] = range(len(df))
+
+        # Filter and save STaRK format file
+        stark_df = pd.DataFrame({
+            'id': df['id'],
+            'query': df['query'],
+            'answer_ids': df['answer_ids'],
+            'query_type': ['kg_query'] * len(df)
+        })
+
+        stark_qa_file = os.path.join(stark_qa_dir, "stark_qa.csv")
+        stark_df.to_csv(stark_qa_file, index=False)
+
+        # Create split file
+        split_file = os.path.join(split_dir, "variants.index")
+        with open(split_file, 'w') as f:
+            for idx in stark_df['id']:
+                f.write(f"{idx}\n")
+
+        return stark_base_dir
 
 
     variants_file = f"/home/wlia0047/ar57/wenyu/stark/data/strategy_variants/{strategy_name}_variants_81.csv"
@@ -154,13 +208,16 @@ def encode_query(query_text, encoder, tokenizer):
     return embedding
 
 
-def generate_ance_query_embeddings(encoder, tokenizer, dataset, split, strategy=None, dataset_root=None):
+def generate_ance_query_embeddings(encoder, tokenizer, dataset, split, strategy=None, dataset_root=None, csv_file=None):
     """Generate ANCE query embeddings compatible with eval.py format."""
     import os.path as osp
     from stark_qa import load_qa
 
     print("🔍 Loading QA dataset for query embedding generation...")
-    if split == 'variants' and dataset_root:
+    if csv_file:
+        import pandas as pd
+        qa_dataset = load_custom_qa_dataset(csv_file)
+    elif split == 'variants' and dataset_root:
         # Load custom variants or error_aware dataset
         import pandas as pd
         csv_path = osp.join(dataset_root, "qa", "amazon", "stark_qa", "stark_qa.csv")
@@ -248,8 +305,10 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='STaRK DPR Evaluation for Query Variants')
     parser.add_argument('--strategy', type=str, default='all',
-                       choices=['original', 'character', 'embedding', 'other', 'typo', 'wordnet', 'error_aware', 'grammar_aware', 'all'],
+                       choices=['original', 'character', 'embedding', 'other', 'typo', 'wordnet', 'error_aware', 'grammar_aware', 'kg_query', 'all'],
                        help='Attack strategy to evaluate (default: all)')
+    parser.add_argument('--input_csv', type=str, default=None,
+                       help='Path to custom input CSV file (overrides default for kg_query)')
     args = parser.parse_args()
 
     stark_root = "/home/wlia0047/ar57/wenyu/stark"
@@ -312,6 +371,13 @@ def main():
             elif strategy in ['error_aware', 'grammar_aware']:
                 dataset_root = create_strategy_dataset(strategy)
                 split = "variants"
+            elif strategy == 'kg_query':
+                # First create the QA dataset structure
+                created_root = create_strategy_dataset(strategy, args.input_csv)
+                # Then set the dataset_root to the specific SKB path
+                dataset_root = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/processed/attribute_kb"
+                split = "variants"
+                print(f"Using SKB from: {dataset_root} (dataset config at {created_root})")
             else:
                 dataset_root = create_strategy_dataset(strategy)
                 split = "variants"
@@ -337,16 +403,29 @@ def main():
                 print("- 81 grammar-aware queries - CUSTOM DATASET LOADING")
             elif strategy == 'original':
                 print("- 81 original queries - STANDARD STaRK LOADING")
+            elif strategy == 'kg_query':
+                print(f"- {strategy} - CUSTOM SKB LOADING")
             else:
                 print("- 81 variant queries per strategy - FORCED LOCAL LOADING")
             print("- Expected runtime: ~2-5 minutes per strategy")
             print("-" * 40)
 
+
             # 生成查询嵌入（如果不存在）
-            query_emb_dir = generate_ance_query_embeddings(encoder, tokenizer, dataset, split, strategy, dataset_root)
+            csv_file = None
+            if strategy == 'kg_query':
+                if args.input_csv:
+                    # Need to construct the correct path based on the logic in create_strategy_dataset
+                    import hashlib
+                    csv_hash = hashlib.md5(args.input_csv.encode()).hexdigest()[:8]
+                    csv_file = f"/home/wlia0047/ar57/wenyu/stark/data/stark_strategy_kg_query_{csv_hash}_dataset/qa/amazon/stark_qa/stark_qa.csv"
+                else:
+                    csv_file = "/home/wlia0047/ar57/wenyu/stark/data/stark_strategy_kg_query_dataset/qa/amazon/stark_qa/stark_qa.csv"
+            
+            query_emb_dir = generate_ance_query_embeddings(encoder, tokenizer, dataset, split, strategy, dataset_root, csv_file)
 
             # 使用标准的 eval.py 进行 ANCE 评估
-            result = run_ance_evaluation_with_eval_py(dataset, split, dataset_root, "ANCEeval", save_topk, stark_root, strategy, query_emb_dir)
+            result = run_ance_evaluation_with_eval_py(dataset, split, dataset_root, "ANCEeval", save_topk, stark_root, strategy, query_emb_dir, csv_file)
 
             end_time = datetime.now()
             duration = end_time - start_time
@@ -359,6 +438,8 @@ def main():
         except Exception as e:
             print(f"✗ {strategy.upper()} ANCE EVALUATION FAILED!")
             print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
 
     total_end_time = datetime.now()
     total_duration = total_end_time - total_start_time
@@ -370,7 +451,7 @@ def main():
     print(f"{'='*80}")
 
 
-def run_ance_evaluation_with_eval_py(dataset, split, dataset_root, output_dir, save_topk, stark_root, strategy, query_emb_dir):
+def run_ance_evaluation_with_eval_py(dataset, split, dataset_root, output_dir, save_topk, stark_root, strategy, query_emb_dir, csv_file=None):
     """Run ANCE evaluation using the standard eval.py script."""
     cmd = [
         "python", "eval.py",
@@ -390,6 +471,9 @@ def run_ance_evaluation_with_eval_py(dataset, split, dataset_root, output_dir, s
 
     if strategy != 'original':
         cmd.extend(["--strategy", strategy])
+
+    if csv_file:
+        cmd.extend(["--csv_file", csv_file])
 
     print(f"Running eval command: {' '.join(cmd)}")
     print("🔄 Starting evaluation (output displayed in real-time)...")

@@ -32,15 +32,18 @@ def load_skb(name: str,
     if root is None:
         data_root = None
     else:
-        root = os.path.abspath(root)
         if name == 'amazon':
-            # Use fixed amazon data directory to avoid re-extraction for each strategy
-            data_root = osp.join(osp.dirname(osp.dirname(root)), 'data', 'amazon')
+            # Check if the provided root already contains the processed data
+            if osp.exists(osp.join(root, 'node_info.pkl')) or osp.exists(osp.join(root, 'processed', 'node_info.pkl')):
+                data_root = root
+            else:
+                # Fallback to the previous logic of going up and then to data/amazon
+                data_root = osp.join(osp.dirname(osp.dirname(root)), 'data', 'amazon')
         else:
             data_root = osp.join(root, name)
 
     if name == 'amazon':
-        categories = ['Arts_Crafts_and_Sewing']
+        categories = kwargs.pop('categories', ['Arts_Crafts_and_Sewing'])
         skb = AmazonSKB(root=data_root,
                         categories=categories,
                         download_processed=download_processed,

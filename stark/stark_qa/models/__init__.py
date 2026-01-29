@@ -1,5 +1,8 @@
 from .bm25 import BM25
-from .colbertv2 import Colbertv2
+try:
+    from .colbertv2 import Colbertv2
+except (ImportError, ModuleNotFoundError):
+    Colbertv2 = None
 from .colbert import ColBERT
 from .gritlm import GritLM
 from .llm_reranker import LLMReranker
