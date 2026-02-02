@@ -6,7 +6,7 @@ allowed-tools: run_command
 
 # User-Preference-Extraction (用户偏好提取)
 
-此技能用于提取用户评论中的偏好实体。核心原则是 **"AI-in-the-loop"**：脚本仅用于准备数据，核心的理解、推理和提取工作必须由 Agent 手动完成。
+此技能用于提取用户评论中的偏好实体。核心原则是 **"AI-in-the-loop"**：脚本仅用于准备数据，核心的理解、推理和提取工作必须由 Agent 手动完成。**所有产品都不允许批量规则处理，必须由 Agent 逐个阅读评论、理解语义、进行完整 CoT 推理后提取。**
 
 ## 文件路径规范 (Standard Paths)
 
@@ -110,6 +110,7 @@ Agent 读取 `/home/wlia0047/ar57/wenyu/result/preference_extraction/intermediat
 ```
 
 **⚠️ 严禁批量处理**：
+- 🔴 **绝对禁止批量规则处理**：每个产品必须由 Agent 亲自逐个阅读评论、深入理解语义。
 - ❌ 不允许使用脚本一次性处理多个产品
 - ❌ 不允许跳过 CoT 分析步骤
 - ❌ 不允许省略合理性验证

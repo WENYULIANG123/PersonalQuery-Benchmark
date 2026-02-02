@@ -34,18 +34,20 @@ def main():
     parser.add_argument("--user_id", default="A13OFOB1394G31", help="Target User ID (default: A13OFOB1394G31)")
     parser.add_argument("--asin", help="Target Product ASIN (Optional). If provided, only fetches this one.")
     parser.add_argument("--output", default=DEFAULT_OUTPUT_FILE, help="Path to save aggregated input_material.json")
+    parser.add_argument("--reviews_file", default="/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/processed/attribute_kb/user_product_reviews.json", 
+                        help="Path to the preprocessed user_product_reviews.json file")
     
     args = parser.parse_args()
     
     print(f"🔍 Fetching data for User: {args.user_id}...")
     
     # 1. Load All User Reviews
-    PREPROCESSED_REVIEWS_FILE = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/processed/attribute_kb/user_product_reviews.json"
+    reviews_file = args.reviews_file
     
     try:
-        if os.path.exists(PREPROCESSED_REVIEWS_FILE):
-            print(f"   Loading reviews from preprocessed file: {PREPROCESSED_REVIEWS_FILE}")
-            with open(PREPROCESSED_REVIEWS_FILE, 'r') as f:
+        if os.path.exists(reviews_file):
+            print(f"   Loading reviews from file: {reviews_file}")
+            with open(reviews_file, 'r') as f:
                 data = json.load(f)
                 user_data = data.get(args.user_id, {})
                 all_reviews = user_data.get('reviews', [])
