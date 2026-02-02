@@ -254,8 +254,8 @@ class Colbertv2(ModelForSTaRKQA):
 
         log_progress("2/6", "Setting up ColBERT configuration", overall_start)
         with Run().context(RunConfig(nranks=nranks, experiment=self.exp_name, root=self.experiments_dir)):
-            config = ColBERTConfig(nbits=self.nbits, root=self.experiments_dir)
-            log_progress("2/6", f"Config created: nbits={self.nbits}, experiment={self.exp_name}", overall_start)
+            config = ColBERTConfig(nbits=self.nbits, root=self.experiments_dir, resume=True)
+            log_progress("2/6", f"Config created: nbits={self.nbits}, experiment={self.exp_name}, resume=True", overall_start)
 
             log_progress("3/6", "Loading ColBERT model checkpoint", overall_start)
             model_start = time.time()

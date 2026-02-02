@@ -16,7 +16,7 @@ from tqdm import tqdm
 class Config:
     def __init__(self):
         # Using the base Qwen2-1.5B model as requested
-        self.model_name = "Qwen/Qwen2-1.5B" 
+        self.model_name = "Qwen/Qwen2-1.5B"
         self.max_len = 128
         self.batch_size = 4  # Reduced batch size for LLM
         self.epochs = 5
@@ -24,11 +24,12 @@ class Config:
         self.temp = 0.1 # Increased temperature
         self.seed = 42
         self.use_lora = False # Disabled LoRA due to environment incompatibility with peft/torch_dist
-        self.clean_csv = "/home/wlia0047/ar57/wenyu/result/query/kg_queries_clean.csv"
-        self.noisy_csv = "/home/wlia0047/ar57/wenyu/result/query/kg_queries_noisy.csv"
+        self.freeze_encoder = True # Freeze encoder to prevent overfitting on small dataset
+        self.clean_csv = "/home/wlia0047/ar57/wenyu/result/clean_query/clean_queries.csv"
+        self.noisy_csv = "/home/wlia0047/ar57/wenyu/result/noisy_query/noisy_queries.csv"
         self.meta_path = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz"
         self.output_dir = "/home/wlia0047/ar57/wenyu/stark/code/train_model/results_qwen"
-        
+
         # Dynamic Loss Weights
         self.w_noisy = 1.0
         self.w_clean = 0.5
@@ -162,23 +163,27 @@ def prepare_data(test_size=0.2):
 
 # --- Model ---
 class MultiTaskQwenEncoder(nn.Module):
-    def __init__(self, model_name):
+    def __init__(self, model_name, freeze_encoder=True):
         super().__init__()
         # Load base Qwen2 model
         # attn_implementation="eager" to avoid flash_attn dependency
         self.encoder = AutoModel.from_pretrained(
-            model_name, 
+            model_name,
             trust_remote_code=True,
             torch_dtype=torch.bfloat16, # Use bfloat16 for better stability
             attn_implementation="eager"
         )
-        
-        # We keep the encoder frozen mostly if we want to save memory, 
-        # but since user wants to "use LLM", we'll allow gradients for the whole thing
-        # but with a very small batch size.
-        
+
+        # Freeze encoder parameters to prevent overfitting on small dataset
+        if freeze_encoder:
+            logging.info("Freezing encoder parameters - only projector will be trained")
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+        else:
+            logging.info("Encoder is trainable - full model fine-tuning")
+
         hidden_size = self.encoder.config.hidden_size
-        self.projector = nn.Linear(hidden_size, 128).to(torch.bfloat16).to(self.encoder.device)
+        self.projector = nn.Linear(hidden_size, 128).to(torch.bfloat16)
 
     def last_token_pool(self, last_hidden_states, attention_mask):
         """Standard last token pooling for causal LMs."""
@@ -205,11 +210,11 @@ def alignment_loss(clean_emb, noisy_emb):
 
 def train(mode='baseline'):
     logging.info(f"Starting Training: Mode = {mode.upper()}")
-    
+
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     tokenizer.pad_token = tokenizer.eos_token
-    
-    model = MultiTaskQwenEncoder(config.model_name).cuda()
+
+    model = MultiTaskQwenEncoder(config.model_name, freeze_encoder=config.freeze_encoder).cuda()
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr)
     
     train_df, test_df, meta_map = prepare_data()
@@ -258,8 +263,32 @@ def train(mode='baseline'):
             
         avg_loss = total_loss / len(train_loader)
         logging.info(f"Epoch {epoch+1} Loss: {avg_loss:.4f}")
-        
-    logging.info("Evaluating on Noisy Test Set...")
+
+    # Evaluate on both Clean and Noisy queries
+    results_clean = evaluate_model(test_loader, tokenizer, model, query_type='clean')
+    results_noisy = evaluate_model(test_loader, tokenizer, model, query_type='noisy')
+
+    logging.info(f"\n{'='*95}")
+    logging.info(f"EVALUATION RESULTS - Mode: {mode.upper()}")
+    logging.info(f"{'='*95}")
+    logging.info(f"{'Query Type':<15} | {'MRR':<8} | {'Hit@1':<8} | {'Hit@3':<8} | {'Hit@5':<8} | {'Hit@10':<8} | {'NDCG@10':<8}")
+    logging.info(f"{'-'*95}")
+    logging.info(f"{'Clean':<15} | {results_clean['mrr']:.4f}   | {results_clean['hit_1']:.4f}   | {results_clean['hit_3']:.4f}   | {results_clean['hit_5']:.4f}   | {results_clean['hit_10']:.4f}   | {results_clean['ndcg_10']:.4f}")
+    logging.info(f"{'Noisy':<15} | {results_noisy['mrr']:.4f}   | {results_noisy['hit_1']:.4f}   | {results_noisy['hit_3']:.4f}   | {results_noisy['hit_5']:.4f}   | {results_noisy['hit_10']:.4f}   | {results_noisy['ndcg_10']:.4f}")
+    logging.info(f"{'='*95}\n")
+
+    # Return combined results
+    return {
+        'clean': results_clean,
+        'noisy': results_noisy
+    }
+
+def evaluate_model(test_loader, tokenizer, model, query_type='noisy'):
+    """
+    Evaluate model on test set.
+    Args:
+        query_type: 'clean' or 'noisy' - which query type to use for evaluation
+    """
     model.eval()
     mrr_sum = 0
     hit_1 = 0
@@ -268,99 +297,125 @@ def train(mode='baseline'):
     hit_10 = 0
     ndcg_10_sum = 0
     count = 0
-    
-    logging.info("Evaluating on Noisy Test Set (Global Evaluation)...")
-    model.eval()
-    mrr_sum = 0
-    hit_1 = 0
-    hit_3 = 0
-    hit_5 = 0
-    hit_10 = 0
-    ndcg_10_sum = 0
-    count = 0
-    
-    # helper to encode all
-    def encode_all_queries_and_items(loader):
+
+    logging.info(f"Evaluating on {query_type.upper()} Test Set...")
+
+    # helper to encode all queries and items
+    def encode_all_queries_and_items(loader, q_type):
         all_q_embs = []
         all_i_embs = []
         with torch.no_grad():
             for batch in loader:
-                # encode inputs
-                inputs_q = tokenizer(batch['noisy_q'], padding=True, truncation=True, max_length=config.max_len, return_tensors='pt').to('cuda')
+                # Encode queries based on query_type
+                if q_type == 'clean':
+                    inputs_q = tokenizer(batch['clean_q'], padding=True, truncation=True,
+                                        max_length=config.max_len, return_tensors='pt').to('cuda')
+                else:
+                    inputs_q = tokenizer(batch['noisy_q'], padding=True, truncation=True,
+                                        max_length=config.max_len, return_tensors='pt').to('cuda')
                 q_emb = model(inputs_q['input_ids'], inputs_q['attention_mask'])
-                
-                inputs_i = tokenizer(batch['item_text'], padding=True, truncation=True, max_length=config.max_len, return_tensors='pt').to('cuda')
+
+                # Encode items
+                inputs_i = tokenizer(batch['item_text'], padding=True, truncation=True,
+                                    max_length=config.max_len, return_tensors='pt').to('cuda')
                 i_emb = model(inputs_i['input_ids'], inputs_i['attention_mask'])
-                
+
                 all_q_embs.append(q_emb)
                 all_i_embs.append(i_emb)
         return torch.cat(all_q_embs), torch.cat(all_i_embs)
 
-    # 1. Encode ALL test queries and ALL test items
-    # Note: We assume 1-to-1 mapping in test set for simplicity here. 
-    # Ideally we rank against the entire corpus (train + test items), but ranking against test set is start.
-    q_embs_all, i_embs_all = encode_all_queries_and_items(test_loader)
-    
-    # 2. Compute similarity matrix (Num_Queries x Num_Items)
-    # Cosine sim: Normalize first then matmul
+    # Encode all test queries and items
+    q_embs_all, i_embs_all = encode_all_queries_and_items(test_loader, query_type)
+
+    # Compute similarity matrix (Num_Queries x Num_Items)
     q_embs_norm = F.normalize(q_embs_all, p=2, dim=1)
     i_embs_norm = F.normalize(i_embs_all, p=2, dim=1)
-    
+
     # similarity [Q, I]
     sim_matrix = torch.matmul(q_embs_norm, i_embs_norm.T)
-    
+
     num_queries = sim_matrix.shape[0]
-    
+
     for i in range(num_queries):
-        # The correct item for query i is item i (since we have 1-to-1 pairs in dataset)
+        # The correct item for query i is item i (1-to-1 mapping)
         scores = sim_matrix[i]
         target_score = scores[i]
-        
-        # Rank: how many items have higher score than target?
-        # Descending sort is implicit. (scores > target) count + 1
+
+        # Calculate rank
         rank = (scores > target_score).sum().item() + 1
-        
+
         mrr_sum += 1.0 / rank
         if rank <= 1: hit_1 += 1
         if rank <= 3: hit_3 += 1
         if rank <= 5: hit_5 += 1
-        if rank <= 10: 
+        if rank <= 10:
             hit_10 += 1
             ndcg_10_sum += 1.0 / np.log2(rank + 1)
         count += 1
-    
+
     mrr = mrr_sum / count
     h1 = hit_1 / count
     h3 = hit_3 / count
     h5 = hit_5 / count
     h10 = hit_10 / count
     ndcg10 = ndcg_10_sum / count
-    logging.info(f"Mode: {mode} | MRR: {mrr:.4f} | Hit@1: {h1:.4f} | Hit@3: {h3:.4f} | Hit@5: {h5:.4f} | Hit@10: {h10:.4f} | NDCG@10: {ndcg10:.4f}")
+
+    logging.info(f"Mode: {query_type} | MRR: {mrr:.4f} | Hit@1: {h1:.4f} | Hit@3: {h3:.4f} | Hit@5: {h5:.4f} | Hit@10: {h10:.4f} | NDCG@10: {ndcg10:.4f}")
+
     return {'mrr': mrr, 'hit_1': h1, 'hit_3': h3, 'hit_5': h5, 'hit_10': h10, 'ndcg_10': ndcg10}
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--run_all', action='store_true')
-    parser.add_argument('--mode', type=str, default='baseline')
-    parser.add_argument('--epochs', type=int, default=5)
+    parser.add_argument('--run_all', action='store_true', help='Run all three modes (baseline, noise_aug, multitask) sequentially')
+    parser.add_argument('--mode', type=str, default='baseline', choices=['baseline', 'noise_aug', 'multitask'], help='Training mode (only used if --run_all is not set)')
+    parser.add_argument('--epochs', type=int, default=9, help='Number of training epochs (default: 9)')
     args = parser.parse_args()
-    
+
     config.epochs = args.epochs
-    
+
     results = {}
     if args.run_all:
-        modes = ['baseline', 'noise_aug', 'multitask']
-        for m in modes:
-            results[m] = train(mode=m)
-        
         print("\n" + "="*95)
-        print("FINAL QWEN2 PIPELINE RESULTS (Hit@xx & NDCG Enhanced)")
+        print(f"RUNNING ALL THREE MODES ({args.epochs} epochs each)")
         print("="*95)
+
+        modes = ['baseline', 'noise_aug', 'multitask']
+        for idx, m in enumerate(modes, 1):
+            print(f"\n[{idx}/{len(modes)}] Starting {m.upper()} mode...")
+            print("-" * 95)
+            results[m] = train(mode=m)
+            print(f"\n[{idx}/{len(modes)}] {m.upper()} mode completed!")
+            # Show both clean and noisy results summary
+            clean_res = results[m]['clean']
+            noisy_res = results[m]['noisy']
+            print(f"  Clean  - MRR: {clean_res['mrr']:.4f} | Hit@10: {clean_res['hit_10']:.4f} | NDCG@10: {clean_res['ndcg_10']:.4f}")
+            print(f"  Noisy  - MRR: {noisy_res['mrr']:.4f} | Hit@10: {noisy_res['hit_10']:.4f} | NDCG@10: {noisy_res['ndcg_10']:.4f}")
+
+        print("\n" + "="*130)
+        print("FINAL RESULTS - ALL MODES COMPLETED")
+        print("="*130)
+
+        # Print Clean Query Results
+        print(f"\n{'='*130}")
+        print("CLEAN QUERY EVALUATION")
+        print(f"{'='*130}")
         print(f"{'Mode':<15} | {'MRR':<8} | {'Hit@1':<8} | {'Hit@3':<8} | {'Hit@5':<8} | {'Hit@10':<8} | {'NDCG@10':<8}")
-        print("-" * 90)
+        print("-" * 125)
         for m in modes:
-            res = results[m]
+            res = results[m]['clean']
             print(f"{m:<15} | {res['mrr']:.4f}   | {res['hit_1']:.4f}   | {res['hit_3']:.4f}   | {res['hit_5']:.4f}   | {res['hit_10']:.4f}   | {res['ndcg_10']:.4f}")
-        print("-" * 90)
+
+        # Print Noisy Query Results
+        print(f"\n{'='*130}")
+        print("NOISY QUERY EVALUATION")
+        print(f"{'='*130}")
+        print(f"{'Mode':<15} | {'MRR':<8} | {'Hit@1':<8} | {'Hit@3':<8} | {'Hit@5':<8} | {'Hit@10':<8} | {'NDCG@10':<8}")
+        print("-" * 125)
+        for m in modes:
+            res = results[m]['noisy']
+            print(f"{m:<15} | {res['mrr']:.4f}   | {res['hit_1']:.4f}   | {res['hit_3']:.4f}   | {res['hit_5']:.4f}   | {res['hit_10']:.4f}   | {res['ndcg_10']:.4f}")
+
+        print("="*130)
+        print("\nTraining completed successfully!")
     else:
         train(mode=args.mode)
