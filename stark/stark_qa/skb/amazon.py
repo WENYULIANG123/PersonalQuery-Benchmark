@@ -191,18 +191,19 @@ class AmazonSKB(SKB):
 
         print(f"DEBUG: Starting cache check - cache_path={cache_path}, exists={cache_path and osp.exists(cache_path) if cache_path else False}")
 
-        if cache_path is not None and osp.exists(cache_path):
-            print(f"Loading from {self.processed_data_dir}!")
-            print(f'Loading cached graph with meta link types {meta_link_types}')
-            processed_data = load_files(cache_path)
-        else:
-            print('Start processing raw data...')
-            print(f'{meta_link_types=}')
-            print(f'DEBUG: About to call _process_raw with categories={categories}')
-            processed_data = self._process_raw(categories)
-            print(f'DEBUG: _process_raw returned, processed_data keys: {list(processed_data.keys()) if isinstance(processed_data, dict) else type(processed_data)}')
-            if meta_link_types:
-                processed_data = self.post_process(processed_data, meta_link_types=meta_link_types, cache_path=cache_path)
+        # COMMENTED OUT: Cache loading disabled for debugging
+        # if cache_path is not None and osp.exists(cache_path):
+        #     print(f"Loading from {self.processed_data_dir}!")
+        #     print(f'Loading cached graph with meta link types {meta_link_types}')
+        #     processed_data = load_files(cache_path)
+        # else:
+        print('Start processing raw data...')
+        print(f'{meta_link_types=}')
+        print(f'DEBUG: About to call _process_raw with categories={categories}')
+        processed_data = self._process_raw(categories)
+        print(f'DEBUG: _process_raw returned, processed_data keys: {list(processed_data.keys()) if isinstance(processed_data, dict) else type(processed_data)}')
+        if meta_link_types:
+            processed_data = self.post_process(processed_data, meta_link_types=meta_link_types, cache_path=cache_path)
         
         super(AmazonSKB, self).__init__(**processed_data, **kwargs)
     

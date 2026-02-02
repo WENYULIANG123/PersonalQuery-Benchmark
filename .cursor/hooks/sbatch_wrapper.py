@@ -241,25 +241,7 @@ def main():
     
     # Direct mode: execute command via sbatch
     # Parse command from command line arguments
-    args = sys.argv[1:]
-    use_gpu = False
-    time_limit = None
-    
-    # Simple argument parser for wrapper options
-    remaining_args = []
-    i = 0
-    while i < len(args):
-        if args[i] == "--gpu":
-            use_gpu = True
-            i += 1
-        elif args[i] == "--time" and i + 1 < len(args):
-            time_limit = args[i+1]
-            i += 2
-        else:
-            remaining_args.append(args[i])
-            i += 1
-    
-    original_command = parse_command(remaining_args)
+    original_command = parse_command(sys.argv[1:])
     
     if not original_command:
         print("[sbatch_wrapper] ❌ 错误: 未提供要执行的命令", file=sys.stderr)
@@ -269,61 +251,27 @@ def main():
     log_dir = Path("/home/wlia0047/ar57/wenyu/logs")
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Clean up ALL .sh files in log directory before starting as requested
-    print(f"[sbatch_wrapper] 🗑️  清理日志目录中的所有残留 .sh 脚本...", file=sys.stderr)
-    sh_cleanup_count = 0
-    for sh_file in log_dir.glob("*.sh"):
-        try:
-            sh_file.unlink()
-            sh_cleanup_count += 1
-        except Exception:
-            pass
-    
-    if sh_cleanup_count > 0:
-        print(f"[sbatch_wrapper] ✅ 已全局清理 {sh_cleanup_count} 个 .sh 脚本", file=sys.stderr)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    log_file = log_dir / f"sbatch_{timestamp}.log"
+    err_file = log_dir / f"sbatch_{timestamp}.err"
+    script_file = log_dir / f"sbatch_script_{timestamp}.sh"
 
-    # Extract script name for logging
-    # Try to find the .py filename in the command
-    script_match = re.search(r'([\w-]+)\.py', original_command)
-    script_name = script_match.group(1) if script_match else "job"
-    
-    # Clean up old log files for THIS script name only
-    # Skip cleaning up old log files to allow parallel execution
-    # print(f"[sbatch_wrapper] 🗑️  清理与 '{script_name}' 相关的旧日志文件...", file=sys.stderr)
-    # cleanup_count = 0
-    # for old_file in log_dir.glob(f"{script_name}_*"):
-    #     if old_file.suffix in ['.log', '.err']:
-    #         try:
-    #             old_file.unlink()
-    #             cleanup_count += 1
-    #         except Exception as e:
-    #             print(f"[sbatch_wrapper] ⚠️  删除文件失败 {old_file.name}: {e}", file=sys.stderr)
-    
-    # if cleanup_count > 0:
-    #     print(f"[sbatch_wrapper] ✅ 已清理 {cleanup_count} 个旧日志文件", file=sys.stderr)
-
-    timestamp_suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # Using %j for SLURM job ID in the output/error filenames
-    log_pattern = log_dir / f"{script_name}_%j.log"
-    err_pattern = log_dir / f"{script_name}_%j.err"
-    # The temporary submission script still uses a timestamp to be unique
-    script_file = log_dir / f"submit_{script_name}_{timestamp_suffix}.sh"
+    # Clean up any existing files with the same timestamp before creating new ones
+    for file_path in [log_file, err_file, script_file]:
+        if file_path.exists():
+            try:
+                file_path.unlink()
+                print(f"[sbatch_wrapper] 🗑️  已删除旧文件: {file_path.name}", file=sys.stderr)
+            except Exception as e:
+                print(f"[sbatch_wrapper] ⚠️  删除旧文件失败 {file_path.name}: {e}", file=sys.stderr)
 
     # Get current directory
     current_dir = os.getcwd() or "/home/wlia0047/ar57/wenyu"
     
     # Create sbatch script
-    # Allocate more memory for Python scripts (32GB for large data processing)
-    memory_allocation = "#SBATCH --mem=32G" if is_python_script_command(original_command) else ""
-    gpu_allocation = "#SBATCH -p gpu\n#SBATCH --gres=gpu:1" if use_gpu else ""
-    time_allocation = f"#SBATCH --time={time_limit}" if time_limit else ""
-    
     script_content = f"""#!/bin/bash
-#SBATCH --output={log_pattern}
-#SBATCH --error={err_pattern}
-{memory_allocation}
-{gpu_allocation}
-{time_allocation}
+#SBATCH --output={log_file}
+#SBATCH --error={err_file}
 set -e
 source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh
 conda activate /home/wlia0047/ar57_scratch/wenyu/stark
@@ -337,6 +285,8 @@ cd "{current_dir}"
     
     # Submit the job
     print("[sbatch_wrapper] 提交作业到 SLURM...")
+    print(f"[sbatch_wrapper] 日志文件: {log_file}")
+    print(f"[sbatch_wrapper] 错误文件: {err_file}")
 
     try:
         result = subprocess.run(
@@ -353,9 +303,6 @@ cd "{current_dir}"
             sys.exit(1)
 
         job_id = match.group(1)
-        # Construct actual filenames for monitoring
-        log_file = log_dir / f"{script_name}_{job_id}.log"
-        err_file = log_dir / f"{script_name}_{job_id}.err"
 
     except subprocess.CalledProcessError as e:
         print(f"[sbatch_wrapper] ❌ 提交 sbatch 作业失败: {e}")
