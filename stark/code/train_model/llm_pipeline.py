@@ -24,8 +24,8 @@ class Config:
         self.temp = 0.1 # Increased temperature
         self.seed = 42
         self.use_lora = False # Disabled LoRA due to environment incompatibility with peft/torch_dist
-        self.clean_csv = "/home/wlia0047/ar57/wenyu/result/query/kg_queries_clean.csv"
-        self.noisy_csv = "/home/wlia0047/ar57/wenyu/result/query/kg_queries_noisy.csv"
+        self.clean_csv = "/home/wlia0047/ar57/wenyu/result/clean_query/clean_queries.csv"
+        self.noisy_csv = "/home/wlia0047/ar57/wenyu/result/noisy_query/noisy_queries.csv"
         self.meta_path = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz"
         self.output_dir = "/home/wlia0047/ar57/wenyu/stark/code/train_model/results_qwen"
         
@@ -118,9 +118,11 @@ def prepare_data(test_size=0.2):
     df_clean['id'] = df_clean['id'].astype(str).str.strip()
     df_noisy['id'] = df_noisy['id'].astype(str).str.strip()
 
-    # Rename `query` columns
-    df_clean = df_clean.rename(columns={'query': 'clean_query'})
-    df_noisy = df_noisy.rename(columns={'query': 'noisy_query'})
+    # Rename `query` columns where necessary
+    if 'query' in df_clean.columns:
+        df_clean = df_clean.rename(columns={'query': 'clean_query'})
+    if 'query' in df_noisy.columns:
+        df_noisy = df_noisy.rename(columns={'query': 'noisy_query'})
     
     # Merge on 'id'
     df_merged = pd.merge(df_clean[['id', 'clean_query', 'answer_ids_source']], 

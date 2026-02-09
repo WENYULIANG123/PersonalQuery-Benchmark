@@ -289,18 +289,18 @@ def main():
     
     # Clean up old log files for THIS script name only
     # Skip cleaning up old log files to allow parallel execution
-    # print(f"[sbatch_wrapper] 🗑️  清理与 '{script_name}' 相关的旧日志文件...", file=sys.stderr)
-    # cleanup_count = 0
-    # for old_file in log_dir.glob(f"{script_name}_*"):
-    #     if old_file.suffix in ['.log', '.err']:
-    #         try:
-    #             old_file.unlink()
-    #             cleanup_count += 1
-    #         except Exception as e:
-    #             print(f"[sbatch_wrapper] ⚠️  删除文件失败 {old_file.name}: {e}", file=sys.stderr)
+    print(f"[sbatch_wrapper] 🗑️  清理与 '{script_name}' 相关的旧日志文件...", file=sys.stderr)
+    cleanup_count = 0
+    for old_file in log_dir.glob(f"{script_name}_*"):
+        if old_file.suffix in ['.log', '.err']:
+            try:
+                old_file.unlink()
+                cleanup_count += 1
+            except Exception as e:
+                print(f"[sbatch_wrapper] ⚠️  删除文件失败 {old_file.name}: {e}", file=sys.stderr)
     
-    # if cleanup_count > 0:
-    #     print(f"[sbatch_wrapper] ✅ 已清理 {cleanup_count} 个旧日志文件", file=sys.stderr)
+    if cleanup_count > 0:
+        print(f"[sbatch_wrapper] ✅ 已清理 {cleanup_count} 个旧日志文件", file=sys.stderr)
 
     timestamp_suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
     # Using %j for SLURM job ID in the output/error filenames
