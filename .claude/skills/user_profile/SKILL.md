@@ -125,12 +125,52 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 - 商品总数
 - `results` 列表：每个元素包含单个商品的 ASIN、标题及提取出的偏好维度（正向/负向/改进建议）。
 
+### 第四步：商品搜索查询生成 (Search Query Generation)
+
+将筛选出的 Top 3 属性转化为符合真实购物者语气的自然语言搜索查询。
+
+#### 4.1 生成查询 Prompt
+
+使用 `generate_query_prompts.py` 脚本，将 Step 3 的匹配结果转换为带有语义转换规则的推理 Prompt。
+
+```bash
+python3 /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/generate_query_prompts.py \
+    --input /home/wlia0047/ar57/wenyu/result/user_profile/preference_match_results/match_[USER_ID].json \
+    --output-dir /home/wlia0047/ar57/wenyu/result/user_profile/query_prompts
+```
+
+#### 4.2 批量查询生成与推理
+
+调用 LLM 批量生成 25-30 个单词的高质量查询。
+
+```bash
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
+    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/generate_query_results.py \
+     --user-id [USER_ID] --max-workers 5"
+```
+
+**核心要求：**
+1. **语义转换**：严禁直接复制属性，必须转化为口语化表达。
+2. **属性全覆盖**：Query 必须包含全部 3 个选定的属性。
+3. **长度控制**：目标长度为 25-30 个单词（English words）。
+
+## 输出位置 (Output Locations)
+
+- **第一步 Prompt**: `/home/wlia0047/ar57/wenyu/result/user_profile/user_prompts/`
+- **第二步 偏好**: `/home/wlia0047/ar57/wenyu/result/user_profile/user_preferences/`
+- **第三步 匹配推理**: `/home/wlia0047/ar57/wenyu/result/user_profile/preference_match/`
+- **第三步 最终属性**: `/home/wlia0047/ar57/wenyu/result/user_profile/preference_match_results/`
+- **第四步 查询 Prompt**: `/home/wlia0047/ar57/wenyu/result/user_profile/query_prompts/`
+- **第四步 最终查询**: `/home/wlia0047/ar57/wenyu/result/user_profile/query_results/`
+
 ## 质量检查清单
 
-- [ ] **Prompt 完整性**：生成的 Prompt文件应包含用户的所有评论。
-- [ ] **合并输出**：最终偏好结果应合并为一个 JSON 文件，而非散落在多个文件中。
-- [ ] **负面建议覆盖**：所有 `sentiment: negative` 的项必须包含非空的 `improvement_wish`。
+- [ ] **语义转换**：检查是否出现了直接复制属性文字的情况。
+- [ ] **单词计数**：验证生成的 Query 是否在 25-30 个单词之间。
+- [ ] **唯一性**：确保生成的查询句式多样，没有明显的模板感。
 - [ ] **多线程效率**：在大批量处理时，应观察日志确认并发执行正常。
 
 ---
-*注：本 Skill 依赖 `/home/wlia0047/ar57/wenyu/stark/code/claude_code_cli.py` (或等效 LLM Client) 进行模型调用。*
+*注：本 Skill 依赖 `/home/wlia0047/ar57/wenyu/.claude/skills/llm_client.py` 进行模型调用。*
