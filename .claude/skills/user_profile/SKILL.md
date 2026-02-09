@@ -151,10 +151,36 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
      --user-id [USER_ID] --max-workers 5"
 ```
 
+### 第五步：用户画像合成 (User Persona Generation)
+
+基于所有已匹配商品的属性优先级，合成一个约 200 词的全局用户画像描述。
+
+#### 5.1 生成画像 Prompt
+
+使用 `generate_persona_prompts.py` 脚本，聚合用户的所有偏好证据并生成综合推理 Prompt。
+
+```bash
+python3 /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/generate_persona_prompts.py \
+    --input /home/wlia0047/ar57/wenyu/result/user_profile/preference_match_results/match_[USER_ID].json \
+    --output-dir /home/wlia0047/ar57/wenyu/result/user_profile/persona_prompts
+```
+
+#### 5.2 批量画像生成与推理
+
+调用 LLM 进行画像合成。
+
+```bash
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
+    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/generate_persona_results.py \
+     --max-workers 5"
+```
+
 **核心要求：**
-1. **语义转换**：严禁直接复制属性，必须转化为口语化表达。
-2. **属性全覆盖**：Query 必须包含全部 3 个选定的属性。
-3. **长度控制**：目标长度为 25-30 个单词（English words）。
+1. **全局聚合**：画像应反映用户在多个商品上的共同审美或功能追求。
+2. **长度**：目标长度约为 200 词。
+3. **结构**：包含兴趣方向、质量标准、实用性偏好及购物意图。
 
 ## 输出位置 (Output Locations)
 
@@ -164,12 +190,14 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 - **第三步 最终属性**: `/home/wlia0047/ar57/wenyu/result/user_profile/preference_match_results/`
 - **第四步 查询 Prompt**: `/home/wlia0047/ar57/wenyu/result/user_profile/query_prompts/`
 - **第四步 最终查询**: `/home/wlia0047/ar57/wenyu/result/user_profile/query_results/`
+- **第五步 画像 Prompt**: `/home/wlia0047/ar57/wenyu/result/user_profile/persona_prompts/`
+- **第五步 最终画像**: `/home/wlia0047/ar57/wenyu/result/user_profile/persona_results/`
 
 ## 质量检查清单
 
 - [ ] **语义转换**：检查是否出现了直接复制属性文字的情况。
-- [ ] **单词计数**：验证生成的 Query 是否在 25-30 个单词之间。
-- [ ] **唯一性**：确保生成的查询句式多样，没有明显的模板感。
+- [ ] **单词计数**：验证生成的 Query 是否在 25-30 个单词之间，画像是否接近 200 词。
+- [ ] **唯一性**：确保生成的查询句式多样，画像具有一致性。
 - [ ] **多线程效率**：在大批量处理时，应观察日志确认并发执行正常。
 
 ---
