@@ -25,13 +25,13 @@ description: 为指定用户提取细粒度偏好并生成用户画像。分为�
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/generate_user_prompts.py --user-id [USER_ID]"
+     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/extraction/generate_user_prompts.py --user-id [USER_ID]"
 
 # 2. 按评论数批量筛选生成 (例如：找 10 个评论数在 100 左右的用户)
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/generate_user_prompts.py \
+     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/extraction/generate_user_prompts.py \
      --target-review-count 100 --review-tolerance 10 --max-users 10"
 ```
 
@@ -41,20 +41,20 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 
 ### 第二步：批量提取用户偏好
 
-使用 `generate_user_profile.py` 脚本读取第一步生成的 Prompt 文件，调用 LLM 进行批量解析。脚本会自动扫描目录下的所有 Prompt 文件进行处理。
+使用 `extraction/generate_user_profile.py` 脚本读取第一步生成的 Prompt 文件，调用 LLM 进行批量解析。脚本会自动扫描目录下的所有 Prompt 文件进行处理。
 
 ```bash
 # 批量处理所有 Prompt 文件 (支持多线程并发)
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/generate_user_profile.py --max-workers 5"
+     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/extraction/generate_user_profile.py --max-workers 5"
 
 # 指定特定用户处理 (可选)
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/generate_user_profile.py --user-id [USER_ID]"
+     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/extraction/generate_user_profile.py --user-id [USER_ID]"
 ```
 
 **输出：**
@@ -67,13 +67,13 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 
 #### 3.1 生成匹配 Prompt
 
-首先，运行 `generate_match_prompts.py` 脚本生成用于属性匹配的推理上下文。该脚本会验证偏好与元数据的一致性。
+首先，运行 `matching/generate_match_prompts.py` 脚本生成用于属性匹配的推理上下文。该脚本会验证偏好与元数据的一致性。
 
 ```bash
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/generate_match_prompts.py \
+     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/matching/generate_match_prompts.py \
      --input /home/wlia0047/ar57/wenyu/result/user_profile/user_preferences/preferences_[USER_ID].json \
      --meta-file /home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json \
      --output-dir /home/wlia0047/ar57/wenyu/result/user_profile/preference_match"
@@ -87,7 +87,7 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/generate_match_results.py \
+     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/matching/generate_match_results.py \
      --user-id [USER_ID]"
 ```
 
@@ -131,10 +131,10 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 
 #### 4.1 生成查询 Prompt
 
-使用 `generate_query_prompts.py` 脚本，将 Step 3 的匹配结果转换为带有语义转换规则的推理 Prompt。
+使用 `query/generate_query_prompts.py` 脚本，将 Step 3 的匹配结果转换为带有语义转换规则的推理 Prompt。
 
 ```bash
-python3 /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/generate_query_prompts.py \
+python3 /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/query/generate_query_prompts.py \
     --input /home/wlia0047/ar57/wenyu/result/user_profile/preference_match_results/match_[USER_ID].json \
     --output-dir /home/wlia0047/ar57/wenyu/result/user_profile/query_prompts
 ```
@@ -147,7 +147,7 @@ python3 /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/generate_query_pro
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/generate_query_results.py \
+     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/query/generate_query_results.py \
      --user-id [USER_ID] --max-workers 5"
 ```
 
@@ -157,10 +157,10 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 
 #### 5.1 生成画像 Prompt
 
-使用 `generate_persona_prompts.py` 脚本，聚合用户的所有偏好证据并生成综合推理 Prompt。
+使用 `persona/generate_persona_prompts.py` 脚本，聚合用户的所有偏好证据并生成综合推理 Prompt。
 
 ```bash
-python3 /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/generate_persona_prompts.py \
+python3 /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/persona/generate_persona_prompts.py \
     --input /home/wlia0047/ar57/wenyu/result/user_profile/preference_match_results/match_[USER_ID].json \
     --output-dir /home/wlia0047/ar57/wenyu/result/user_profile/persona_prompts
 ```
@@ -173,7 +173,7 @@ python3 /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/generate_persona_p
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/generate_persona_results.py \
+     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/persona/generate_persona_results.py \
      --max-workers 5"
 ```
 
@@ -181,6 +181,36 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 1. **全局聚合**：画像应反映用户在多个商品上的共同审美或功能追求。
 2. **长度**：目标长度约为 200 词。
 3. **结构**：包含兴趣方向、质量标准、实用性偏好及购物意图。
+
+### 第六步：个性化打分 (Personalization Scoring)
+
+评价生成的查询 (Query) 与用户画像 (Persona) 之间的契合程度。
+
+#### 6.1 生成打分 Prompt
+
+使用 `scoring/generate_scoring_prompts.py` 脚本，将 Query 与 Persona 配对生成打分 Prompt。
+
+```bash
+python3 /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/scoring/generate_scoring_prompts.py \
+    --output-dir /home/wlia0047/ar57/wenyu/result/user_profile/scoring_prompts
+```
+
+#### 6.2 批量打分与推理
+
+调用 LLM 进行打分（1-10 分）并提供理由。
+
+```bash
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
+    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/scoring/generate_scoring_results.py \
+     --max-workers 5"
+```
+
+**核心要求：**
+1. **打分维度**：基于画像中的兴趣倾向、质量标准和实用性偏好对 Query 进行评分。
+2. **量化结果**：产出 1-10 的个性化分数值。
+3. **解释性**：必须包含简短的打分理由 (Justification)。
 
 ## 输出位置 (Output Locations)
 
@@ -190,8 +220,9 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 - **第三步 最终属性**: `/home/wlia0047/ar57/wenyu/result/user_profile/preference_match_results/`
 - **第四步 查询 Prompt**: `/home/wlia0047/ar57/wenyu/result/user_profile/query_prompts/`
 - **第四步 最终查询**: `/home/wlia0047/ar57/wenyu/result/user_profile/query_results/`
-- **第五步 画像 Prompt**: `/home/wlia0047/ar57/wenyu/result/user_profile/persona_prompts/`
 - **第五步 最终画像**: `/home/wlia0047/ar57/wenyu/result/user_profile/persona_results/`
+- **第六步 打分 Prompt**: `/home/wlia0047/ar57/wenyu/result/user_profile/scoring_prompts/`
+- **第六步 最终得分**: `/home/wlia0047/ar57/wenyu/result/user_profile/scoring_results/`
 
 ## 质量检查清单
 
