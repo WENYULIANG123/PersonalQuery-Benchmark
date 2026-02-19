@@ -86,7 +86,7 @@ def analyze_review(prompt_data: dict) -> dict:
 
     return result
 
-def compute_statistics(results: list) -> dict:
+def compute_statistics(results: list, prompts_data: list = None) -> dict:
     """Compute error statistics from analysis results."""
     stats = {
         "spelling": defaultdict(int),
@@ -101,6 +101,13 @@ def compute_statistics(results: list) -> dict:
 
     total_word_count = 0
 
+    # Count words from original review texts if available
+    if prompts_data:
+        for prompt_item in prompts_data:
+            review_text = prompt_item.get("review_text", "")
+            if review_text:
+                total_word_count += len(review_text.split())
+
     for result in results:
         # Count spelling errors by category
         for category, errors in result.get("spelling_errors", {}).items():
@@ -113,6 +120,11 @@ def compute_statistics(results: list) -> dict:
             stats["grammar_total"] += len(errors)
 
     stats["total_errors"] = stats["spelling_total"] + stats["grammar_total"]
+    stats["total_words"] = total_word_count
+
+    # Calculate errors per 100 words
+    if total_word_count > 0:
+        stats["errors_per_100_words"] = round(stats["total_errors"] / total_word_count * 100, 2)
 
     # Convert defaultdict to regular dict
     stats["spelling"] = dict(stats["spelling"])
@@ -163,8 +175,8 @@ def main():
                 except Exception as e:
                     log_with_timestamp(f"  Error analyzing review: {e}")
 
-        # Compute statistics
-        stats = compute_statistics(results)
+        # Compute statistics (pass prompts data for word counting)
+        stats = compute_statistics(results, prompts)
 
         # Save analysis results
         output_file = os.path.join(args.output_dir, f"writing_analysis_{user_id}.json")
