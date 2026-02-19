@@ -1,235 +1,77 @@
 ---
 name: user-profile-manager
-description: 为指定用户提取细粒度偏好并生成用户画像。分为两步：生成 Prompt 文件，然后批量调用 LLM 提取偏好。
+description: 提取细粒度用户偏好并生成"接地气"的用户画像与个性化搜索查询。
 ---
 
-# User Profile Manager Skill (用户画像管理)
+# User Profile Manager (用户画像与个性化查询管理)
 
-此技能用于对特定用户的历史评论进行深度语义分析，构建详细的用户画像和偏好库。流程采用“以用户为中心”的设计，支持批量处理和高并发提取。
+此技能实现了一套完整的 **"Grounded" (落地/实操型)** 个性化 pipeline，通过 7 个有序阶段将原始用户评论转化为高度差异化的画像及搜索查询，并进行多维度评估。
 
-## 核心原则：AI-in-the-loop
-
-核心的理解、推理和提取工作由 AI 亲自完成。AI 必须：
-1.  **细粒度阅读**：逐条阅读评论，捕捉用户对产品材质、性能、设计、价格、包装等全方位的反馈。
-2.  **强制性改进愿望**：对于任何 Negative（负面）评价，必须推断出用户的“改进愿望”（Improvement Wish）。
-3.  **语义对齐**：将口语化表达映射到标准化的产品属性维度。
-
-## 执行流程 (Two-Step Workflow)
-
-### 第一步：生成 Prompt 文件
-
-使用 `generate_user_prompts.py` 脚本生成包含用户所有评论 Prompt 的合并 JSON 文件。支持按用户 ID 或评论数量筛选用户。
-
-```bash
-# 1. 指定用户 ID 生成
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/extraction/generate_user_prompts.py --user-id [USER_ID]"
-
-# 2. 按评论数批量筛选生成 (例如：找 10 个评论数在 100 左右的用户)
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/extraction/generate_user_prompts.py \
-     --target-review-count 100 --review-tolerance 10 --max-users 10"
-```
-
-**输出：**
-*   目录：`/home/wlia0047/ar57/wenyu/result/user_profile/user_prompts/`
-*   文件：`prompt_[USER_ID].json` (包含该用户所有商品的 Prompt)
-
-### 第二步：批量提取用户偏好
-
-使用 `extraction/generate_user_profile.py` 脚本读取第一步生成的 Prompt 文件，调用 LLM 进行批量解析。脚本会自动扫描目录下的所有 Prompt 文件进行处理。
-
-```bash
-# 批量处理所有 Prompt 文件 (支持多线程并发)
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/extraction/generate_user_profile.py --max-workers 5"
-
-# 指定特定用户处理 (可选)
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/extraction/generate_user_profile.py --user-id [USER_ID]"
-```
-
-**输出：**
-*   目录：`/home/wlia0047/ar57/wenyu/result/user_profile/user_preferences/`
-*   文件：`preferences_[USER_ID].json` (包含该用户所有商品的提取结果)
-
-### 第三步：实体匹配与属性提取
-
-此步骤将提取出的细粒度偏好与商品元数据、邻居信息相结合，生成用于搜索的 Top 3 核心属性。
-
-#### 3.1 生成匹配 Prompt
-
-首先，运行 `matching/generate_match_prompts.py` 脚本生成用于属性匹配的推理上下文。该脚本会验证偏好与元数据的一致性。
-
-```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/matching/generate_match_prompts.py \
-     --input /home/wlia0047/ar57/wenyu/result/user_profile/user_preferences/preferences_[USER_ID].json \
-     --meta-file /home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json \
-     --output-dir /home/wlia0047/ar57/wenyu/result/user_profile/preference_match"
-```
-
-#### 3.2 批量匹配与推理
-
-读取生成的 `match_prompts_[USER_ID].json`，调用 LLM 进行深度推理并筛选 Top 3 属性。
-
-```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/matching/generate_match_results.py \
-     --user-id [USER_ID]"
-```
-
-**核心逻辑：**
-1. **Valid Seeds (自身验证)**：检查用户的 Positive/Neutral 偏好是否与商品的 Metadata (Title/Features) 语义匹配。只有匹配的才算 Valid Seed。
-2. **Neighbor Insights (邻居增强)**：分析邻居的 `improvement_wish`，确认目标商品如何解决这些痛点。
-3. **优先级筛选**：按以下优先级选出 Top 3 属性：
-   - **Priority 1 (High)**: 已解决的邻居痛点 (强区分点)
-   - **Priority 2 (Medium)**: 独特/具体的特征
-   - **Priority 3 (Low)**: 核心规格 (基础属性)
-
-**输出：**
-*   目录：`/home/wlia0047/ar57/wenyu/result/user_profile/preference_match_results/`
-*   文件：`match_[USER_ID].json`
-
-**输出结构示例：**
-```json
-[
-  {
-    "target_asin": "B00XXXXXX",
-    "selected_attributes": ["Attr1", "Attr2", "Attr3"],
-    "category": "Product Category Name",
-    "reasoning": "Selected 'Reinforced Steel' (Priority 1 - Solves Neighbor Pain). Selected 'Waterproof' (Priority 2 - Unique). Dropped 'Nice Design' (Generic)."
-  }
-]
-```
-
-**参考实现：**
-详细的实体匹配逻辑和推理过程请参考 [`preference_match` Skill](file:///home/wlia0047/ar57/wenyu/.claude/skills/preference_match/SKILL.md)。
-
-
-最终的 `preferences_[USER_ID].json` 包含：
-- 用户 ID
-- 处理时间戳
-- 商品总数
-- `results` 列表：每个元素包含单个商品的 ASIN、标题及提取出的偏好维度（正向/负向/改进建议）。
-
-### 第四步：商品搜索查询生成 (Search Query Generation)
-
-将筛选出的 Top 3 属性转化为符合真实购物者语气的自然语言搜索查询。
-
-#### 4.1 生成查询 Prompt
-
-使用 `query/generate_query_prompts.py` 脚本，将 Step 3 的匹配结果转换为带有语义转换规则的推理 Prompt。
-
-```bash
-python3 /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/query/generate_query_prompts.py \
-    --input /home/wlia0047/ar57/wenyu/result/user_profile/preference_match_results/match_[USER_ID].json \
-    --output-dir /home/wlia0047/ar57/wenyu/result/user_profile/query_prompts
-```
-
-#### 4.2 批量查询生成与推理
-
-调用 LLM 批量生成 25-30 个单词的高质量查询。
-
-```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/query/generate_query_results.py \
-     --user-id [USER_ID] --max-workers 5"
-```
-
-### 第五步：用户画像合成 (User Persona Generation)
-
-基于所有已匹配商品的属性优先级，合成一个约 200 词的全局用户画像描述。
-
-#### 5.1 生成画像 Prompt
-
-使用 `persona/generate_persona_prompts.py` 脚本，聚合用户的所有偏好证据并生成综合推理 Prompt。
-
-```bash
-python3 /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/persona/generate_persona_prompts.py \
-    --input /home/wlia0047/ar57/wenyu/result/user_profile/preference_match_results/match_[USER_ID].json \
-    --output-dir /home/wlia0047/ar57/wenyu/result/user_profile/persona_prompts
-```
-
-#### 5.2 批量画像生成与推理
-
-调用 LLM 进行画像合成。
-
-```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/persona/generate_persona_results.py \
-     --max-workers 5"
-```
-
-**核心要求：**
-1. **全局聚合**：画像应反映用户在多个商品上的共同审美或功能追求。
-2. **长度**：目标长度约为 200 词。
-3. **结构**：包含兴趣方向、质量标准、实用性偏好及购物意图。
-
-### 第六步：个性化打分 (Personalization Scoring)
-
-评价生成的查询 (Query) 与用户画像 (Persona) 之间的契合程度。
-
-#### 6.1 生成打分 Prompt
-
-使用 `scoring/generate_scoring_prompts.py` 脚本，将 Query 与 Persona 配对生成打分 Prompt。
-
-```bash
-python3 /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/scoring/generate_scoring_prompts.py \
-    --output-dir /home/wlia0047/ar57/wenyu/result/user_profile/scoring_prompts
-```
-
-#### 6.2 批量打分与推理
-
-调用 LLM 进行打分（1-10 分）并提供理由。
-
-```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/scoring/generate_scoring_results.py \
-     --max-workers 5"
-```
-
-**核心要求：**
-1. **打分维度**：基于画像中的兴趣倾向、质量标准和实用性偏好对 Query 进行评分。
-2. **量化结果**：产出 1-10 的个性化分数值。
-3. **解释性**：必须包含简短的打分理由 (Justification)。
-
-## 输出位置 (Output Locations)
-
-- **第一步 Prompt**: `/home/wlia0047/ar57/wenyu/result/user_profile/user_prompts/`
-- **第二步 偏好**: `/home/wlia0047/ar57/wenyu/result/user_profile/user_preferences/`
-- **第三步 匹配推理**: `/home/wlia0047/ar57/wenyu/result/user_profile/preference_match/`
-- **第三步 最终属性**: `/home/wlia0047/ar57/wenyu/result/user_profile/preference_match_results/`
-- **第四步 查询 Prompt**: `/home/wlia0047/ar57/wenyu/result/user_profile/query_prompts/`
-- **第四步 最终查询**: `/home/wlia0047/ar57/wenyu/result/user_profile/query_results/`
-- **第五步 最终画像**: `/home/wlia0047/ar57/wenyu/result/user_profile/persona_results/`
-- **第六步 打分 Prompt**: `/home/wlia0047/ar57/wenyu/result/user_profile/scoring_prompts/`
-- **第六步 最终得分**: `/home/wlia0047/ar57/wenyu/result/user_profile/scoring_results/`
-
-## 质量检查清单
-
-- [ ] **语义转换**：检查是否出现了直接复制属性文字的情况。
-- [ ] **单词计数**：验证生成的 Query 是否在 25-30 个单词之间，画像是否接近 200 词。
-- [ ] **唯一性**：确保生成的查询句式多样，画像具有一致性。
-- [ ] **多线程效率**：在大批量处理时，应观察日志确认并发执行正常。
+## 核心理念：Grounded Strategy
+1. **去空洞化**：禁止使用 "High quality", "Dedicated enthusiast" 等泛泛而谈的模板词。
+2. **场景实操**：强调用户关注的具体技术规格（如 "Cuttlebug compatibility"）和使用场景。
+3. **严格 Holdout**：Persona 生成仅基于训练集，评估则针对完全隔离的 Holdout 集，验证泛化能力。
 
 ---
-*注：本 Skill 依赖 `/home/wlia0047/ar57/wenyu/.claude/skills/llm_client.py` 进行模型调用。*
+
+## 执行环节 (Step-by-Step Pipeline)
+
+### Stage 1: 偏好提取与属性验证 (Matching)
+从原始评论中提取实体，并与商品元数据（Metadata）进行匹配验证。
+- **01_matching/01_extract_attributes.py**: 提取用户偏好实体及上下文。
+- **01_matching/02_verify_attributes.py**: 基于元数据验证属性，过滤虚假或泛化的匹配。
+
+### Stage 2: 数据处理与集合划分 (Processing)
+筛选高质量用户并进行类目感知的训练集/测试集划分。
+- **02_processing/03_select_users.py**: 筛选满足评论数量且类目解析完整的"完美"用户。
+- **02_processing/04_split_train_holdout.py**: 智能划分 10 个 Holdout 商品作为测试集，确保其类目在训练集中有覆盖。
+
+### Stage 3: 用户画像生成 (Persona)
+基于训练集数据合成差异化的画像。
+- **03_persona/05_generate_persona_prompts.py**: 提取训练集属性，计算独特性分数 (Uniqueness Score) 并生成画像生成指令。
+- **03_persona/06_execute_persona_generation.py**: 调用 LLM 批量生成 150-200 字的接地气画像。
+
+### Stage 4: 写作风格分析 (Writing Analysis)
+分析用户的拼写和语法错误习惯，用于生成更真实的查询。
+- **04_writing_analysis/08_generate_writing_prompts.py**: 为每个用户的评论生成错误分析提示词。
+- **04_writing_analysis/09_execute_writing_analysis.py**: 调用 LLM 分析拼写错误 (10种) 和语法错误 (7种)，输出统计报告。
+
+### Stage 5: 个性化查询生成 (Query)
+针对 Holdout 商品生成对比查询。
+- **05_query/07_generate_dual_queries.py**: 生成 **Public (大众版)** 和 **Personalized (基于画像版)** 两种查询词。
+
+### Stage 6: 噪声查询生成 (Noisy Query)
+基于写作风格分析结果，为个性化查询注入用户特有的拼写/语法错误。
+- **06_noisy_query/10_generate_noisy_queries.py**: 读取 Stage 4 的错误统计，按权重对查询进行单错误注入。
+
+### Stage 7: 多维度评估 (Evaluation)
+验证个性化提升效果。
+- **07_evaluation/evaluate_with_unique_persona_v2_sbs.py**: LLM 盲测对比 (SBS)。
+- **07_evaluation/evaluate_with_unique_persona.py**: 1-10 分关联度评估。
+- **07_evaluation/evaluate_semantic_similarity.py**: BERT 语义向量偏移分析。
+- **07_evaluation/evaluate_persona_diversity.py**: 跨用户画像差异化（多样性）核查。
+
+---
+
+## 常用运行命令 (SLURM 环境)
+
+所有脚本必须使用 `sbatch_wrapper.py` 提交运行：
+
+```bash
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
+    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+     python -u /home/wlia0047/ar57/wenyu/.claude/skills/user_profile/[STAGE]/[SCRIPT].py [ARGS]"
+```
+
+## 目录结构
+```text
+user_profile/
+├── 01_matching/           # Stage 1: 偏好提取与元数据验证
+├── 02_processing/         # Stage 2: 用户筛选与训练/Holdout集划分
+├── 03_persona/            # Stage 3: 画像提示词生成与执行
+├── 04_writing_analysis/   # Stage 4: 写作风格分析
+├── 05_query/              # Stage 5: 双重查询词合成
+├── 06_noisy_query/        # Stage 6: 噪声查询生成
+└── 07_evaluation/         # Stage 7: 多维度质量评估套件
+```
