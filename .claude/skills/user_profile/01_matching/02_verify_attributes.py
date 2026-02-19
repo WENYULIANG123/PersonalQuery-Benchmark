@@ -219,35 +219,46 @@ Select attributes now."""
 
 def execute_task(task: Dict) -> Dict:
     asin = task.get('asin')
+    step3_input = task.get('step3_input', {})
+
+    # Extract category from step3_input (metadata)
+    category_list = step3_input.get('category', [])
+    if isinstance(category_list, list) and category_list:
+        category = category_list[-1] if len(category_list) > 0 else 'Unknown'
+    else:
+        category = step3_input.get('category', 'Unknown')
+        if isinstance(category, list):
+            category = category[-1] if category else 'Unknown'
+
     result = {
         'asin': asin,
+        'category': category,
         'steps': {},
         'final_match': None,
         'status': 'pending'
     }
-    
+
     # --- Step 1 ---
     step1_input = task.get('step1_input', {})
     if not step1_input.get('user_prefs_candidates'):
         result['status'] = 'skip_no_prefs'
         return result
-        
+
     prompt1 = build_step1_prompt(step1_input)
     resp1 = call_llm(prompt1)
     step1_res = parse_response(resp1)
-    
+
     if not step1_res:
         result['status'] = 'step1_failed'
         return result
-    
+
     result['steps']['step1'] = step1_res
-    
+
     # --- Final Match (formerly Step 3) ---
-    step3_input = task.get('step3_input', {})
     prompt_final = build_final_match_prompt(step1_res, step3_input)
     resp_final = call_llm(prompt_final)
     step_final_res = parse_response(resp_final)
-    
+
     if step_final_res:
         result['final_match'] = step_final_res
         result['status'] = 'success'
@@ -255,7 +266,7 @@ def execute_task(task: Dict) -> Dict:
         result['summary_reasoning'] = step_final_res.get('summary_reasoning', '')
     else:
         result['status'] = 'final_match_failed'
-        
+
     return result
 
 def main():
