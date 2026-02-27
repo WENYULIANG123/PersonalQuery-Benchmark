@@ -30,10 +30,10 @@ def cosine_similarity(vec1, vec2):
 def main():
     parser = argparse.ArgumentParser(description="Evaluate Persona Diversity")
     parser.add_argument("--persona-dir",
-                        default="/home/wlia0047/ar57/wenyu/result/user_profile/persona_results_v4_semantic",
+                        default="/home/wlia0047/wenyu/result/user_profile/03_persona/results",
                         help="Directory containing user personas")
     parser.add_argument("--output-file",
-                        default="/home/wlia0047/ar57/wenyu/result/user_profile/persona_diversity_v6.json",
+                        default="/home/wlia0047/wenyu/result/user_profile/10_evaluation/diversity/diversity_metrics.json",
                         help="Output JSON file for diversity metrics")
     args = parser.parse_args()
 

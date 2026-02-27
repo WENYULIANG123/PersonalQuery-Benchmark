@@ -48,13 +48,13 @@ def get_embedding_openai(text, client):
 def main():
     parser = argparse.ArgumentParser(description="Semantic Evaluation: Query-Persona Similarity")
     parser.add_argument("--dual-queries-dir",
-                        default="/home/wlia0047/ar57/wenyu/result/user_profile/dual_queries",
+                        default="/home/wlia0047/wenyu/result/user_profile/06_query",
                         help="Directory containing dual query files")
     parser.add_argument("--persona-dir",
-                        default="/home/wlia0047/ar57/wenyu/result/user_profile/persona_results_90",
+                        default="/home/wlia0047/wenyu/result/user_profile/03_persona/results",
                         help="Directory containing user personas")
     parser.add_argument("--output-dir",
-                        default="/home/wlia0047/ar57/wenyu/result/user_profile/semantic_evaluation",
+                        default="/home/wlia0047/wenyu/result/user_profile/10_evaluation/semantic",
                         help="Output directory for semantic evaluation results")
     parser.add_argument("--method", choices=['sbert', 'openai'], default='sbert',
                         help="Embedding method to use")

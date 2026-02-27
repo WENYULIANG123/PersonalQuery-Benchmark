@@ -12,32 +12,65 @@ allowed-tools: run_command
 
 ## 文件路径规范
 
-*   **输入**: `/home/wlia0047/ar57/wenyu/result/preference_extraction/final_preferences.json` (上一步骤的产出)
-*   **Prompt输出**: `/home/wlia0047/ar57/wenyu/result/preference_match/match_prompts.json`
-*   **最终结果**: `/home/wlia0047/ar57/wenyu/result/preference_match/preference_match.json`
+*   **User Preferences Input**: `/home/wlia0047/ar57/wenyu/result/preference_extraction/final_preferences.json`
+*   **Metadata Input**: `/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json`
+*   **Prompt Output**: `/home/wlia0047/ar57/wenyu/result/preference_match/match_prompts.json`
+*   **Final Result**: `/home/wlia0047/ar57/wenyu/result/preference_match/preference_match.json`
 
 ## 执行流程
 
 ### 阶段 1：生成推理上下文 (Context Generation)
 
-运行脚本，根据 `final_preferences.json` 中的数据，自动寻找同类别的邻居商品，**验证目标商品能否解决邻居的痛点**，并生成一个包含"自身验证"和"邻居增强"任务的 Prompt。
+运行脚本，读取 `final_preferences.json` 作为偏好源，并从原始 Metadata 文件中流式加载产品标题和特性。
+脚本会自动验证目标商品能否解决邻居的痛点（通过关键词匹配元数据），并生成 Prompt。
 
 **核心逻辑：**
-1. 提取邻居商品的 negative 属性的 `improvement_wish`（正面版本）
-2. 检查目标商品的用户偏好或元数据是否提到能解决这个痛点
-3. 只保留目标商品能解决的 wishes，添加到候选列表
+1. 扫描偏好文件确定需要处理的 ASIN。
+2. 流式读取 Metadata 文件，仅缓存相关产品的元数据。
+3. 验证并生成包含 Context, Metadata 和 Neighbor Insights 的 Prompt。
 
 ```bash
 mkdir -p /home/wlia0047/ar57/wenyu/result/preference_match
 
 python3 /home/wlia0047/ar57/wenyu/.claude/skills/preference_match/preference_match.py \
     --input /home/wlia0047/ar57/wenyu/result/preference_extraction/final_preferences.json \
+    --meta_file /home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json \
+    --user_id A13OFOB1394G31 \
     --output /home/wlia0047/ar57/wenyu/result/preference_match/match_prompts.json
 ```
 
 ### 阶段 2：AI 手动推理与选择 (Agent Reasoning)
 
-Agent 读取 `match_prompts.json`，遍历每个商品的 Prompt，并执行以下步骤：
+**🤖 角色定义 (Persona)**:
+> "你是一个拥有无限 token 和无限时间的 Agent，热爱思考问题。"
+> *You are an Agent with infinite tokens and infinite time, who loves to think about problems.*
+> 请充分利用这个优势，对每一个商品进行深度的思维链推理，不急于得出结论，而是享受思考的过程。
+
+**⚠️ 严禁批量生成！必须采用"分批执行 + 质量检查"的模式。**
+
+#### 📋 执行策略 (Execution Strategy)
+1.  **分批处理 (Batch Processing)**: 每次只处理 **10 个商品** (Batch Size = 10)。
+2.  **质量检查 (Quality Check)**: 每完成一批 (10个) 后，必须暂停并检查这一批的质量（参考下方的"合理性分析"）。
+    *   如果质量不达标（如推理过短、逻辑错误），**必须重做该批次**。
+3.  **进度追踪 (Task Tracking)**: 必须创建一个任务清单来跟踪进度。
+    *   *Example*: `- [ ] Batch 1 (Prompts 1-10) [ ]`
+    
+
+分析每个 Prompt，**必须**显式展示思维链推理 (CoT) 和合理性分析：
+
+#### 🔍 CoT 推理过程 (每个 Prompt 必须展示)
+1. **种子验证 (Verify Seeds)**: 仔细对比 `final_preferences.json` 中的 Positive/Neutral 偏好与商品的 `Title` 和 `Features`。
+2. **痛点分析 (Pain Point Analysis)**: 分析邻居的 `wishes`，确认目标商品如何（或是否）解决了这些痛点。
+3. **优先级筛选 (Priority Selection)**: 根据 Priority 1 (已解决痛点) > Priority 2 (独特特征) > Priority 3 (核心规格) 的原则，挑选出 Top 3 属性。
+
+#### ✅ CoT 合理性分析 - 必须对当前推理过程进行验证：
+- **检查项 1**: 选取的 `essence_values` 是否真实来自用户的偏好，且在元数据中有支撑。
+- **检查项 2**: 是否优先选择了邻居遗留的痛点属性 (Priority 1)。
+- **检查项 3**: 如果属性超过 3 个，是否正确舍弃了低优属性 (Priority 3)。
+- **检查项 4**: 生成的 `reasoning` 是否清楚解释了选择逻辑。
+- **⚠️ 只有确认合理后，才执行写入操作。**
+
+Agent 读取 `match_prompts.json`，遍历每个商品的 Prompt，并按以下逻辑执行：
 
 **重要：邻居的 wishes 已经验证匹配**，脚本已经在代码层面检查过目标商品能解决这些痛点。
 

@@ -268,13 +268,13 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Generate Personas from Validated Matches")
     parser.add_argument("--input-dir",
-                        default="/home/wlia0047/ar57/wenyu/result/user_profile/preference_match_results",
+                        default="/home/wlia0047/wenyu/result/user_profile/01_matching/results",
                         help="Directory containing match_*.json files")
     parser.add_argument("--holdout-dir",
-                        default="/home/wlia0047/ar57/wenyu/result/user_profile/split_results_v2",
+                        default="/home/wlia0047/wenyu/result/user_profile/02_processing",
                         help="Directory containing holdout data (query_*.json)")
     parser.add_argument("--meta-file",
-                        default="/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz",
+                        default="/home/wlia0047/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz",
                         help="Metadata file")
     parser.add_argument("--output-dir",
                         default="/home/wlia0047/ar57/wenyu/result/user_profile/persona_prompts",

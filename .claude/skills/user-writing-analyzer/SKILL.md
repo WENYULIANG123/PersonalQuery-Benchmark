@@ -10,13 +10,20 @@ allowed-tools: run_command, view_file, ask_user_question
 
 ---
 
+## 文件路径规范 (Standard Paths)
+
+- **输入评论文件**: `/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/processed/user_reviews/user_product_reviews.json`
+- **默认用户 ID**: `A13OFOB1394G31`
+- **输出目录**: `/home/wlia0047/ar57/wenyu/result/writing_analysis`
+
 ## 🚀 快速参考（AI必读）
 
-### ⚡ 核心要求（3条必须遵守）
+### ⚡ 核心要求（4条必须遵守）
 
 1. **每批最多10条** - 不是101条一次性完成！
 2. **直接写入最终文件** - 使用标准 `.json` 数组格式，每条评论分析完立即更新文件，要求带缩进。
 3. **全面分析** - 同时识别拼写错误（10种）和语法错误（7种），不要遗漏任何一种错误类型。
+4. **🔴 关键要求：每个产品必须独立完成完整的 CoT 推理和质量验证**
 
 ### 🎯 执行流程
 
@@ -122,12 +129,29 @@ allowed-tools: run_command, view_file, ask_user_question
 ### 1. 生成 Prompt
 ```bash
 python3 /home/wlia0047/ar57/wenyu/.claude/skills/user-writing-analyzer/generate_writing_prompts.py \
-    --user_id AG7EF0SVBQOUX \
+    --input /home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/processed/user_reviews/user_product_reviews.json \
+    --user_id A13OFOB1394G31 \
     --output /home/wlia0047/ar57/wenyu/result/writing_analysis/prompts.json
 ```
 
-### 2. 手动分析并写入
-分析每个 Prompt，提取错误，并使用以下输出模板（**仅包含发现错误的类别，若类别为空则不写入**）：
+### 2. 手动分析并写入 (核心步骤 - CRITICAL LOGIC)
+
+分析每个 Prompt，**必须**显式展示思维链推理 (CoT) 和合理性分析：
+
+#### 🔍 CoT 推理过程 (每个 Prompt 必须展示)
+1. **识别错误**: 仔细阅读评论，找出所有可能的拼写和语法错误。
+2. **分类与纠正**: 根据本技能定义的 10 种拼写错误和 7 种语法错误进行分类，并给出正确形式。
+3. **提取片段**: 记录错误所在的文本片段 (context)。
+
+#### ✅ CoT 合理性分析 - 必须对当前推理过程进行验证：
+- **检查项 1**: 识别的错误是否真实存在 (非品牌名、非缩写、非标点争议)。
+- **检查项 2**: 分类是否准确 (例如：是 Deletion 还是 Scramble)。
+- **检查项 3**: 是否遗漏了任何一种类型的错误。
+- **检查项 4**: 纠正建议是否符合标准英语规范。
+- **⚠️ 只有确认合理后，才执行写入操作。**
+
+#### 💾 写入结果
+使用以下输出模板（**仅包含发现错误的类别，若类别为空则不写入**）：
 
 ```json
 {
