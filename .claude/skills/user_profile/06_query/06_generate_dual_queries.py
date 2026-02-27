@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Generate Dual Queries (V5 - Final Corrected)
+Generate Dual Queries (V6.1 - 20-30 Words)
 生成双重查询：
 - 个性化查询：直接使用 preference_match_results 中已匹配的 Top 3 属性
 - 大众查询：使用该商品的【其他用户评论】中出现频率最高的 Top 3 属性
+- 重要：无后处理，字数必须为 20-30 词，不满足则重新生成
 """
 
 import json
 import os
 import sys
 import argparse
-import random
 from datetime import datetime
 from collections import Counter, defaultdict
 
@@ -171,54 +171,107 @@ def get_top_attributes_for_product(asin, target_user_id, asin_to_users_attrs):
     return top_attrs
 
 def generate_public_query(asin, category, public_attrs):
-    """生成语义化的大众查询（基于 LLM 进行自然语言包装）"""
+    """生成语义化的大众查询（基于 LLM 进行自然语言包装，无后处理）"""
     attrs_str = ", ".join(public_attrs)
-    
+
     prompt = f"""Task: Transform common product attributes into a natural, highly descriptive search query.
 Category: {category}
 Attributes: {attrs_str}
 
-CONSTRAINTS:
-1. LENGTH: Aim for 25-30 words.
+STRICT CONSTRAINTS:
+1. LENGTH: MUST be exactly 20-30 words. No exceptions.
 2. TONE: Matter-of-fact, neutral, and practical.
 3. FORBIDDEN WORDS: Avoid "Alchemy", "Poetry", "Magic", "Fascinating". Use clear product-focused language.
 4. CONTENT: Describe a realistic search intent for common product needs.
-5. FORMAT: Output ONLY the query text.
+5. FORMAT: Output ONLY the query text, no prefixes or explanations.
 
-Example (26 words):
+Example (27 words):
 "I am searching for high-quality {category} items that offer consistent reliability and professional-grade performance, ensuring they meet the diverse needs of my daily creative projects."
-"""
-    query = call_llm_api_with_retry(prompt)
-    
-    if not query:
-        # Fallback if LLM fails
-        query = f"I'm searching for {category} products that feature {attrs_str}, looking for reliable performance and quality for my upcoming projects that I am planning now."
-    
-    # 优化后的长度控制：避免简单重复
-    words = query.split()
-    if len(words) < 20:
-        fillers = [
-            "that meet the specific requirements of my upcoming projects",
-            "to ensure consistent results in my daily creative work",
-            "to achieve the reliable standards needed for my collection",
-            "as I need durable performance for my current workshop tasks"
-        ]
-        query += " " + random.choice(fillers)
-        words = query.split()
-    
-    if len(words) > 30:
-        query = " ".join(words[:30])
 
-    return {
-        'asin': asin,
-        'category': category,
-        'public_attributes': public_attrs,
-        'public_query': query,
-        'word_count': len(query.split())
-    }
+Important: Count your words carefully. The output MUST be between 20 and 30 words inclusive.
+"""
+
+    # 最多重试 5 次，直到字数满足 20-30
+    max_retries = 5
+    for attempt in range(max_retries):
+        query = call_llm_api_with_retry(prompt)
+
+        if not query:
+            if attempt < max_retries - 1:
+                continue
+            else:
+                log_with_timestamp(f"  DEBUG {asin}: LLM returned None after {max_retries} attempts")
+                return None
+
+        # 清理输出（去除可能的前缀、引号等）
+        query = query.strip().strip('"').strip("'").strip()
+        # 移除可能的前缀
+        for prefix in ["Query:", "query:", "Output:", "output:", "Result:", "result:"]:
+            if query.lower().startswith(prefix):
+                query = query[len(prefix):].strip()
+
+        words = query.split()
+        word_count = len(words)
+
+        # 检查字数是否在 20-30 范围内
+        if 20 <= word_count <= 30:
+            return {
+                'asin': asin,
+                'category': category,
+                'public_attributes': public_attrs,
+                'public_query': query,
+                'word_count': word_count
+            }
+
+        # 调试：记录每次重试的字数
+        if attempt == max_retries - 1:  # 最后一次重试失败
+            log_with_timestamp(f"  DEBUG {asin}: Public query failed after {max_retries} attempts, final word_count={word_count}")
+            if word_count < 20:
+                log_with_timestamp(f"    Query (too short): {query[:100]}...")
+            else:
+                log_with_timestamp(f"    Query (too long): {query[:100]}...")
+
+        # 字数不符合，在 prompt 中添加反馈重新生成
+        if word_count < 20:
+            prompt = f"""Task: Transform common product attributes into a natural, highly descriptive search query.
+Category: {category}
+Attributes: {attrs_str}
+
+STRICT CONSTRAINTS:
+1. LENGTH: MUST be exactly 20-30 words. Your previous output had {word_count} words, which is TOO SHORT. You need to add more descriptive details.
+2. TONE: Matter-of-fact, neutral, and practical.
+3. FORBIDDEN WORDS: Avoid "Alchemy", "Poetry", "Magic", "Fascinating". Use clear product-focused language.
+4. CONTENT: Describe a realistic search intent for common product needs.
+5. FORMAT: Output ONLY the query text, no prefixes or explanations.
+
+Example (27 words):
+"I am searching for high-quality {category} items that offer consistent reliability and professional-grade performance, ensuring they meet the diverse needs of my daily creative projects."
+
+Important: Count your words carefully. The output MUST be between 20 and 30 words inclusive.
+"""
+        else:  # word_count > 30
+            prompt = f"""Task: Transform common product attributes into a natural, highly descriptive search query.
+Category: {category}
+Attributes: {attrs_str}
+
+STRICT CONSTRAINTS:
+1. LENGTH: MUST be exactly 20-30 words. Your previous output had {word_count} words, which is TOO LONG. You need to be more concise.
+2. TONE: Matter-of-fact, neutral, and practical.
+3. FORBIDDEN WORDS: Avoid "Alchemy", "Poetry", "Magic", "Fascinating". Use clear product-focused language.
+4. CONTENT: Describe a realistic search intent for common product needs.
+5. FORMAT: Output ONLY the query text, no prefixes or explanations.
+
+Example (27 words):
+"I am searching for high-quality {category} items that offer consistent reliability and professional-grade performance, ensuring they meet the diverse needs of my daily creative projects."
+
+Important: Count your words carefully. The output MUST be between 20 and 30 words inclusive.
+"""
+
+    # 所有重试都失败
+    return None
 
 def generate_personalized_query(asin, category, product_attrs, public_attrs=None):
-    """生成语义化的个性化查询（由 LLM 进行语义变换，不使用原词）"""
+    """生成语义化的个性化查询（由 LLM 进行语义变换，无后处理）"""
     # 过滤掉与大众属性重复的，保留差异化
     public_set = set()
     if public_attrs:
@@ -227,48 +280,129 @@ def generate_personalized_query(asin, category, product_attrs, public_attrs=None
     diff_attrs = [a for a in product_attrs if a and a.lower().strip() not in public_set]
     if not diff_attrs:
         diff_attrs = product_attrs
-        
+
     attrs_str = ", ".join(diff_attrs[:3])
-    
+
     prompt = f"""Task: Transform user-specific technical attributes into a natural, highly sophisticated search query.
 Category: {category}
 Attributes: {attrs_str}
 
 STRICT CONSTRAINTS:
 1. GROUNDED SEMANTIC TRANSFORMATION: Convert attributes into technical requirements or operational needs. DO NOT use flowery metaphors (NO "alchemy", "poetry", "soul", "magic").
-2. LENGTH: Aim for 25-30 words.
+2. LENGTH: MUST be exactly 20-30 words. No exceptions.
 3. TONE: Technical, precise, and result-oriented.
-4. FORMAT: Output ONLY the query text.
+4. FORMAT: Output ONLY the query text, no prefixes or explanations.
 
-Example: If attribute is "Acid-free", describe "guaranteeing long-term chemical neutrality and archival stability for high-value preservation tasks".
+Example: If attribute is "Acid-free", describe "guaranteeing long-term chemical neutrality and archival stability for high-value preservation tasks" (13 words - expand to full query of 20-30 words).
+
+Important: Count your words carefully. The output MUST be between 20 and 30 words inclusive.
 """
-    query = call_llm_api_with_retry(prompt)
-    
-    if not query:
-        query = f"For my {category} projects, I'm searching for items offering {attrs_str} that will meet my specific needs for my professional collection."
 
-    # 优化后的长度控制
-    words = query.split()
-    if len(words) < 20:
-        fillers = [
-            "to ensure repeatable results for my specialized assembly tasks",
-            "matching the technical specifications of my current projects",
-            "to maintain the high output standards for my professional work",
-            "while providing the reliable performance required for complex assemblies"
-        ]
-        query += " " + random.choice(fillers)
+    # 最多重试 5 次，直到字数满足 20-30
+    max_retries = 5
+    for attempt in range(max_retries):
+        query = call_llm_api_with_retry(prompt)
+
+        if not query:
+            if attempt < max_retries - 1:
+                continue
+            else:
+                log_with_timestamp(f"  DEBUG {asin}: LLM returned None after {max_retries} attempts")
+                return None
+
+        # 清理输出
+        query = query.strip().strip('"').strip("'").strip()
+        # 移除可能的前缀
+        for prefix in ["Query:", "query:", "Output:", "output:", "Result:", "result:"]:
+            if query.lower().startswith(prefix):
+                query = query[len(prefix):].strip()
+
         words = query.split()
-        
-    if len(words) > 30:
-        query = " ".join(words[:30])
+        word_count = len(words)
 
-    return {
-        'asin': asin,
-        'category': category,
-        'product_attributes': product_attrs,
-        'personalized_query': query,
-        'word_count': len(query.split())
-    }
+        # 检查字数是否在 20-30 范围内
+        if 20 <= word_count <= 30:
+            return {
+                'asin': asin,
+                'category': category,
+                'product_attributes': product_attrs,
+                'personalized_query': query,
+                'word_count': word_count
+            }
+
+        # 调试：记录每次重试的字数
+        if attempt == max_retries - 1:  # 最后一次重试失败
+            log_with_timestamp(f"  DEBUG {asin}: Personalized query failed after {max_retries} attempts, final word_count={word_count}")
+            if word_count < 20:
+                log_with_timestamp(f"    Query (too short): {query[:100]}...")
+            else:
+                log_with_timestamp(f"    Query (too long): {query[:100]}...")
+
+        # 字数不符合，在 prompt 中添加反馈重新生成
+        if word_count < 20:
+            prompt = f"""Task: Transform user-specific technical attributes into a natural, highly sophisticated search query.
+Category: {category}
+Attributes: {attrs_str}
+
+STRICT CONSTRAINTS:
+1. GROUNDED SEMANTIC TRANSFORMATION: Convert attributes into technical requirements or operational needs. DO NOT use flowery metaphors (NO "alchemy", "poetry", "soul", "magic").
+2. LENGTH: MUST be exactly 20-30 words. Your previous output had {word_count} words, which is TOO SHORT. Expand your technical description.
+3. TONE: Technical, precise, and result-oriented.
+4. FORMAT: Output ONLY the query text, no prefixes or explanations.
+
+Example (28 words):
+"For archival document preservation requiring guaranteed chemical neutrality, I'm seeking materials with acid-free composition ensuring long-term stability for high-value collection items."
+
+Important: Count your words carefully. The output MUST be between 20 and 30 words inclusive.
+"""
+        else:  # word_count > 30
+            prompt = f"""Task: Transform user-specific technical attributes into a natural, highly sophisticated search query.
+Category: {category}
+Attributes: {attrs_str}
+
+STRICT CONSTRAINTS:
+1. GROUNDED SEMANTIC TRANSFORMATION: Convert attributes into technical requirements or operational needs. DO NOT use flowery metaphors (NO "alchemy", "poetry", "soul", "magic").
+2. LENGTH: MUST be exactly 20-30 words. Your previous output had {word_count} words, which is TOO LONG. Be more concise.
+3. TONE: Technical, precise, and result-oriented.
+4. FORMAT: Output ONLY the query text, no prefixes or explanations.
+
+Example (28 words):
+"For archival document preservation requiring guaranteed chemical neutrality, I'm seeking materials with acid-free composition ensuring long-term stability for high-value collection items."
+
+Important: Count your words carefully. The output MUST be between 20 and 30 words inclusive.
+"""
+
+    # 所有重试都失败
+    return None
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate Dual Queries (V6.1 - 20-30 Words)",
+        epilog="生成双重查询：大众查询（该商品的其他用户评论Top 3属性）+ 个性化查询（匹配结果的Top 3属性）\n重要：字数必须为20-30词，不满足则重新生成，无后处理"
+    )
+
+    parser.add_argument("--match-results-dir",
+                        default="/home/wlia0047/wenyu/result/user_profile/01_matching/results",
+                        help="Directory containing match results (Top 3 attributes)")
+    parser.add_argument("--preferences-dir",
+                        default="/home/wlia0047/wenyu/result/user_profile/00_data_preparation/preferences",
+                        help="Directory containing user preference results")
+    parser.add_argument("--output-dir",
+                        default="/home/wlia0047/wenyu/result/user_profile/06_query",
+                        help="Output directory for dual queries")
+    parser.add_argument("--user-id",
+                        default=None,
+                        help="Process only specific user ID (optional)")
+    parser.add_argument("--holdout-dir",
+                        default=None,
+                        help="Directory containing holdout query files (to filter products)")
+
+    args = parser.parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    log_with_timestamp("=" * 60)
+    log_with_timestamp("Dual Query Generation (V5 - Final Corrected)")
+    log_with_timestamp("=" * 60)
 
 def process_user(user_id, args, asin_to_users_attrs, user_prefs_map):
     # 步骤1：加载匹配结果（个性化查询用）
@@ -323,6 +457,7 @@ def process_user(user_id, args, asin_to_users_attrs, user_prefs_map):
 
     queries = []
     public_attrs_summary = defaultdict(int)  # 统计所有使用的大众属性
+    failed_queries = []  # 记录生成失败的查询
 
     if not holdout_asins:
         log_with_timestamp(f"  Warning: No holdout data found for user {user_id}. Skipping generation.")
@@ -362,11 +497,25 @@ def process_user(user_id, args, asin_to_users_attrs, user_prefs_map):
         # 生成大众查询（基于该商品的其他用户评论）
         pub_query = generate_public_query(asin, category, public_attrs)
         if not pub_query:
+            failed_queries.append({
+                'asin': asin,
+                'category': category,
+                'reason': 'public_query_generation_failed',
+                'public_attrs': public_attrs
+            })
             continue
 
         # 生成个性化查询（基于目标用户的 Top 3 属性，且过滤掉大众属性，带上下文增强）
+        # 获取该用户对该商品的详细偏好（用于提取 original_text）
+        user_specific_prefs = user_prefs_map.get(user_id, {}).get(asin, {})
         per_query = generate_personalized_query(asin, category, product_attrs, public_attrs)
         if not per_query:
+            failed_queries.append({
+                'asin': asin,
+                'category': category,
+                'reason': 'personalized_query_generation_failed',
+                'product_attrs': product_attrs
+            })
             continue
 
         # 保存双重查询结果
@@ -393,6 +542,13 @@ def process_user(user_id, args, asin_to_users_attrs, user_prefs_map):
 
     log_with_timestamp(f"Saved: {output_file}")
 
+    # 保存失败的查询（如果有）
+    if failed_queries:
+        failed_file = os.path.join(args.output_dir, f"failed_queries_{user_id}.json")
+        with open(failed_file, 'w', encoding='utf-8') as f:
+            json.dump(failed_queries, f, indent=2, ensure_ascii=False)
+        log_with_timestamp(f"Saved failed queries: {failed_file}")
+
     # 汇总
     log_with_timestamp("\n" + "=" * 60)
     log_with_timestamp("SUMMARY")
@@ -400,23 +556,30 @@ def process_user(user_id, args, asin_to_users_attrs, user_prefs_map):
     log_with_timestamp(f"User ID: {user_id}")
     log_with_timestamp(f"Total products: {len(match_data)}")
     log_with_timestamp(f"Queries generated: {len(queries)}")
+    log_with_timestamp(f"Queries failed: {len(failed_queries)}")
+    if failed_queries:
+        log_with_timestamp(f"  Failure reasons:")
+        for f in failed_queries[:5]:  # 显示前5个失败
+            log_with_timestamp(f"    {f['asin']}: {f['reason']}")
+        if len(failed_queries) > 5:
+            log_with_timestamp(f"    ... and {len(failed_queries) - 5} more")
     log_with_timestamp("=" * 60)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate Dual Queries (V5 - Final Corrected)",
-        epilog="生成双重查询：大众查询（该商品的其他用户评论Top 3属性）+ 个性化查询（匹配结果的Top 3属性）"
+        description="Generate Dual Queries (V6.1 - 20-30 Words)",
+        epilog="生成双重查询：大众查询（该商品的其他用户评论Top 3属性）+ 个性化查询（匹配结果的Top 3属性）\n重要：字数必须为20-30词，不满足则重新生成，无后处理"
     )
 
     parser.add_argument("--match-results-dir",
-                        default="/home/wlia0047/ar57/wenyu/result/user_profile/preference_match_results",
+                        default="/home/wlia0047/wenyu/result/user_profile/01_matching/results",
                         help="Directory containing match results (Top 3 attributes)")
     parser.add_argument("--preferences-dir",
-                        default="/home/wlia0047/ar57/wenyu/result/user_profile/user_preferences",
+                        default="/home/wlia0047/wenyu/result/user_profile/00_data_preparation/preferences",
                         help="Directory containing user preference results")
     parser.add_argument("--output-dir",
-                        default="/home/wlia0047/ar57/wenyu/result/user_profile/dual_queries",
+                        default="/home/wlia0047/wenyu/result/user_profile/06_query",
                         help="Output directory for dual queries")
     parser.add_argument("--user-id",
                         default=None,

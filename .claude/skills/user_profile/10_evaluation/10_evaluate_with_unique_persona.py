@@ -102,11 +102,11 @@ Evaluate whether this query reflects the user's UNIQUE preferences, interests, a
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dual-queries-dir",
-                        default="/home/wlia0047/ar57/wenyu/result/user_profile/dual_queries")
+                        default="/home/wlia0047/wenyu/result/user_profile/06_query")
     parser.add_argument("--persona-dir",
-                        default="/home/wlia0047/ar57/wenyu/result/user_profile/persona_results")
+                        default="/home/wlia0047/wenyu/result/user_profile/03_persona/results")
     parser.add_argument("--output-dir",
-                        default="/home/wlia0047/ar57/wenyu/result/user_profile/evaluation")
+                        default="/home/wlia0047/wenyu/result/user_profile/10_evaluation")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)

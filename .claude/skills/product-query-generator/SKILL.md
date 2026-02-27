@@ -1,12 +1,12 @@
 ---
 name: product-query-generator
-description: 读取 preference_match.json 文件，通过脚本生成 Prompt，引导 Agent 手动逐个生成并润色自然语言查询。必须包含全部3个属性并进行语义转换。⚠️ 严禁批量脚本生成，必须一个一个手动生成。
+description: 读取 preference_match.json 文件，通过脚本生成 Prompt，引导 Agent 手动以 10 个为一进行生成并润色自然语言查询。必须包含全部3个属性并进行语义转换。⚠️ 每一批（10个）完成后必须进行质量自检。
 allowed-tools: run_command, view_file, ask_user_question
 ---
 
 # Product-Query-Generator
 
-此技能用于让 Agent (Claude) 扮演真实购物者，通过分析 `result/preference_match/preference_match.json` 里的商品属性，**逐个手动生成**高质量的搜索查询。
+此技能用于让 Agent (Claude) 扮演真实购物者，通过分析 `result/preference_match/preference_match.json` 里的商品属性，**以 10 个为一批次手动生成**高质量的搜索查询，并在每批次完成后进行严格质量检查。
 
 ## 🚨 严禁行为
 
@@ -22,7 +22,7 @@ allowed-tools: run_command, view_file, ask_user_question
 1. **必须包含全部3个属性** - 不得遗漏
 2. **必须进行语义转换** - 不得复制粘贴原始属性
 3. **严格长度控制** - 25-30个单词（不是字符）
-4. **逐个手动生成** - 每个query单独处理，独立思考，严禁批量
+4. **每10个一批次** - 每次生成10个后停止，完成质量检查（自检+重复项检查）后再继续。
 
 ## 执行流程
 
@@ -38,9 +38,7 @@ python3 /home/wlia0047/ar57/wenyu/.claude/skills/product-query-generator/generat
     --output /home/wlia0047/ar57/wenyu/result/clean_query/query_prompts.json
 ```
 
-### 阶段 2：逐个手动生成查询 (Query Generation)
-
-🔴 **必须按照以下步骤，一个一个处理，不得跳过或合并：**
+🔴 **每处理 10 个 Prompt 作为一个批次，必须完成批次检查后再继续：**
 
 #### 步骤 1：准备输出文件
 
@@ -74,7 +72,24 @@ python3 -c "import json; d=json.load(open('/home/wlia0047/ar57/wenyu/result/clea
 echo "0,I need fabric paint with beautiful shimmer effect that lasts through many projects and has rich concentrated colors,B000BGSZFU" >> /home/wlia0047/ar57/wenyu/result/clean_query/clean_queries.csv
 ```
 
-**重复以上步骤，处理所有102个prompt。**
+**重复以上步骤，每处理 10 个 item 暂停一次，进行一次【批次质量检查】。**
+
+### 阶段 3：批次质量检查 (Batch Quality Check)
+
+每完成 10 个 query 后，必须运行以下检查：
+
+1. **唯一性检查**：确保当前批次的 query 与之前所有批次没有高度重复的句式。
+2. **属性覆盖检查**：核对这 10 个 query 是否都包含了对应的 3 个属性转换。
+3. **长度分布检查**：确保 10 个 query 的长度都在 25-30 词之间，没有明显的模板感。
+
+#### 检查脚本示例：
+```bash
+# 查看最后生成的 10 条 query 的长度
+tail -10 /home/wlia0047/ar57/wenyu/result/clean_query/clean_queries.csv | awk -F',' '{print length($2), $2}' | wc -w
+
+# 检查是否有重复的结尾结构
+tail -20 /home/wlia0047/ar57/wenyu/result/clean_query/clean_queries.csv | cut -d',' -f2 | rev | cut -d' ' -f1-3 | rev | sort | uniq -c
+```
 
 #### 步骤 3：逐个验证检查清单
 
@@ -100,8 +115,9 @@ echo "0,I need fabric paint with beautiful shimmer effect that lasts through man
 - [ ] 7. 验证了包含所有3个属性
 - [ ] 8. 验证了没有复制原始属性
 - [ ] 9. 验证了语法正确性
-- [ ] 10. 追加到CSV文件
-- [ ] 11. 继续下一个prompt
+- [ ] 10. 如果当前批次满 10 个，执行【阶段 3】检查
+- [ ] 11. 追加到CSV文件
+- [ ] 12. 继续下一个批次或结束
 
 ## 润色指南
 
@@ -158,13 +174,14 @@ tail -20 clean_queries.csv | grep -o "for [a-z]* [a-z]* projects$" | sort | uniq
 
 ## 完成标准
 
-- [ ] 所有102个query都已生成
+- [ ] 所有396个query都已生成
 - [ ] 每个query都是逐个手动生成，不是批量
 - [ ] 所有query的单词数都在25-30之间
 - [ ] 所有query都包含全部3个属性
 - [ ] 所有query都进行了语义转换
 - [ ] 没有重复的结尾模式
 - [ ] 没有语法错误
+- [ ] 每个批次（10个）生成后都通过了质量抽检
 - [ ] CSV文件格式正确
 
 ## 🚨 违规检测
