@@ -118,9 +118,15 @@ def load_metadata(meta_file: str) -> Dict[str, Dict]:
     if _metadata_cache is not None:
         return _metadata_cache
 
+    import gzip
     log_with_timestamp(f"加载元数据文件: {meta_file}")
     metadata = {}
-    with open(meta_file, 'r', encoding='utf-8') as f:
+
+    # 根据文件扩展名选择打开方式
+    open_func = gzip.open if meta_file.endswith('.gz') else open
+    mode = 'rt' if meta_file.endswith('.gz') else 'r'
+
+    with open_func(meta_file, mode, encoding='utf-8') as f:
         for line in f:
             try:
                 item = json.loads(line.strip())

@@ -134,27 +134,65 @@ llm_client_lib = importlib.util.module_from_spec(llm_client_module)
 llm_client_module.loader.exec_module(llm_client_lib)
 LLMClient = llm_client_lib.LLMClient
 
-# Import feature selector
-feature_selector_module = importlib.util.spec_from_file_location(
-    "feature_selector",
-    current_dir.parent / "07_neural_proxy" / "feature_selector.py"
-)
-feature_selector_lib = importlib.util.module_from_spec(feature_selector_module)
-sys.modules["feature_selector"] = feature_selector_lib
-feature_selector_module.loader.exec_module(feature_selector_lib)
-FeatureSet = feature_selector_lib.FeatureSet
-extract_features_from_profile = feature_selector_lib.extract_features_from_profile
-get_feature_set = feature_selector_lib.get_feature_set
+# Import SentenceLevelFeatureExtractor from current directory
+import importlib
+try:
+    extract_module = importlib.import_module("07_extract_sentence_level_features")
+    SentenceLevelFeatureExtractor = extract_module.SentenceLevelFeatureExtractor
+except ImportError:
+    pass
 
-# Import local feature extractor
-local_extractor_module = importlib.util.spec_from_file_location(
-    "local_extractor",
-    current_dir.parent / "07_neural_proxy" / "07_local_feature_extractor.py"
-)
-local_extractor_lib = importlib.util.module_from_spec(local_extractor_module)
-sys.modules["local_extractor"] = local_extractor_lib
-local_extractor_module.loader.exec_module(local_extractor_lib)
-BatchLocalFeatureExtractor = local_extractor_lib.BatchLocalFeatureExtractor
+# Define FeatureSet enum and related functions (replacing deleted feature_selector.py)
+from enum import Enum
+
+class FeatureSet(Enum):
+    """Feature set definitions."""
+    EMNLP_16 = "emnlp_16"
+    SHORT_QUERY_18 = "short_query_18"
+    SHORT_QUERY_13 = "short_query_13"
+    STYLE_ONLY_16 = "style_only_16"
+    FULL = "full"
+
+
+# Feature set definitions (16 style features)
+STYLE_ONLY_16_FEATURES = {
+    "tokens_per_sent", "char_per_tok", "ttr_lemma_chunks_100",
+    "lexical_density", "upos_dist_NOUN", "upos_dist_VERB",
+    "upos_dist_ADJ", "upos_dist_ADV", "upos_dist_PRON",
+    "upos_dist_DET", "upos_dist_AUX",
+    "upos_dist_PART", "upos_dist_SCONJ", "upos_dist_CCONJ",
+    "upos_dist_ADP", "n_tokens"
+}
+
+
+def get_feature_set(feature_set: FeatureSet) -> Optional[set]:
+    """Get feature names for given feature set."""
+    if feature_set == FeatureSet.STYLE_ONLY_16:
+        return STYLE_ONLY_16_FEATURES
+    # For other feature sets, return all features from profile
+    return None  # None means use all available features
+
+
+def extract_features_from_profile(data: dict, feature_set: FeatureSet) -> dict:
+    """
+    Extract features from linguistic profile JSON.
+
+    Args:
+        data: Linguistic profile JSON data
+        feature_set: Which feature set to extract
+
+    Returns:
+        Feature dictionary
+    """
+    profilingud_features = data.get("profilingud_features", {})
+
+    if feature_set == FeatureSet.STYLE_ONLY_16:
+        # Filter to style features only
+        selected = get_feature_set(feature_set)
+        return {k: v for k, v in profilingud_features.items() if k in selected}
+    else:
+        # Return all features
+        return profilingud_features
 
 
 @dataclass
@@ -516,12 +554,14 @@ def extract_query_features(
     queries: List[str],
     timeout: int = 60
 ) -> List[Dict[str, float]]:
-    """Extract linguistic features from queries."""
+    """Extract linguistic features from queries using SentenceLevelFeatureExtractor."""
     try:
-        extractor = BatchLocalFeatureExtractor(timeout=timeout)
-        features_list = extractor.extract_batch(queries)
-        extractor.close()
-        return [f if f is not None else {} for f in features_list]
+        extractor = SentenceLevelFeatureExtractor()
+        features_list = []
+        for query in queries:
+            features = extractor.extract_profilingud_features(query)
+            features_list.append(features if features else {})
+        return features_list
     except Exception as e:
         logger.error(f"Failed to extract features: {e}")
         return [{}] * len(queries)

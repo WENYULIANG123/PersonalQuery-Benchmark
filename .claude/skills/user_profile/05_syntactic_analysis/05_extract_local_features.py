@@ -15,23 +15,18 @@ import sys
 import json
 import argparse
 import logging
-import importlib.util
 from datetime import datetime
 from typing import Dict, List, Optional
 from pathlib import Path
 from collections import defaultdict
 
-# Load local extractor module
-current_dir = Path(__file__).parent.parent / "07_neural_proxy"
-local_extractor_module = importlib.util.spec_from_file_location(
-    "local_extractor",
-    current_dir / "07_local_feature_extractor.py"
-)
-local_extractor = importlib.util.module_from_spec(local_extractor_module)
-sys.modules["local_extractor"] = local_extractor
-local_extractor_module.loader.exec_module(local_extractor)
+# Load SentenceLevelFeatureExtractor from Stage 7
+# (Previously loaded from deprecated Stage 7, now renamed from Stage 8)
+sys.path.insert(0, str(Path(__file__).parent.parent / "07_neural_proxy"))
+from extract_sentence_level_features import SentenceLevelFeatureExtractor
 
-LocalFeatureExtractor = local_extractor.LocalFeatureExtractor
+# Create an alias for compatibility
+LocalFeatureExtractor = SentenceLevelFeatureExtractor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -122,7 +117,8 @@ def extract_user_profile(
     # Extract features from each review
     all_features = []
     for text in texts:
-        features = extractor.extract_features(text, language="English")
+        # SentenceLevelFeatureExtractor uses extract_profilingud_features (no language param)
+        features = extractor.extract_profilingud_features(text)
         if features:
             all_features.append(features)
 
@@ -233,8 +229,8 @@ def main():
         feature_counts = [r["feature_count"] for r in results]
         logger.info(f"Features per user: min={min(feature_counts)}, max={max(feature_counts)}, avg={sum(feature_counts)/len(feature_counts):.1f}")
 
-        # Show sample features
-        sample_features = results[0]["features"]
+        # Show sample features (use profilingud_features key)
+        sample_features = results[0]["profilingud_features"]
         logger.info(f"Sample features ({len(sample_features)}):")
         for name, value in list(sample_features.items())[:10]:
             logger.info(f"  {name}: {value:.4f}")

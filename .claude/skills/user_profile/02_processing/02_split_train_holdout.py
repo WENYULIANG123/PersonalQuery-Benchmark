@@ -94,18 +94,27 @@ def load_reviews_from_file(reviews_file):
 
     return asin_to_users_list
 
-def split_user_data(results, user_id, asin_to_users, target_query_count=10, min_attrs=3, min_cat_size=4, min_other_users=3):
+def split_user_data(results, user_id, asin_to_users, min_attrs=3, min_cat_size=4, min_other_users=3):
     """
-    划分训练集和测试集
+    划分训练集和测试集（确保画像集类目规模要求）
 
     参数:
         results: 匹配结果列表
         user_id: 目标用户 ID
         asin_to_users: 商品到用户列表的映射
-        target_query_count: 目标查询数量
-        min_attrs: 最小属性数
-        min_cat_size: 最小类目规模
-        min_other_users: 最少其他用户数（用于大众属性）
+        min_attrs: 最小属性数（默认3）
+        min_cat_size: 画像集中每个类目的最小商品数（默认4）
+        min_other_users: 最少其他用户数（默认3）
+
+    划分逻辑:
+        1. 候选商品识别：满足 min_attrs 和 min_other_users 的商品
+        2. 查询集：所有候选商品（100%）
+        3. 画像集：非候选商品 + 补充商品（确保每个类目 >= min_cat_size）
+
+    重要:
+        - 画像集中每个类目至少有 min_cat_size 个商品（如果该类目总商品数 >= min_cat_size）
+        - 如果某类目候选数 < min_cat_size，从非候选中补充
+        - 默认参数设置较严格，确保查询集商品有高质量属性和充足用户数据
     """
     # 按类目分组商品
     category_to_items = defaultdict(list)
@@ -116,16 +125,14 @@ def split_user_data(results, user_id, asin_to_users, target_query_count=10, min_
     persona_items = []
     query_items = []
 
-    # 1. 识别候选 Query 商品
+    # 1. 识别候选 Query 商品（不检查类目规模）
     # 条件：
     #   1. 属性数 >= min_attrs
-    #   2. 该类目下的总商品数 >= min_cat_size
-    #   3. 其他用户评论数 >= min_other_users (NEW!)
+    #   2. 其他用户评论数 >= min_other_users
     candidates_by_cat = defaultdict(list)
     non_candidates_by_cat = defaultdict(list)
 
     for cat, items in category_to_items.items():
-        cat_total_count = len(items)
         for item in items:
             asin = item.get('asin')
 
@@ -140,65 +147,76 @@ def split_user_data(results, user_id, asin_to_users, target_query_count=10, min_
             all_users = asin_to_users.get(asin, [])
             other_users_count = len([u for u in all_users if u != user_id])
 
-            # 同时满足三个条件
+            # 满足两个条件：属性数量 + 其他用户数
             meets_attr_req = len(selected_attrs) >= min_attrs
-            meets_cat_req = cat_total_count >= min_cat_size
             meets_users_req = other_users_count >= min_other_users
 
-            if meets_attr_req and meets_cat_req and meets_users_req:
+            if meets_attr_req and meets_users_req:
                 candidates_by_cat[cat].append(item)
             else:
                 non_candidates_by_cat[cat].append(item)
                 # 记录被过滤的原因
-                if not meets_users_req:
+                if not meets_attr_req:
+                    item['_filter_reason'] = f"属性数不足 ({len(selected_attrs)} < {min_attrs})"
+                elif not meets_users_req:
                     item['_filter_reason'] = f"其他用户数不足 ({other_users_count} < {min_other_users})"
 
-    # 2. 从候选商品中挑选 Query 集，确保类别覆盖
-    # 策略：如果 target_query_count 为 None，则包含所有候选商品；否则保证每个有候选商品的类目至少有一个进入 query，直到达到 target_query_count
-    sorted_cats = sorted(candidates_by_cat.keys(), key=lambda x: len(candidates_by_cat[x]), reverse=True)
+    total_candidates = sum(len(items) for items in candidates_by_cat.values())
+    total_products = len(results)
 
-    # 如果没有设置限制（target_query_count=None），则包含所有候选商品
-    if target_query_count is None:
-        # 将所有候选商品加入 query_items
-        for cat in sorted_cats:
-            query_items.extend(candidates_by_cat[cat])
-    else:
-        # 第一轮：每类拿一个
-        for cat in sorted_cats:
-            if len(query_items) < target_query_count and candidates_by_cat[cat]:
-                item = candidates_by_cat[cat].pop(random.randrange(len(candidates_by_cat[cat])))
-                query_items.append(item)
+    # 2. 分配查询集和画像集
+    # 逻辑：
+    #   - 候选商品 > 4个：随机选4个保留在画像集，其余去查询集
+    #   - 候选商品 ≤ 4个：全部放到画像集
+    log_with_timestamp(f"  候选商品数: {total_candidates}")
+    log_with_timestamp(f"  总商品数: {total_products}, 非候选商品: {sum(len(items) for items in non_candidates_by_cat.values())}")
 
-        # 第二轮：如果还没够，从候选商品最多的类目再拿
-        while len(query_items) < target_query_count:
-            # Check if we have any candidates left
-            valid_cats = [c for c in candidates_by_cat if candidates_by_cat[c]]
-            if not valid_cats:
-                break
+    all_categories = set(candidates_by_cat.keys()) | set(non_candidates_by_cat.keys())
+    retained_in_persona = 0
+    to_query = 0
 
-            # 寻找目前候选商品最多的类目
-            next_cat = max(valid_cats, key=lambda x: len(candidates_by_cat[x]))
-            item = candidates_by_cat[next_cat].pop(random.randrange(len(candidates_by_cat[next_cat])))
-            query_items.append(item)
+    for cat in all_categories:
+        cat_candidates = candidates_by_cat[cat][:]  # 复制一份用于随机选择
+        cat_non_candidates = non_candidates_by_cat[cat]
 
-    # 3. 剩下的所有商品（候选商品中没被选中的 + 非候选商品）全部进入 Persona 集
-    for cat, items in candidates_by_cat.items():
-        persona_items.extend(items)
-    for cat, items in non_candidates_by_cat.items():
-        persona_items.extend(items)
+        # 如果该类目候选商品 > 4个，随机选4个保留在画像集，其余去查询集
+        if len(cat_candidates) > min_cat_size:
+            # 随机打乱
+            random.shuffle(cat_candidates)
+            # 前4个保留在画像集
+            persona_items.extend(cat_candidates[:min_cat_size])
+            # 其余去查询集
+            query_items.extend(cat_candidates[min_cat_size:])
+            retained_in_persona += min_cat_size
+            to_query += len(cat_candidates) - min_cat_size
+        else:
+            # 不超过4个，全部放到画像集
+            persona_items.extend(cat_candidates)
+            retained_in_persona += len(cat_candidates)
 
-    return persona_items, query_items
+        # 所有非候选商品进入画像集
+        persona_items.extend(cat_non_candidates)
+
+    log_with_timestamp(f"  从候选商品保留在画像集: {retained_in_persona}个, 去查询集: {to_query}个")
+
+    # 返回划分结果和统计信息（使用初始保存的total_candidates）
+    split_stats = {
+        "total_candidates": total_candidates,
+        "total_non_candidates": sum(len(items) for items in non_candidates_by_cat.values())
+    }
+
+    return persona_items, query_items, split_stats
 
 def main():
-    parser = argparse.ArgumentParser(description="Category-aware data split with attribute count constraint.")
+    parser = argparse.ArgumentParser(description="Category-aware data split: Ensure persona set has >= min_cat_size items per category.")
     parser.add_argument("--match-dir", required=True, help="Directory containing match_USERID.json files")
     parser.add_argument("--preferences-dir", required=True, help="Directory containing preferences_USERID.json files")
     parser.add_argument("--output-dir", required=True, help="Output directory for split data")
     parser.add_argument("--reviews-file", help="Original reviews JSON file for counting global user statistics (recommended)")
     parser.add_argument("--user-id", help="Single user ID to process")
-    parser.add_argument("--target-query", type=int, default=None, help="Target number of queries (default: no limit, generate all qualifying products)")
-    parser.add_argument("--min-attrs", type=int, default=3, help="Minimum attributes for query items")
-    parser.add_argument("--min-other-users", type=int, default=3, help="Minimum other users for public attributes")
+    parser.add_argument("--min-attrs", type=int, default=3, help="Minimum attributes for query items (default: 3)")
+    parser.add_argument("--min-cat-size", type=int, default=4, help="Minimum items per category in persona set (default: 4)")
+    parser.add_argument("--min-other-users", type=int, default=3, help="Minimum other users for public attributes (default: 3)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
     args = parser.parse_args()
@@ -242,9 +260,9 @@ def main():
             log_with_timestamp(f"  Warning: No results found for user {user_id}")
             continue
 
-        persona_items, query_items = split_user_data(
+        persona_items, query_items, split_stats = split_user_data(
             results, user_id, asin_to_users,
-            args.target_query, args.min_attrs, min_cat_size=4, min_other_users=args.min_other_users
+            min_attrs=args.min_attrs, min_cat_size=args.min_cat_size, min_other_users=args.min_other_users
         )
 
         log_with_timestamp(f"  Query items: {len(query_items)}, Persona items: {len(persona_items)}")
@@ -254,13 +272,15 @@ def main():
         data_to_save = {
             "user_id": user_id,
             "timestamp": datetime.now().isoformat(),
-            "split_strategy": "attribute_aware_category_split_with_public_attrs",
+            "split_strategy": "all_candidates_as_query_set",
             "min_attrs": args.min_attrs,
             "min_other_users": args.min_other_users,
-            "target_query_count": args.target_query,
+            "total_candidates": split_stats["total_candidates"],
+            "total_non_candidates": split_stats["total_non_candidates"],
             "total_products": len(results),
             "persona_count": len(persona_items),
             "query_count": len(query_items),
+            "actual_query_ratio": len(query_items) / len(results) if len(results) > 0 else 0,
             "query_results": query_items
         }
 
