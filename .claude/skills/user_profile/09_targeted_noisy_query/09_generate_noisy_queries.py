@@ -43,6 +43,15 @@ from typing import Dict, List, Optional, Any
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/../../")
 from llm_client import LLMClient
 
+# Import spelling scorer
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/../08_spelling_difficulty")
+try:
+    spelling_scorer = __import__("08_spelling_scorer")
+    SpellingDifficultyScorer = spelling_scorer.SpellingDifficultyScorer
+except Exception as e:
+    print(f"Loaded spelling scorer failed: {e}")
+    SpellingDifficultyScorer = None
+
 
 def log_with_timestamp(message: str):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -117,6 +126,8 @@ class WritingAnalysisLoader:
         return {
             "total_errors": stats.get('total_errors', 0),
             "error_rate": stats.get('errors_per_100_words', 0),
+            "spelling_total": stats.get('spelling_total', 0),
+            "grammar_total": stats.get('grammar_total', 0),
             "spelling": stats.get('spelling', {}),
             "grammar": stats.get('grammar', {}),
         }
@@ -193,10 +204,12 @@ class ProfilingUDPromptBuilder:
 
     def __init__(self, style_loader: ProfilingUDStyleLoader,
                  writing_loader: WritingAnalysisLoader,
-                 reviews_loader: ReviewsLoader = None):
+                 reviews_loader: ReviewsLoader = None,
+                 scorer=None):
         self.style_loader = style_loader
         self.writing_loader = writing_loader
         self.reviews_loader = reviews_loader
+        self.scorer = scorer
 
     def build_prompt(self, user_id: str, clean_query: str) -> str:
         """Build the style transfer prompt."""
@@ -211,6 +224,13 @@ class ProfilingUDPromptBuilder:
         # Get few-shot examples
         few_shot_section = self._build_few_shot_section(user_id)
 
+        vulnerable_str = ""
+        if self.scorer:
+            vulnerable_words = self.scorer.find_vulnerable_words(clean_query, user_profile=error_profile)
+            if vulnerable_words:
+                vulnerable_list = [f"'{w}' (Cognitive Difficulty: {score:.2f})" for w, score in vulnerable_words[:3]]
+                vulnerable_str = f"\n## Vocabulary Vulnerability (Crucial)\nIn the original query, the following words are cognitively harder to spell:\n" + "\n".join("- " + v for v in vulnerable_list) + "\n\nIf you apply the user's spelling error patterns, you MUST prioritize these difficult words. Do NOT misspell simple, common words."
+
         prompt = f"""# Style Transfer Task
 
 You are rewriting a search query to match a specific user's writing style.
@@ -219,11 +239,12 @@ You are rewriting a search query to match a specific user's writing style.
 
 {style_prompt}
 
-## Error Patterns (apply subtly, not every time)
+## Error Patterns (apply according to their relative frequencies below)
 
 {error_examples}
 
 {few_shot_section}
+{vulnerable_str}
 
 ## Task
 
@@ -236,7 +257,8 @@ Generate **5 different versions** of the following search query, each applying t
 2. Keep word count between 25-30 words
 3. Preserve ALL key search terms and product attributes
 4. Follow the linguistic constraints above (noun/verb/adj counts)
-5. Apply error patterns subtly - NOT in every word, just occasionally
+5. Apply error patterns proportionally to the provided Frequency % (e.g., if an error has 50% frequency, try to include it in ~half the versions)
+6. IF injecting spelling errors, ONLY target the linguistically difficult words identified above (if any).
 
 **Vary the style application**:
 - Version 1: Focus on exact grammatical structure (follow the counts precisely)
@@ -263,9 +285,11 @@ Generate **5 different versions** of the following search query, each applying t
         return prompt
 
     def _build_error_examples(self, error_profile: Dict) -> str:
-        """Build concrete error examples based on user's error profile."""
+        """Build concrete error examples based on user's error profile, including relative frequencies."""
         spelling = error_profile.get('spelling', {})
         grammar = error_profile.get('grammar', {})
+        spelling_total = error_profile.get('spelling_total', sum(spelling.values()))
+        grammar_total = error_profile.get('grammar_total', sum(grammar.values()))
 
         if not spelling and not grammar:
             return "This user has no significant error patterns."
@@ -273,23 +297,27 @@ Generate **5 different versions** of the following search query, each applying t
         examples = []
 
         # Top spelling errors
-        if spelling:
+        if spelling and spelling_total > 0:
+            examples.append("### Spelling Error Frequencies:")
             sorted_spelling = sorted(spelling.items(), key=lambda x: -x[1])[:3]
             for error_type, count in sorted_spelling:
                 if error_type in self.SPELLING_DESCRIPTIONS:
-                    examples.append(f"- {self.SPELLING_DESCRIPTIONS[error_type]}")
+                    weight = round((count / spelling_total) * 100)
+                    examples.append(f"- {self.SPELLING_DESCRIPTIONS[error_type]} (Frequency: {weight}% of their spelling errors)")
 
         # Top grammar errors
-        if grammar:
+        if grammar and grammar_total > 0:
+            examples.append("\n### Grammar Error Frequencies:")
             sorted_grammar = sorted(grammar.items(), key=lambda x: -x[1])[:2]
             for error_type, count in sorted_grammar:
                 if error_type in self.GRAMMAR_DESCRIPTIONS:
-                    examples.append(f"- {self.GRAMMAR_DESCRIPTIONS[error_type]}")
+                    weight = round((count / grammar_total) * 100)
+                    examples.append(f"- {self.GRAMMAR_DESCRIPTIONS[error_type]} (Frequency: {weight}% of their grammar errors)")
 
         if not examples:
             return "This user has no significant error patterns."
 
-        return "\n".join(examples[:5])
+        return "\n".join(examples)
 
     def _build_few_shot_section(self, user_id: str) -> str:
         """Build few-shot examples section from user's actual reviews."""
@@ -534,28 +562,38 @@ def main():
                         help="Directory with dual_queries_*.json from Stage 6")
     parser.add_argument("--writing-analysis-dir", required=True,
                         help="Directory with writing_analysis_*.json from Stage 4")
-    parser.add_argument("--layered-features-dir", required=True,
-                        help="Directory with layered_features_*.json from Stage 5")
+    parser.add_argument("--layered-features-dir", required=False, default=None,
+                        help="Directory with layered_features_*.json from Stage 5 (optional, will skip if not provided)")
     parser.add_argument("--reviews-file", required=False,
                         help="Path to all_user_reviews.json for few-shot examples")
     parser.add_argument("--output-dir", required=True,
                         help="Output directory")
     parser.add_argument("--user-ids", nargs="+",
                         help="Specific user IDs to process")
+    parser.add_argument("--spelling-model-path", required=False, default=None,
+                        help="Path to the trained spelling difficulty model")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Initialize loaders
-    style_loader = ProfilingUDStyleLoader(args.layered_features_dir)
+    # If layered_features_dir is not provided, use an empty directory (style constraints will be empty)
+    layered_features_dir = args.layered_features_dir if args.layered_features_dir else ""
+    style_loader = ProfilingUDStyleLoader(layered_features_dir)
     writing_loader = WritingAnalysisLoader(args.writing_analysis_dir)
     reviews_loader = ReviewsLoader(args.reviews_file) if args.reviews_file else None
+
+    scorer = None
+    if SpellingDifficultyScorer:
+        log_with_timestamp("Initializing target finding scorer...")
+        scorer = SpellingDifficultyScorer(args.spelling_model_path)
 
     # Initialize prompt builder
     prompt_builder = ProfilingUDPromptBuilder(
         style_loader=style_loader,
         writing_loader=writing_loader,
-        reviews_loader=reviews_loader
+        reviews_loader=reviews_loader,
+        scorer=scorer
     )
 
     # Find users

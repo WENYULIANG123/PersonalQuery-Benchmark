@@ -94,18 +94,26 @@ def main():
         all_reviews = json.load(f)
 
     for user_id in args.user_ids:
-        if user_id not in all_reviews:
+        # Handle two formats:
+        # 1. User-keyed dict: {"A1BBCMQSEJN0PP": {"reviews": [...]}}
+        # 2. Single user format: {"user_id": "A1BBCMQSEJN0PP", "reviews": [...]}
+        if user_id in all_reviews:
+            user_data = all_reviews[user_id].get('reviews', [])
+        elif all_reviews.get('user_id') == user_id:
+            user_data = all_reviews.get('reviews', [])
+        else:
             log_with_timestamp(f"Warning: User {user_id} not found in reviews file, skipping...")
             continue
 
-        user_data = all_reviews[user_id].get('reviews', [])
         reviews_to_process = user_data[:args.num_reviews] if args.num_reviews else user_data
 
         log_with_timestamp(f"Processing {len(reviews_to_process)} reviews for user {user_id}...")
 
         prompts = []
         for idx, review in enumerate(reviews_to_process):
-            text = review.get('review_text', '').strip()
+            # Try both field names: reviewText (camelCase) and review_text (snake_case)
+            text = review.get('reviewText', '') or review.get('review_text', '')
+            text = text.strip()
             if not text:
                 continue
 
