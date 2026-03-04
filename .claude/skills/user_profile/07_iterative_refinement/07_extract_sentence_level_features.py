@@ -297,7 +297,7 @@ def main():
     """Main extraction workflow."""
     # Paths
     review_data_path = Path("/home/wlia0047/wenyu/data/Amazon-Reviews-2018/processed/user_reviews/user_product_reviews.json")
-    output_dir = Path("/home/wlia0047/wenyu/result/user_profile/08_multi_candidate_filtering/sentence_features")
+    output_dir = Path("/home/wlia0047/wenyu/result/user_profile/07_neural_proxy/sentence_features")
     dual_queries_dir = Path("/home/wlia0047/wenyu/result/user_profile/06_query")
     output_dir.mkdir(parents=True, exist_ok=True)
 

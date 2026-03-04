@@ -287,10 +287,11 @@ def main():
     script_match = re.search(r'([\w-]+)\.py', original_command)
     script_name = script_match.group(1) if script_match else "job"
     
-    # Clean up old log files for THIS script name only
-    # Skip cleaning up old log files to allow parallel execution
+    # Clean up old log files for THIS script name
     print(f"[sbatch_wrapper] 🗑️  清理与 '{script_name}' 相关的旧日志文件...", file=sys.stderr)
     cleanup_count = 0
+
+    # Pattern 1: Clean up files matching current script name (e.g., 09_generate_noisy_queries_v31_*)
     for old_file in log_dir.glob(f"{script_name}_*"):
         if old_file.suffix in ['.log', '.err']:
             try:
@@ -298,7 +299,21 @@ def main():
                 cleanup_count += 1
             except Exception as e:
                 print(f"[sbatch_wrapper] ⚠️  删除文件失败 {old_file.name}: {e}", file=sys.stderr)
-    
+
+    # Pattern 2: For stage 9 scripts, also clean up old pattern files (without version suffix)
+    # This handles the legacy pattern from SLURM scripts: 09_generate_noisy_queries_<job_id>.log
+    if script_name.startswith('09_generate_noisy_queries'):
+        base_pattern = script_name.split('_v')[0] if '_v' in script_name else '09_generate_noisy_queries'
+        for old_file in log_dir.glob(f"{base_pattern}_*"):
+            # Only clean if it doesn't match current script name (avoid duplicate work)
+            if not old_file.name.startswith(script_name):
+                if old_file.suffix in ['.log', '.err']:
+                    try:
+                        old_file.unlink()
+                        cleanup_count += 1
+                    except Exception as e:
+                        print(f"[sbatch_wrapper] ⚠️  删除文件失败 {old_file.name}: {e}", file=sys.stderr)
+
     if cleanup_count > 0:
         print(f"[sbatch_wrapper] ✅ 已清理 {cleanup_count} 个旧日志文件", file=sys.stderr)
 

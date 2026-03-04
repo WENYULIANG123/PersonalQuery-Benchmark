@@ -60,7 +60,7 @@ def monitor_logs(log_file, err_file, job_id, max_wait=30):
             break
         # Check job status while waiting
         if not is_job_running(job_id):
-            print("[sbatch_wrapper] ⚠️  作业已完成但日志文件尚未创建")
+            print("[sbatch_wrapper] ⚠️  作业已完成但日志文件尚未创建", flush=True)
             return
         time.sleep(1)
         wait_count += 1
@@ -79,7 +79,7 @@ def monitor_logs(log_file, err_file, job_id, max_wait=30):
                     f.seek(last_log_size)
                     new_content = f.read()
                     if new_content:
-                        print(new_content, end='')
+                        print(new_content, end='', flush=True)
                 last_log_size = log_path.stat().st_size
 
             # Output new error content
@@ -88,7 +88,7 @@ def monitor_logs(log_file, err_file, job_id, max_wait=30):
                     f.seek(last_err_size)
                     new_content = f.read()
                     if new_content:
-                        print(new_content, end='')
+                        print(new_content, end='', flush=True)
                 last_err_size = err_path.stat().st_size
 
             # Check if job is still running
@@ -100,7 +100,7 @@ def monitor_logs(log_file, err_file, job_id, max_wait=30):
             # Print status message periodically
             current_time = time.time()
             if current_time - last_status_time >= status_interval:
-                print(f"[sbatch_wrapper] 作业正在运行中 (Job ID: {job_id})...")
+                print(f"[sbatch_wrapper] 作业正在运行中 (Job ID: {job_id})...", flush=True)
                 last_status_time = current_time
 
             time.sleep(1)  # Check every second
@@ -109,7 +109,7 @@ def monitor_logs(log_file, err_file, job_id, max_wait=30):
         # User interrupted, but job continues running
         raise
     except Exception as e:
-        print(f"[sbatch_wrapper] ⚠️  监控作业状态时出错: {e}")
+        print(f"[sbatch_wrapper] ⚠️  监控作业状态时出错: {e}", flush=True)
         # Continue monitoring even if there's an error
         while True:
             if not is_job_running(job_id):
@@ -182,7 +182,7 @@ def main():
     is_hook_mode = bool(input_data)
     
     # Always log when hook is called (even if no input)
-    print(f"[sbatch_wrapper] Hook被调用 - is_hook_mode: {is_hook_mode}, stdin_isatty: {sys.stdin.isatty()}", file=sys.stderr)
+    print(f"[sbatch_wrapper] Hook被调用 - is_hook_mode: {is_hook_mode}, stdin_isatty: {sys.stdin.isatty()}", file=sys.stderr, flush=True)
     
     if is_hook_mode:
         # Hook mode: intercept command and wrap with sbatch
@@ -195,20 +195,20 @@ def main():
         )
         
         # Debug output
-        print(f"[sbatch_wrapper] 命令: {command[:200]}", file=sys.stderr)
-        print(f"[sbatch_wrapper] 工作目录: {working_dir}", file=sys.stderr)
+        print(f"[sbatch_wrapper] 命令: {command[:200]}", file=sys.stderr, flush=True)
+        print(f"[sbatch_wrapper] 工作目录: {working_dir}", file=sys.stderr, flush=True)
         
         # Check if this is a Python script command
         is_python_script = is_python_script_command(command)
         has_sbatch = has_sbatch_in_command(command)
         
-        print(f"[sbatch_wrapper] 是 Python 脚本命令: {is_python_script}", file=sys.stderr)
-        print(f"[sbatch_wrapper] 包含 sbatch: {has_sbatch}", file=sys.stderr)
+        print(f"[sbatch_wrapper] 是 Python 脚本命令: {is_python_script}", file=sys.stderr, flush=True)
+        print(f"[sbatch_wrapper] 包含 sbatch: {has_sbatch}", file=sys.stderr, flush=True)
         
         # If Python script but no sbatch, block execution
         if is_python_script and not has_sbatch:
             script_path = "/home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py"
-            print("[sbatch_wrapper] ⚠️  检测到 Python 脚本执行但未使用 sbatch", file=sys.stderr)
+            print("[sbatch_wrapper] ⚠️  检测到 Python 脚本执行但未使用 sbatch", file=sys.stderr, flush=True)
             
             output = {
                 "continue": True,
@@ -236,7 +236,7 @@ def main():
             }
         
         # Output JSON response for hook mode
-        print(json.dumps(output, ensure_ascii=False))
+        print(json.dumps(output, ensure_ascii=False), flush=True)
         return
     
     # Direct mode: execute command via sbatch
@@ -262,7 +262,7 @@ def main():
     original_command = parse_command(remaining_args)
     
     if not original_command:
-        print("[sbatch_wrapper] ❌ 错误: 未提供要执行的命令", file=sys.stderr)
+        print("[sbatch_wrapper] ❌ 错误: 未提供要执行的命令", file=sys.stderr, flush=True)
         sys.exit(1)
     
     # Setup paths
@@ -270,7 +270,7 @@ def main():
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # Clean up ALL .sh files in log directory before starting as requested
-    print(f"[sbatch_wrapper] 🗑️  清理日志目录中的所有残留 .sh 脚本...", file=sys.stderr)
+    print(f"[sbatch_wrapper] 🗑️  清理日志目录中的所有残留 .sh 脚本...", file=sys.stderr, flush=True)
     sh_cleanup_count = 0
     for sh_file in log_dir.glob("*.sh"):
         try:
@@ -280,7 +280,7 @@ def main():
             pass
     
     if sh_cleanup_count > 0:
-        print(f"[sbatch_wrapper] ✅ 已全局清理 {sh_cleanup_count} 个 .sh 脚本", file=sys.stderr)
+        print(f"[sbatch_wrapper] ✅ 已全局清理 {sh_cleanup_count} 个 .sh 脚本", file=sys.stderr, flush=True)
 
     # Extract script name for logging
     # Try to find the .py filename in the command
@@ -289,7 +289,7 @@ def main():
     
     # Clean up old log files for THIS script name only
     # Skip cleaning up old log files to allow parallel execution
-    print(f"[sbatch_wrapper] 🗑️  清理与 '{script_name}' 相关的旧日志文件...", file=sys.stderr)
+    print(f"[sbatch_wrapper] 🗑️  清理与 '{script_name}' 相关的旧日志文件...", file=sys.stderr, flush=True)
     cleanup_count = 0
     for old_file in log_dir.glob(f"{script_name}_*"):
         if old_file.suffix in ['.log', '.err']:
@@ -297,10 +297,10 @@ def main():
                 old_file.unlink()
                 cleanup_count += 1
             except Exception as e:
-                print(f"[sbatch_wrapper] ⚠️  删除文件失败 {old_file.name}: {e}", file=sys.stderr)
+                print(f"[sbatch_wrapper] ⚠️  删除文件失败 {old_file.name}: {e}", file=sys.stderr, flush=True)
     
     if cleanup_count > 0:
-        print(f"[sbatch_wrapper] ✅ 已清理 {cleanup_count} 个旧日志文件", file=sys.stderr)
+        print(f"[sbatch_wrapper] ✅ 已清理 {cleanup_count} 个旧日志文件", file=sys.stderr, flush=True)
 
     timestamp_suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
     # Using %j for SLURM job ID in the output/error filenames
@@ -336,7 +336,7 @@ cd "{current_dir}"
     script_file.chmod(0o755)
     
     # Submit the job
-    print("[sbatch_wrapper] 提交作业到 SLURM...")
+    print("[sbatch_wrapper] 提交作业到 SLURM...", flush=True)
 
     try:
         result = subprocess.run(
@@ -349,7 +349,7 @@ cd "{current_dir}"
         # Extract job ID from output
         match = re.search(r'Submitted batch job (\d+)', result.stdout)
         if not match:
-            print("[sbatch_wrapper] ❌ 提交 sbatch 作业失败: 无法解析作业 ID")
+            print("[sbatch_wrapper] ❌ 提交 sbatch 作业失败: 无法解析作业 ID", flush=True)
             sys.exit(1)
 
         job_id = match.group(1)
@@ -358,15 +358,15 @@ cd "{current_dir}"
         err_file = log_dir / f"{script_name}_{job_id}.err"
 
     except subprocess.CalledProcessError as e:
-        print(f"[sbatch_wrapper] ❌ 提交 sbatch 作业失败: {e}")
+        print(f"[sbatch_wrapper] ❌ 提交 sbatch 作业失败: {e}", flush=True)
         if e.stderr:
-            print(e.stderr)
+            print(e.stderr, flush=True)
         sys.exit(1)
 
-    print(f"[sbatch_wrapper] ✅ 作业已提交，Job ID: {job_id}")
-    print(f"[sbatch_wrapper] 日志文件: {log_file}")
-    print(f"[sbatch_wrapper] 错误文件: {err_file}")
-    print("[sbatch_wrapper] 开始监控作业状态 (Ctrl+C 停止监控，作业将继续运行)...")
+    print(f"[sbatch_wrapper] ✅ 作业已提交，Job ID: {job_id}", flush=True)
+    print(f"[sbatch_wrapper] 日志文件: {log_file}", flush=True)
+    print(f"[sbatch_wrapper] 错误文件: {err_file}", flush=True)
+    print("[sbatch_wrapper] 开始监控作业状态 (Ctrl+C 停止监控，作业将继续运行)...", flush=True)
 
     # Monitor logs
     job_completed = False
@@ -374,11 +374,11 @@ cd "{current_dir}"
         monitor_logs(str(log_file), str(err_file), job_id)
         job_completed = True
     except KeyboardInterrupt:
-        print("\n[sbatch_wrapper] 监控已停止，作业将继续在后台运行...")
+        print("\n[sbatch_wrapper] 监控已停止，作业将继续在后台运行...", flush=True)
 
-    print(f"[sbatch_wrapper] ✅ 作业已完成 (Job ID: {job_id})")
+    print(f"[sbatch_wrapper] ✅ 作业已完成 (Job ID: {job_id})", flush=True)
     if log_file.exists() or err_file.exists():
-        print(f"[sbatch_wrapper] 查看完整日志: tail -f {log_file} {err_file}")
+        print(f"[sbatch_wrapper] 查看完整日志: tail -f {log_file} {err_file}", flush=True)
     
     # Clean up temporary script file after job completion (keep log files for inspection)
     if job_completed:
@@ -395,9 +395,9 @@ cd "{current_dir}"
 
         # Print cleanup results
         if cleaned_files:
-            print(f"[sbatch_wrapper] 🗑️  已清理临时文件: {', '.join(cleaned_files)}", file=sys.stderr)
+            print(f"[sbatch_wrapper] 🗑️  已清理临时文件: {', '.join(cleaned_files)}", file=sys.stderr, flush=True)
         if failed_files:
-            print(f"[sbatch_wrapper] ⚠️  清理文件失败: {', '.join(failed_files)}", file=sys.stderr)
+            print(f"[sbatch_wrapper] ⚠️  清理文件失败: {', '.join(failed_files)}", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":
