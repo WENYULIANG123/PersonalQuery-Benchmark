@@ -4,8 +4,8 @@ data/Amazon-Reviews-2018/intermediate/df_ucsd_meta.pkl
 data/Amazon-Reviews-2018/processed/user_reviews/user_product_reviews.json
 data/Amazon-Reviews-2018/processed/cache/Arts_Crafts_and_Sewing__brand-category-color/node_info.pkl
 data/Amazon-Reviews-2018/processed/node_info.pkl
-data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz
-data/Amazon-Reviews-2018/raw/Arts_Crafts_and_Sewing.json.gz
+data/Amazon-Reviews-2018/raw/*.json
+data/Amazon-Reviews-2018/raw/*.json.gz
 
 # 排除其他常见的大文件和临时文件
 *.pkl

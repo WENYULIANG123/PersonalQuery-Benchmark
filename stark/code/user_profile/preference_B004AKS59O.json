@@ -1,0 +1,114 @@
+{
+    "Case Quality": [
+        {
+            "entity": "wooden box",
+            "original_text": "The wood box is nice as it keeps everything together.",
+            "sentiment": "positive"
+        },
+        {
+            "entity": "wooden box",
+            "original_text": "My budding artist really loved the wooden box as well.",
+            "sentiment": "positive"
+        },
+        {
+            "entity": "sturdy wooden case",
+            "original_text": "Sturdy wooden case containing all the tools needed for a young artist.",
+            "sentiment": "positive"
+        },
+        {
+            "entity": "keeps everything organized",
+            "original_text": "Perfect for keeping everything in one place.",
+            "sentiment": "positive"
+        }
+    ],
+    "Product Variety": [
+        {
+            "entity": "lots of variety",
+            "original_text": "Lots of variety.",
+            "sentiment": "positive"
+        },
+        {
+            "entity": "had everything I was looking for",
+            "original_text": "This kit had everything I was looking for",
+            "sentiment": "positive"
+        }
+    ],
+    "Age Appropriateness": [
+        {
+            "entity": "for 6 year old",
+            "original_text": "Purchase for my 6 year old grand daughter who loves art.",
+            "sentiment": "positive"
+        },
+        {
+            "entity": "for 11 year old",
+            "original_text": "I was looking for an art kit for an 11 year old and most were either too childish or too complex.",
+            "sentiment": "positive"
+        },
+        {
+            "entity": "not too childish or too complex",
+            "original_text": "most were either too childish or too complex. This kit had everything I was looking for",
+            "sentiment": "positive"
+        },
+        {
+            "entity": "for advanced young artists",
+            "original_text": "This is only for very advanced young artists.",
+            "sentiment": "neutral"
+        },
+        {
+            "entity": "for 10 year old",
+            "original_text": "Got this for my 10 yr old daughter.",
+            "sentiment": "positive"
+        }
+    ],
+    "Value": [
+        {
+            "entity": "good value for price",
+            "original_text": "a good one to start with for the price.",
+            "sentiment": "positive"
+        },
+        {
+            "entity": "did not break the bank",
+            "original_text": "it did not break the bank.",
+            "sentiment": "positive"
+        },
+        {
+            "entity": "excellent value",
+            "original_text": "The art set looked expensive.",
+            "sentiment": "positive"
+        }
+    ],
+    "Component Quality": [
+        {
+            "entity": "poor quality markers",
+            "original_text": "The quality of the markets is poor",
+            "sentiment": "negative",
+            "improvement_wish": "Improve the quality of markers to be more durable and vibrant"
+        },
+        {
+            "entity": "fake oil pastels",
+            "original_text": "the '24 oil pastels' are NOT oil pastels - they are just 24 additional crayons",
+            "sentiment": "negative",
+            "improvement_wish": "Provide genuine oil pastels instead of mislabeled crayons"
+        },
+        {
+            "entity": "fragile plastic scissors",
+            "original_text": "The little plastic scissors broke on the first use",
+            "sentiment": "negative",
+            "improvement_wish": "Make scissors more durable or include higher quality scissors"
+        }
+    ],
+    "Gift Suitability": [
+        {
+            "entity": "great gift",
+            "original_text": "This was a Wow! gift on Christmas morning.",
+            "sentiment": "positive"
+        }
+    ],
+    "Beginner Friendly": [
+        {
+            "entity": "good starter set",
+            "original_text": "Nothing elaborate about this set, but a good one to start with",
+            "sentiment": "positive"
+        }
+    ]
+}
