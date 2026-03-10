@@ -69,3 +69,35 @@ spelling_errors_detected_idf_jaccard.json
 # test.py
 # spell_checker_idf_jaccard.py
 stark/cache/
+
+stark/
+data/
+result/
+.claude/
+
+# 排除独立的 git 仓库
+Amazon-C4/
+oh-my-openagent/
+
+# 排除二进制文件
+opencode
+
+# 排除备份文件
+*.bak
+.gitignore_bak
+
+# 排除 IDE 配置
+.vscode/
+
+# 排除符号链接
+.agents
+
+# 排除 LaTeX 辅助文件
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.fdb_latexmk
+*.fls
+*.synctex.gz
