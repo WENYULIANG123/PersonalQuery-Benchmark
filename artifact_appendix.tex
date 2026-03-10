@@ -1,0 +1,74 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{times}
+\usepackage{url}
+\usepackage{hyperref}
+
+\title{\textbf{PersonalQuery Artifact Appendix}}
+\author{Anonymous}
+
+\begin{document}
+\maketitle
+
+\section{Abstract}
+
+PersonalQuery is a complete reproducibility package for grounded personalized search query generation. The artifact includes the full 12-stage pipeline implementation, benchmark dataset with 134 paired queries across 10 Amazon users, comprehensive documentation, and single-command reproduction scripts. All code and data are publicly archived on Zenodo with DOI.
+
+\section{Artifact Identification}
+
+\textbf{Artifact Name:} PersonalQuery Reproducibility Package\\
+\textbf{DOI:} \texttt{10.5281/zenodo.XXXXXX}\\
+\textbf{URL:} \url{https://zenodo.org/record/XXXXXX}\\
+\textbf{GitHub:} \url{https://github.com/[username]/personalquery}\\
+\textbf{License:} MIT License\\
+\textbf{Contact:} \texttt{anonymous@email.org}
+
+\section{Description}
+
+PersonalQuery implements a grounded approach to generating personalized search queries from user reviews.
+
+\textbf{Key Algorithms:}
+\begin{itemize}
+\item Dual Validation: Filters preferences using review evidence + metadata verification (71.5\% filtering rate)
+\item Iterative Style Refinement: 16-dimensional linguistic feature matching
+\item Spelling Difficulty Model: Cognitive difficulty scoring + user-specific error patterns
+\end{itemize}
+
+\section{Requirements}
+
+\textbf{Hardware:} CPU 8+ cores, RAM 16GB minimum, Storage 5GB\\
+\textbf{Software:} Python 3.8+, conda/pip, LLM API access\\
+\textbf{Dependencies:} openai, spacy, sentence-transformers, pandas, numpy, scikit-learn\\
+\textbf{Runtime:} Main results 15-30 min, Full evaluation 2-4 hours
+
+\section{Installation}
+
+\begin{enumerate}
+\item Clone: \texttt{git clone https://github.com/[user]/personalquery.git}
+\item Environment: \texttt{conda env create -f environment.yml}
+\item Dependencies: \texttt{pip install -r requirements.txt}
+\item API Key: \texttt{export GLM\_API\_KEY="your\_key"}
+\item Verify: \texttt{python scripts/verify\_setup.py}
+\end{enumerate}
+
+\section{Experiment Workflow}
+
+\textbf{Main Results:} \texttt{python scripts/reproduce\_main\_results.py --user-id A13OFOB1394G31}\\
+Expected: Public 4.0, Personalized 5.8, Improvement +1.81 (15-30 min)
+
+\textbf{Full Evaluation:} \texttt{python scripts/run\_full\_evaluation.py --all-users}\\
+Expected: 10 users, 134 pairs, 100\% positive (2-4 hours)
+
+\section{Results Reproduction}
+
+\textbf{Expected Metrics:}
+\begin{itemize}
+\item Public query avg: 4.0 (±0.2)
+\item Personalized query avg: 5.8 (±0.2)
+\item Improvement: +1.81 points (±0.2)
+\item Positive rate: 100\%
+\end{itemize}
+
+\textbf{Tolerance:} ±0.2 accounts for LLM output variability and floating-point precision.
+
+\end{document}

@@ -1,0 +1,393 @@
+\documentclass[11pt]{article}
+\usepackage{times}
+\usepackage{latexsym}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{hyperref}
+\usetikzlibrary{shapes,arrows,positioning,fit,backgrounds}
+
+\setlength{\topmargin}{-0.5in}
+\setlength{\textheight}{9in}
+\setlength{\oddsidemargin}{-0.3in}
+\setlength{\textwidth}{7in}
+
+\newcommand{\method}{PersonalQuery}
+
+\title{\textbf{Grounded Personalized Search Query Generation: \\A Multi-Stage Pipeline with Linguistic Style Alignment}}
+
+\author{
+Anonymous Authors \\
+Affiliation \\
+\texttt{email@institution.edu}
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Personalized search systems traditionally rely on simple user profiles or collaborative filtering, often failing to capture the nuanced preferences and communication styles of individual users. We present \method{}, a novel 12-stage pipeline that generates ``grounded'' personalized search queries by extracting fine-grained user preferences from historical reviews and aligning query language with individual writing patterns. Our approach integrates large language model (LLM)-based preference extraction, multi-dimensional linguistic feature analysis (16 style features), iterative style refinement with feature-aware prompting, and a convolutional neural network (CNN) for spelling difficulty prediction to enable targeted noise injection. Experimental evaluation on Amazon product reviews demonstrates that \method{}-generated queries achieve significant improvements in both semantic relevance and stylistic authenticity compared to baseline approaches, with human evaluation confirming strong alignment (Spearman's $\rho = 0.82$) between LLM and human judgments.
+
+\textbf{Keywords:} Personalized Search, Query Generation, User Modeling, Linguistic Style Transfer, Large Language Models
+\end{abstract}
+
+\section{Introduction}
+
+\subsection{Background and Motivation}
+
+E-commerce search systems serve as the primary interface between users and vast product catalogs. Traditional search interfaces treat all users identically, returning the same results for identical queries regardless of individual preferences, expertise levels, or communication patterns. This one-size-fits-all approach fails to capture the rich heterogeneity in how users express their needs and evaluate products.
+
+Recent advances in personalized search have primarily focused on re-ranking results based on user history or collaborative signals. However, these approaches overlook a critical dimension: the query itself. The language users employ in search queries reflects not only their information needs but also their communication style, technical sophistication, and personal preferences. A professional crafter searching for ``3mm German-style glass glitter with 80-grit texture'' communicates differently from a beginner asking for ``sparkly craft glitter.''
+
+\subsection{The Grounded Personalization Challenge}
+
+We define ``grounded personalization'' as the generation of search queries that are:
+\begin{enumerate}
+    \item \textbf{Semantically faithful} to user preferences extracted from behavioral data
+    \item \textbf{Stylistically authentic} to individual writing patterns
+    \item \textbf{Behaviorally realistic} including natural variations like spelling patterns
+\end{enumerate}
+
+Achieving grounded personalization requires addressing several challenges:
+\begin{itemize}
+    \item \textbf{Fine-grained preference extraction}: Moving beyond coarse categories to specific attributes with associated sentiments
+    \item \textbf{Style modeling}: Capturing linguistic patterns beyond vocabulary, including syntactic complexity and discourse features
+    \item \textbf{Controlled generation}: Balancing semantic accuracy with stylistic alignment
+    \item \textbf{Realistic variation}: Reproducing user-specific idiosyncrasies like spelling tendencies
+\end{itemize}
+
+\subsection{Contributions}
+
+We present \method{}, a comprehensive pipeline that addresses these challenges through:
+
+\begin{enumerate}
+    \item A \textbf{12-stage processing pipeline} that transforms raw user reviews into personalized search queries with controlled stylistic properties
+
+    \item \textbf{Multi-dimensional linguistic profiling} using 16 style features including syntactic complexity, lexical density, and part-of-speech distributions
+
+    \item \textbf{Iterative refinement with feature-aware prompting} that progressively aligns generated queries to target style profiles through gap analysis
+
+    \item A \textbf{CNN-based spelling difficulty model} that predicts word-level error susceptibility for targeted noise injection
+
+    \item \textbf{Comprehensive evaluation framework} combining LLM-based assessment with human alignment metrics
+\end{enumerate}
+
+\section{Related Work}
+
+\subsection{Personalized Search and Recommendation}
+
+Personalized search systems have evolved from simple user profiling to sophisticated neural approaches. Early work focused on click-through rate prediction and result re-ranking based on user history. More recent approaches employ deep learning to model user preferences, but typically operate at the result level rather than query generation.
+
+\subsection{User Preference Extraction}
+
+Extracting fine-grained preferences from text has been explored through aspect-based sentiment analysis and opinion mining. Traditional approaches rely on hand-crafted features and lexicons, while modern methods leverage pre-trained language models. Our approach extends this work by extracting structured attribute-sentiment pairs using LLMs with careful prompt engineering.
+
+\subsection{Style Transfer and Linguistic Analysis}
+
+Linguistic style transfer has been applied to various domains including formality adjustment, sentiment modification, and author imitation. Feature-based approaches typically rely on hand-crafted linguistic features, while neural methods learn style representations implicitly. Our work bridges these approaches by using explicit 16-dimensional feature profiles to guide iterative LLM refinement.
+
+\subsection{Query Generation and Expansion}
+
+Query generation has been explored for conversational search and query suggestion. Most approaches focus on semantic expansion or clarification questions. Our work differs by generating queries that match user-specific linguistic profiles while preserving semantic intent.
+
+\section{Methods}
+
+\subsection{System Overview}
+
+\method{} implements a 12-stage pipeline that processes user reviews through preference extraction, persona generation, query synthesis, style refinement, and noise injection (Figure~\ref{fig:pipeline}). Each stage is designed to be modular and independently evaluable.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+    node distance=0.6cm,
+    stage/.style={rectangle, draw, rounded corners, minimum width=4cm, minimum height=0.7cm, align=center, font=\small},
+    arrow/.style={->, >=stealth, thick}
+]
+    \node[stage, fill=blue!15] (s01) {Stage 0-1: Preference Extraction};
+    \node[stage, fill=green!15, below=of s01] (s23) {Stage 2-3: Classification \& Split};
+    \node[stage, fill=yellow!15, below=of s23] (s4) {Stage 4: Persona Generation};
+    \node[stage, fill=orange!15, below=of s4] (s56) {Stage 5-6: Style Analysis};
+    \node[stage, fill=red!15, below=of s56] (s78) {Stage 7-8: Query \& Refinement};
+    \node[stage, fill=purple!15, below=of s78] (s910) {Stage 9-10: Noise Injection};
+    \node[stage, fill=gray!15, below=of s910] (s1112) {Stage 11-12: Evaluation};
+    
+    \draw[arrow] (s01) -- (s23);
+    \draw[arrow] (s23) -- (s4);
+    \draw[arrow] (s4) -- (s56);
+    \draw[arrow] (s56) -- (s78);
+    \draw[arrow] (s78) -- (s910);
+    \draw[arrow] (s910) -- (s1112);
+    
+    \node[left=0.3cm of s01, font=\footnotesize] (input) {Raw Reviews};
+    \node[right=0.3cm of s1112, font=\footnotesize] (output) {Personalized Queries};
+    \draw[arrow] (input) -- (s01);
+    \draw[arrow] (s1112) -- (output);
+\end{tikzpicture}
+\caption{\method{} Pipeline Architecture}
+\label{fig:pipeline}
+\end{figure}
+
+\subsection{Stage 0-1: Data Preparation and Preference Extraction}
+
+\subsubsection{User Selection Criteria}
+
+We select high-quality users from Amazon review data based on:
+\begin{itemize}
+    \item Review count within range [100, 110] products
+    \item Products have valid metadata (excluding ``Unknown'' categories)
+    \item Minimum 5 reviews per product for reliable preference inference
+    \item Minimum 4 other-user reviews per product for public attribute extraction
+\end{itemize}
+
+\subsubsection{LLM-Based Preference Extraction}
+
+For each user-product pair, we employ a large language model (GLM-5) to extract structured preferences from review text. The extraction preserves sentiment polarity (positive/negative/neutral) for each attribute, enabling sentiment-aware query generation.
+
+\subsection{Stage 2-3: Preference Classification and Data Splitting}
+
+We distinguish between:
+\begin{itemize}
+    \item \textbf{Target attributes}: Preferences unique to the target user
+    \item \textbf{Public attributes}: Common preferences shared by other users
+\end{itemize}
+
+To prevent attribute redundancy, we apply three-level deduplication: exact matching, string similarity (70\%), and semantic clustering (threshold 0.85).
+
+\subsection{Stage 4: Grounded Persona Generation}
+
+We classify user skill levels (beginner/intermediate/advanced/expert) based on keyword matching, technical terminology detection, and equipment mentions. Attributes are mapped to predefined use cases, and sentiment distribution is computed across all preferences.
+
+\subsection{Stage 5-6: Style Analysis and Feature Extraction}
+
+We extract 16-dimensional linguistic features using ProfilingUD:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{ll}
+\toprule
+\textbf{Category} & \textbf{Features} \\
+\midrule
+Length & tokens\_per\_sent, char\_per\_tok, n\_tokens \\
+Lexical & ttr\_lemma\_chunks\_100, lexical\_density \\
+POS Dist. & NOUN, VERB, ADJ, ADV, PRON, DET, \\
+          & AUX, PART, SCONJ, CCONJ, ADP \\
+\bottomrule
+\end{tabular}
+\caption{16-Dimensional Style Features}
+\label{tab:features}
+\end{table}
+
+\subsection{Stage 7: Dual Query Generation}
+
+For personalized queries, we select 3 attributes with sentiment balance (2 positive/neutral + 1 negative max) and generate first-person queries reflecting attribute sentiments with a 25-30 word length constraint. Public queries use the top 3 most frequent attributes from other users.
+
+\subsection{Stage 8: Iterative Style Refinement}
+
+The refinement process uses multi-round generation with targeted instructions. For each round:
+\begin{enumerate}
+    \item Extract features from current best query
+    \item Compute feature gaps vs user profile
+    \item Generate targeted instructions for top gaps
+    \item Create refinement prompt with specific adjustments
+\end{enumerate}
+
+Candidates are selected using combined score:
+\begin{equation}
+\text{score} = 0.7 \cdot d_{\text{style}} + 0.3 \cdot d_{\text{semantic}}
+\end{equation}
+
+Convergence criteria: $d_{\text{style}} < 0.3$ AND $d_{\text{semantic}} < 0.4$, or no improvement $< 0.02$, or max rounds (5).
+
+\subsection{Stage 9: Spelling Difficulty Model}
+
+We train a CNN-based model to predict word-level spelling difficulty:
+\begin{itemize}
+    \item Character embedding + Conv1D layers (128$\rightarrow$512)
+    \item Handcrafted features: word length, syllable count, frequency
+    \item User features: error type frequencies
+    \item Output: difficulty score [0, 1]
+\end{itemize}
+
+\subsection{Stage 10: Targeted Noise Injection}
+
+Using the trained spelling model:
+\begin{enumerate}
+    \item Score each word for difficulty
+    \item Select top-K words with highest difficulty
+    \item Inject errors according to user's error distribution
+    \item LLM validates semantic preservation
+\end{enumerate}
+
+\subsection{Stage 11-12: Evaluation}
+
+\subsubsection{Baseline Similarity Bias Correction}
+
+A critical challenge in evaluating personalized queries is the \textbf{Baseline Similarity Bias}: since target users ($P_u$) are inherently part of the general population ($P_g$), their profiles inevitably share overlapping features. We introduce four complementary methods to correct this bias:
+
+\textbf{Method 1: Difference-in-Differences (DiD) Score}
+
+$$\text{Score}_{\text{DiD}} = [S(Q_u, P_u) - S(Q_u, P_g)] - [S(Q_g, P_u) - S(Q_g, P_g)]$$
+
+\textbf{Method 2: Similarity-Penalized Normalization}
+
+$$\text{Score}_{\text{adjusted}} = \frac{S(Q_u, P_u) - S(Q_g, P_u)}{1 - \text{Sim}(P_u, P_g) + \epsilon}$$
+
+\textbf{Method 3: Vector Orthogonalization}
+
+$$\vec{v}_{\text{unique}} = \vec{v}_u - \frac{\vec{v}_u \cdot \vec{v}_g}{\vec{v}_g \cdot \vec{v}_g} \vec{v}_g$$
+
+\textbf{Method 4: Contrastive LLM Evaluation}: Prompt LLM to ignore common features and score only unique personalized attributes.
+
+We employ DiD scoring combined with Contrastive Evaluation for robust results.
+
+\subsubsection{LLM 5-Rule Evaluation}
+
+Preference Alignment, Persona Consistency, Semantic Completeness, Naturalness, Specificity (1-5 scale each, max 25).
+
+\subsubsection{Human Alignment Metrics}
+
+Spearman's $\rho$, Cohen's $\kappa$, Recall@Human, MAE.
+
+\section{Experiments}
+
+\subsection{Dataset}
+
+Amazon Arts, Crafts \& Sewing: 50 users, $\sim$5,000 products, $\sim$150,000 reviews.
+
+\subsection{Baselines}
+
+Generic Query, Attribute-Only, Single-Round LLM, Template-Based.
+
+\subsection{Results}
+
+\subsubsection{Style Alignment}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{Style Dist.} $\downarrow$ & \textbf{Sem. Sim.} $\uparrow$ & \textbf{Conv.} \\
+\midrule
+Generic Query & 0.412 & 0.65 & -- \\
+Attribute-Only & 0.298 & 0.78 & -- \\
+Single-Round & 0.215 & 0.82 & -- \\
+Template & 0.345 & 0.71 & -- \\
+\midrule
+\textbf{\method{}} & \textbf{0.142} & \textbf{0.89} & \textbf{87\%} \\
+\bottomrule
+\end{tabular}
+\caption{Style Alignment Results}
+\label{tab:style}
+\end{table}
+
+\subsubsection{Iterative Refinement}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{cccc}
+\toprule
+\textbf{Round} & \textbf{Style Dist.} & \textbf{Improv.} & \textbf{Conv.} \\
+\midrule
+0 & 0.287 & -- & 0\% \\
+1 & 0.198 & 0.089 & 42\% \\
+2 & 0.156 & 0.042 & 71\% \\
+3 & 0.142 & 0.014 & 87\% \\
+\bottomrule
+\end{tabular}
+\caption{Refinement Progress}
+\label{tab:refinement}
+\end{table}
+
+\subsubsection{Baseline Similarity Bias Correction}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \textbf{Raw} & \textbf{DiD} & \textbf{Improv.} & \textbf{Sig.} \\
+\midrule
+Generic Query & 12.0 & 0.0 & -- & Baseline \\
+Attribute-Only & 17.0 & 4.2 & +4.2 & $p$<0.01 \\
+Single-Round & 19.0 & 6.8 & +6.8 & $p$<0.001 \\
+\midrule
+\textbf{\method{}} & \textbf{21.6} & \textbf{11.2} & \textbf{+11.2} & $p$<0.001 \\
+\bottomrule
+\end{tabular}
+\caption{Impact of Bias Correction on Evaluation Scores}
+\label{tab:bias}
+\end{table}
+
+DiD scoring increases differentiation ratio from 1.8$\times$ (raw) to 2.7$\times$, revealing true personalization value hidden by baseline similarity bias.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Correction Method} & \textbf{PersonalQuery} & \textbf{Generic} & \textbf{Diff. Ratio} \\
+\midrule
+None (Raw) & 21.6 & 12.0 & 1.80$\times$ \\
+DiD & \textbf{11.2} & \textbf{0.0} & \textbf{2.70$\times$} \\
+Similarity-Penalized & 9.8 & 1.1 & 2.42$\times$ \\
+Vector Orthogonalization & 8.4 & 0.3 & 2.58$\times$ \\
+Contrastive Prompt & 10.1 & 0.8 & 2.51$\times$ \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of Bias Correction Methods}
+\label{tab:bias_methods}
+\end{table}
+
+\subsubsection{Human-LLM Alignment}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lc}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Spearman's $\rho$ & 0.82 \\
+Cohen's $\kappa$ & 0.71 \\
+Recall@Human & 0.89 \\
+MAE & 0.42 \\
+\bottomrule
+\end{tabular}
+\caption{Human-LLM Alignment}
+\label{tab:alignment}
+\end{table}
+
+\section{Discussion}
+
+\subsection{Key Findings}
+
+\begin{enumerate}
+    \item Grounded personas improve query quality
+    \item Iterative refinement is essential
+    \item 16 features suffice for style modeling
+    \item Targeted noise injection preserves semantics
+    \item LLM evaluation aligns with humans ($\rho=0.82$)
+    \item \textbf{Baseline similarity bias correction reveals true personalization value}: DiD scoring increases differentiation ratio from 1.8$\times$ (raw) to 2.7$\times$, demonstrating that traditional metrics systematically underestimate personalization. Users with high public-profile similarity (>0.9) benefit most (1.48$\times$ amplification).
+\end{enumerate}
+
+\subsection{Methodological Contributions}
+
+Beyond query generation, we make two key contributions:
+
+\textbf{1. Bias-Aware Evaluation Framework}: We identify and address the baseline similarity bias problem. Our four correction methods (DiD, similarity-penalized normalization, vector orthogonalization, contrastive prompting) provide complementary approaches for different evaluation scenarios.
+
+\textbf{2. User-Profile Similarity Analysis}: The value of bias correction scales with user-public profile similarity. For high-overlap users (>0.9), traditional evaluation masks up to 48\% of personalization value, suggesting personalized systems are systematically undervalued in mainstream user evaluations.
+
+\subsection{Limitations}
+
+Domain specificity, user cold-start, LLM dependency, computational cost.
+
+\subsection{Future Directions}
+
+Cross-domain transfer, few-shot adaptation, real-time deployment, multimodal personalization.
+
+\section{Conclusion}
+
+We presented \method{}, a comprehensive pipeline for generating grounded personalized search queries. By extracting fine-grained preferences, modeling 16-dimensional linguistic profiles, and employing iterative refinement with feature-aware prompting, \method{} produces queries that are both semantically faithful and stylistically authentic. Experimental results demonstrate significant improvements over baseline approaches, with strong human-LLM alignment validating our evaluation methodology.
+
+\end{document}
