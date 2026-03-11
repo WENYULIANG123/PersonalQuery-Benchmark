@@ -10,12 +10,12 @@ import time
 class LLMClient:
     """Client for interacting with the LLM API."""
 
-    def __init__(self):
+    def __init__(self, model: str = "GLM-4.5V"):
         self.client = anthropic.Anthropic(
             base_url="https://api.z.ai/api/anthropic",
             api_key="db2682f8a0024278a672f762ce36d7cd.RC8PtxIy5xdlh8Uj"
         )
-        self.model = "GLM-4.5-Air"
+        self.model = model
 
     def call(self, prompt: str, max_tokens: int = 4096, temperature: float = None, max_retries: int = 5) -> str:
         """
