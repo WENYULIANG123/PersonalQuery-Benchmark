@@ -549,7 +549,6 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
 - **GLM-4.5V**: 视觉语言模型
 - **GLM-4.7**: 高级推理模型
 - **GLM-5**: 最新旗舰模型
-- **GLM-5 Two-Stage**: 两阶段重排序
 
 **运行示例**：
 
@@ -576,14 +575,6 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
      python -u .claude/skills/PersoanlQuery/14_rerank/llm_reranking/13_evaluate_glm_5_both.py \
-     --user-id A13OFOB1394G31"
-
-# GLM-5 Two-Stage
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/14_rerank/llm_reranking/13_evaluate_glm_5_two_stage.py \
      --user-id A13OFOB1394G31"
 ```
 
