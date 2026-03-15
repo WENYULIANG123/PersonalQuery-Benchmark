@@ -31,8 +31,6 @@ from .hybrid import HybridRetriever
 
 from .reranker_bert import BERTReRanker
 
-from .reranker_glm import GLMReRanker, PersonalizedGLMReRanker
-
 __all__ = [
     # Utils
     'log_with_timestamp',
@@ -56,6 +54,4 @@ __all__ = [
     'HybridRetriever',
     # ReRankers
     'BERTReRanker',
-    'GLMReRanker',
-    'PersonalizedGLMReRanker',
 ]

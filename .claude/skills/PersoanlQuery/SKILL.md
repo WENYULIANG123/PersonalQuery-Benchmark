@@ -23,7 +23,7 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
      --review-file /fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/Arts_Crafts_and_Sewing.json.gz \
      --meta-file /fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz \
      --min-reviews 100 \
-     --max-reviews 110 \
+     --max-reviews 150 \
      --max-users 10 \
      --output-dir result/personal_query/00_data_preparation"
 ```
@@ -36,16 +36,14 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 
 **运行命令**：
 ```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/01_preference_extraction/01_extract_preferences.py \
-     --input-file result/personal_query/00_data_preparation/reviews_A1BBCMQSEJN0PP.json \
+     python -u .claude/skills/PersoanlQuery/01_preference_extraction/01_batch_extract_preferences.py \
+     --input-file result/personal_query/00_data_preparation/reviews_A13OFOB1394G31.json \
      --output-dir result/personal_query/01_preference_extraction \
      --max-workers 50"
-```
-
 ---
 
 ### Stage 2: 偏好分类
@@ -131,27 +129,26 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 
 ### Stage 5: 写作风格分析
 
-**阶段描述**：分析用户的拼写和语法错误习惯，用于生成更真实的查询。
+**阶段描述**：分析用户的字符级拼写错误，进行详细的错误分类和统计，用于生成更真实的查询。
 
 **运行命令**：
 ```bash
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/05_writing_analysis/05_generate_writing_prompts.py \
+     cd /home/wlia0047/ar57/wenyu && \
+     python -u .claude/skills/PersoanlQuery/05_writing_analysis/05_character_level_errors.py \
      --reviews-file /fs04/ar57/wenyu/result/personal_query/00_data_preparation/reviews_{USER_ID}.json \
      --user-ids {USER_ID} \
-     --output-dir /fs04/ar57/wenyu/result/personal_query/05_writing_analysis/prompts"
-
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/05_writing_analysis/05_execute_writing_analysis.py \
-     --prompts-dir /fs04/ar57/wenyu/result/personal_query/05_writing_analysis/prompts \
-     --output-dir /fs04/ar57/wenyu/result/personal_query/05_writing_analysis/results"
+     --output-dir /fs04/ar57/wenyu/result/personal_query/05_writing_analysis/results \
+     --max-workers 50"
 ```
 
----
+**参数说明**：
+- `--reviews-file`: 输入的用户评论文件（Stage 0输出）
+- `--user-ids`: 处理的用户ID列表
+- `--output-dir`: 输出目录（会保存writing_analysis_{USER_ID}.json）
+- `--max-workers`: 并发处理的worker数量（默认：50，最大：50）
 
 ### Stage 6: 语言学特征提取
 
@@ -224,21 +221,26 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
 
 ### Stage 10: 靶向噪声注入
 
-**阶段描述**：根据用户错字频率分布，精确注入个性化噪声到查询中。
+**阶段描述**：根据用户真实拼写错误历史，精确注入个性化噪声到查询中。
 
 **运行命令**：
 ```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
+# 仅拼写错误模式（默认）
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/10_targeted_noisy_query/09_generate_noisy_queries.py \
-     --spelling-model-path /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/09_spelling_difficulty/09_spelling_difficulty_scorer_v1.pt \
-     --stage8-results /home/wlia0047/wenyu/result/personal_query/08_iterative_refinement/iterative_refinement_v2/iterative_results.json \
-     --writing-analysis-dir /home/wlia0047/wenyu/result/personal_query/05_writing_analysis/results \
-     --output-dir /home/wlia0047/wenyu/result/personal_query/10_targeted_noisy_query \
-     --user-ids A24FX30B20WLMV"
+     cd /home/wlia0047/ar57/wenyu && \
+     python -u .claude/skills/PersoanlQuery/10_targeted_noisy_query/10_generate_noisy_queries.py \
+     --stage7-results result/personal_query/08_iterative_refinement/iterative_refinement_v2/iterative_results.json \
+     --writing-analysis result/personal_query/05_writing_analysis/results/writing_analysis_{USER_ID}.json \
+     --output-dir result/personal_query/10_targeted_noisy_query \
+     --user-ids {USER_ID}"
 ```
 
+**参数说明**：
+- `--stage7-results`: Stage 7输出（必需）
+- `--writing-analysis`: Stage 5写作分析（必需，个性化注入必须）
+- `--user-ids`: 处理的用户ID列表
 ---
 
 ### Stage 11: 多维度评估
@@ -322,31 +324,130 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 
 **阶段描述**：使用多种检索模型对查询进行评估，计算 Precision@K, Recall@K, MAP, NDCG, MRR 等指标。
 
-**BM25**
+---
+
+#### 🚀 主脚本：批量运行所有检索方法（推荐）
+
+**脚本路径**：`.claude/skills/PersoanlQuery/13_retrieval/evaluators/run_all_retrieval.py`
+
+**包含的检索方法**（11种，排除重排序）：
+- **Dense Retrieval** (7个): ANCE, BGE, Dense, E5, MiniLM, MPNet, STAR
+- **Late Interaction** (1个): ColBERT
+- **Sparse Retrieval** (3个): BM25, Dirichlet, TF-IDF
+
+**基本用法**（运行所有检索，clean + noisy 模式）：
+
 ```bash
+cd /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/13_retrieval/evaluators
+
+# 使用 sbatch_wrapper
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
+    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+     cd /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/13_retrieval/evaluators && \
+     python run_all_retrieval.py --user-id A13OFOB1394G31"
+```
+
+**只运行 clean 或 noisy 模式**：
+
+```bash
+# 只运行 clean 模式
+python run_all_retrieval.py --user-id A13OFOB1394G31 --mode clean
+
+# 只运行 noisy 模式
+python run_all_retrieval.py --user-id A13OFOB1394G31 --mode noisy
+```
+
+**失败时继续运行**：
+
+```bash
+python run_all_retrieval.py --user-id A13OFOB1394G31 --continue-on-error
+```
+
+**参数说明**：
+- `--user-id`: 用户ID（默认：`A13OFOB1394G31`）
+- `--mode`: 查询模式 - `both`, `clean`, 或 `noisy`（默认：`both`）
+- `--query-file`: 自定义查询文件路径（默认：自动从 Stage 10 输出生成）
+- `--output-dir`: 输出目录（默认：`/fs04/ar57/wenyu/result/personal_query/13_retrieval`）
+- `--continue-on-error`: 失败时继续运行（默认：遇到错误停止）
+
+**输出**：
+- 每个方法生成一个 JSON 文件：`retrieval_{method}_{mode}_{user_id}.json`
+- 示例：`retrieval_bm25_clean_A13OFOB1394G31.json`, `retrieval_e5_noisy_A13OFOB1394G31.json`
+- **自动生成影响分析**（仅当 `--mode both` 且全部成功时）：
+  - `impact_ranking_{user_id}.txt`：按拼写错误影响排序的检索方法列表
+  - 包含：各方法受影响程度排名、关键洞察、最脆弱/最鲁棒方法
+
+**预期运行时间**：
+- 单个方法：2-10 分钟
+- 全部 22 次评估（11方法 × 2模式）：约 2-4 小时
+
+**详细文档**：`/home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/13_retrieval/evaluators/README_RUN_ALL.md`
+
+---
+
+#### 单独运行各检索方法（高级用法）
+
+**BM25 检索评估**
+
+脚本路径：`.claude/skills/PersoanlQuery/13_retrieval/evaluators/sparse_retrieval/13_evaluate_bm25.py`
+
+```bash
+# 默认模式（使用噪声查询）
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py  \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_retrieval/13_evaluate_bm25.py"
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/sparse_retrieval/13_evaluate_bm25.py"
+
+# 使用干净查询（无拼写错误）
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py  \
+    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+     cd /home/wlia0047/ar57/wenyu && \
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/sparse_retrieval/13_evaluate_bm25.py --query-mode clean"
+
+# 显式指定噪声查询
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py  \
+    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+     cd /home/wlia0047/ar57/wenyu && \
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/sparse_retrieval/13_evaluate_bm25.py --query-mode noisy"
+```
+
+**参数说明**：
+- `--query-mode`: 查询模式，可选 `noisy`（使用带噪声查询）或 `clean`（使用干净查询），默认 `noisy`
+- `--query-file`: 查询文件路径（默认：Stage 10 输出）
+- `--output-dir`: 输出目录（默认：`result/personal_query/13_retrieval`）
+- `--user-id`: 用户ID（默认：`A13OFOB1394G31`）
+
+**输出文件**：
+- Clean 模式：`retrieval_bm25_clean_{USER_ID}.json`
+- Noisy 模式：`retrieval_bm25_noisy_{USER_ID}.json`
 ```
 
 **TF-IDF**
+
+脚本路径：`.claude/skills/PersoanlQuery/13_retrieval/evaluators/sparse_retrieval/13_evaluate_tfidf.py`
+
 ```bash
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py  \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_retrieval/13_evaluate_tfidf.py"
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/sparse_retrieval/13_evaluate_tfidf.py"
 ```
 
 **Dirichlet Prior**
+
+脚本路径：`.claude/skills/PersoanlQuery/13_retrieval/evaluators/sparse_retrieval/13_evaluate_dirichlet.py`
+
 ```bash
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_retrieval/13_evaluate_dirichlet.py"
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/sparse_retrieval/13_evaluate_dirichlet.py"
 ```
 
 ---
@@ -354,30 +455,39 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
 ##### Dense Retrievers
 
 **Dense (ANCE/MiniLM-L6-v2)**
+
+脚本路径：`.claude/skills/PersoanlQuery/13_retrieval/evaluators/dense_retrieval/13_evaluate_dense.py`
+
 ```bash
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_retrieval/13_evaluate_dense.py"
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/dense_retrieval/13_evaluate_dense.py"
 ```
 
 **E5-large-v2**
+
+脚本路径：`.claude/skills/PersoanlQuery/13_retrieval/evaluators/dense_retrieval/13_evaluate_e5.py`
+
 ```bash
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_retrieval/13_evaluate_e5.py"
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/dense_retrieval/13_evaluate_e5.py"
 ```
 
 **BGE-large-en**
+
+脚本路径：`.claude/skills/PersoanlQuery/13_retrieval/evaluators/dense_retrieval/13_evaluate_bge.py`
+
 ```bash
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_retrieval/13_evaluate_bge.py"
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/dense_retrieval/13_evaluate_bge.py"
 ```
 
 ---
@@ -385,12 +495,15 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
 ##### Multi-vector Retriever
 
 **ColBERTv2**
+
+脚本路径：`.claude/skills/PersoanlQuery/13_retrieval/evaluators/late_interaction/13_evaluate_colbert.py`
+
 ```bash
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_retrieval/13_evaluate_colbert.py"
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/late_interaction/13_evaluate_colbert.py"
 ```
 
 ---
@@ -398,6 +511,9 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
 ##### SGPT / GritLM (与 STaRK 相同的 VSS 模型)
 
 **GritLM (SGPT-7B-weightedmean-nli-bitfit)**
+
+脚本路径：`.claude/skills/PersoanlQuery/13_retrieval/evaluators/dense_retrieval/13_evaluate_gritlm.py`
+
 - 使用与 STaRK 相同的 embedding 模型
 - 模型: `Muennighoff/SGPT-7B-weightedmean-nli-bitfit`
 - 这是 STaRK 论文中使用的 VSS 基线
@@ -407,29 +523,7 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_retrieval/13_evaluate_gritlm.py"
-```
-
----
-
-##### Hybrid Retrievers
-
-**Hybrid (BM25 + E5, RRF)**
-```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_retrieval/13_evaluate_hybrid_bm25_e5.py"
-```
-
-**Hybrid (BM25 + BGE, RRF)**
-```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_retrieval/13_evaluate_hybrid_bm25_bge.py"
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/dense_retrieval/13_evaluate_gritlm.py"
 ```
 
 ---
@@ -437,15 +531,20 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
 ##### Rerankers
 
 **BERT Reranker (BM25 + BERT Cross-encoder)**
+
+脚本路径：`.claude/skills/PersoanlQuery/13_retrieval/evaluators/traditional_reranking/13_evaluate_bert_reranker.py`
+
 ```bash
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_retrieval/13_evaluate_bert_reranker.py"
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/traditional_reranking/13_evaluate_bert_reranker.py"
 ```
 
 **GLM ReRanker (Standard + Personalized 双模式)**
+
+脚本路径：`.claude/skills/PersoanlQuery/13_retrieval/evaluators/llm_reranking/`
 
 架构: 两阶段检索 (BM25 召回 -> GLM API 重排)
 
@@ -457,18 +556,49 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_retrieval/13_evaluate_glm_4_5v_both.py"
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/llm_reranking/13_evaluate_glm_4_5v_both.py"
 
 # GLM-4.7
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_retrieval/13_evaluate_glm_4_7_both.py"
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/llm_reranking/13_evaluate_glm_4_7_both.py"
 
 # GLM-5
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_retrieval/13_evaluate_glm_5_both.py"
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/llm_reranking/13_evaluate_glm_5_both.py"
+
+**MiniMax ReRanker (Standard + Personalized 双模式)**
+
+脚本路径：`.claude/skills/PersoanlQuery/13_retrieval/evaluators/llm_reranking/`
+
+架构: 两阶段检索 (E5 召回 -> MiniMax API 重排)
+
+每个脚本同时运行 Standard 和 Personalized 两种评估模式。支持 500 错误自动重试。
+
+```bash
+# MiniMax-M2.5-highspeed (最新版本，高速)
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
+    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+     cd /home/wlia0047/ar57/wenyu && \
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/llm_reranking/13_evaluate_minimax_m2_5_highspeed.py"
+
+# MiniMax-M2.1
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
+    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+     cd /home/wlia0047/ar57/wenyu && \
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/llm_reranking/13_evaluate_minimax_m2_1.py"
+
+# MiniMax-M2
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
+    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+     cd /home/wlia0047/ar57/wenyu && \
+     python -u .claude/skills/PersoanlQuery/13_retrieval/evaluators/llm_reranking/13_evaluate_minimax_m2.py"
+```
