@@ -10,38 +10,58 @@
 
 ## 为什么需要三分类？
 
-### 问题：传统二分类的局限性
+### 核心思想：匹配查询属性值与历史评价
 
-传统的 positive/negative 二分类无法区分：
+**关键**：不是比较整个维度内的所有属性，而是**查询要求的具体属性值**在历史中的评价。
 
-```
-❌ 传统方法（混乱）:
-- Brand: Spellbinders (positive)
-- Brand: Sizzix (negative)
-- Performance: clean cutting (positive)
-- Performance: requires hand-cutting (negative)
+### 示例说明
 
-→ LLM 难以理解："negative"是用户不喜欢的，还是用户期望改进的？
-```
-
-### 解决方案：三分类
+**场景 1：查询要 Spellbinders**
 
 ```
-✅ 三分类方法（清晰）:
+查询: {"dimension": "Brand_Preference", "value": "Spellbinders"}
 
-显性偏好 (Explicit - 用户喜欢什么):
-- Brand: Spellbinders ✓
-- Performance: clean cutting ✓
+历史偏好:
+- Spellbinders: positive ✓  ← 匹配！
+- Sizzix: negative         ← 不匹配（查询没要Sizzix）
+- Ranger: positive         ← 不匹配
 
-隐性偏好 (Implicit - 用户希望改进什么):
-- Brand: Sizzix ⚠ (避免)
-- Performance: requires hand-cutting ⚠ → Expects: fully die-cut capability
-
-冲突偏好 (Conflicting - 矛盾信号):
-- (此例中无冲突)
-
-→ LLM 清楚知道：用户要什么、不要什么、以及改进方向
+分类结果: Explicit（查询要的"Spellbinders"在历史中是positive）
 ```
+
+**场景 2：查询要 Sizzix（冲突！）**
+
+```
+查询: {"dimension": "Brand_Preference", "value": "Sizzix"}
+
+历史偏好:
+- Spellbinders: positive   ← 不匹配
+- Sizzix: negative ✗       ← 匹配！但是negative！
+- Ranger: positive         ← 不匹配
+
+分类结果: Implicit（查询要的"Sizzix"在历史中是negative → 冲突！）
+→ 用户不喜欢Sizzix，但查询却要Sizzix，这是一个需要注意的矛盾
+```
+
+**场景 3：查询要的属性在历史中有正有负**
+
+```
+查询: {"dimension": "Performance", "value": "clean cutting"}
+
+历史偏好:
+- "got a clean cut": positive ✓       ← 匹配
+- "requires hand-cutting": negative ✗  ← 也匹配（都是cutting相关）
+
+分类结果: Conflicting（查询要的属性在历史中既有正面也有负面评价）
+```
+
+### 三分类定义
+
+| 分类 | 定义 | 示例 |
+|------|------|------|
+| **Explicit** | 查询属性值在历史中是 positive | 查询要 Spellbinders，历史喜欢 Spellbinders ✅ |
+| **Implicit** | 查询属性值在历史中是 negative | 查询要 Sizzix，历史不喜欢 Sizzix ⚠️（矛盾！）|
+| **Conflicting** | 查询属性值在历史中有正有负 | 查询要 clean cutting，历史中有好有坏 ⚔️ |
 
 ## 数据流
 
@@ -177,60 +197,108 @@ Score the relevance...
 
 ## 分类逻辑详解
 
+### 核心算法
+
+```python
+for each query_attribute in selected_attributes:
+    query_value = query_attribute['value']  # e.g., "Sizzix"
+    dimension = query_attribute['dimension']  # e.g., "Brand_Preference"
+    
+    # 1. 找出历史中所有匹配该dimension的属性
+    historical_attrs = find_all_attrs(dimension)
+    
+    # 2. 用模糊匹配找出与query_value匹配的历史属性
+    matched_positive = [attr for attr in historical_attrs 
+                       if fuzzy_match(attr.value, query_value) 
+                       and attr.sentiment == 'positive']
+    
+    matched_negative = [attr for attr in historical_attrs 
+                       if fuzzy_match(attr.value, query_value) 
+                       and attr.sentiment == 'negative']
+    
+    # 3. 分类
+    if matched_positive and matched_negative:
+        → Conflicting（查询值在历史中有正有负）
+    elif matched_positive:
+        → Explicit（查询值在历史中是正面）
+    elif matched_negative:
+        → Implicit（查询值在历史中是负面 → 冲突！）
+```
+
 ### 1. 显性偏好 (Explicit)
 
-**条件**: `sentiment == 'positive'`
+**条件**: 查询属性值在历史中**仅有** `positive` sentiment
 
 **示例**:
-```json
-{
-  "attribute": "Spellbinders",
-  "dimension": "Brand_Preference",
-  "sentiment": "positive",
-  "original_text": "I love my Spellbinders dies"
-}
+```python
+查询: {"dimension": "Brand_Preference", "value": "Spellbinders"}
+
+历史匹配:
+- "Spellbinders Grand Calibur": positive ✓
+- "Spellbinders dies": positive ✓
+
+分类: Explicit
+解释: 用户历史喜欢Spellbinders，查询也要Spellbinders → 完美匹配！
 ```
 
 ### 2. 隐性偏好 (Implicit)
 
-**条件**: `sentiment == 'negative'`
+**条件**: 查询属性值在历史中**仅有** `negative` sentiment
 
 **示例**:
-```json
-{
-  "attribute": "Sizzix",
-  "dimension": "Brand_Preference",
-  "sentiment": "negative",
-  "original_text": "Sizzix dies are too expensive",
-  "improvement_wish": "More affordable pricing"
-}
+```python
+查询: {"dimension": "Brand_Preference", "value": "Sizzix"}
+
+历史匹配:
+- "Sizzix Big Shot": negative ✗
+- "Sizzix dies": negative ✗
+
+分类: Implicit（冲突！）
+解释: 用户历史不喜欢Sizzix，但查询却要Sizzix → 需要警告LLM这是一个矛盾
 ```
 
 **改进期望 (improvement_wish)**:
-- 如果有：表示用户期望的改进方向
-- 如果无：表示用户简单地避免这个属性
+- 如果有：表示用户期望的改进方向（如"更便宜"）
+- 如果无：表示用户单纯避免这个属性
 
 ### 3. 冲突偏好 (Conflicting)
 
-**条件**: 同一维度内同时存在 positive 和 negative sentiment
+**条件**: 查询属性值在历史中**同时有** positive 和 negative sentiment
 
 **示例**:
-```json
-// Brand_Preference 维度
-{
-  "attribute": "Sizzix",
-  "sentiment": "positive",  // 用户A喜欢
-  "original_text": "Sizzix Big Shot is great"
-}
-{
-  "attribute": "Sizzix",
-  "sentiment": "negative",  // 用户B不喜欢
-  "original_text": "Sizzix is overpriced"
-}
+```python
+查询: {"dimension": "Performance", "value": "clean cutting"}
 
-→ 冲突检测: 同一属性"Sizzix"有不同情感
-→ 分类为 conflicting
-→ LLM 会收到提示: "查询要求优先于冲突偏好"
+历史匹配:
+- "got a clean cut": positive ✓
+- "requires hand-cutting": negative ✗
+
+分类: Conflicting
+解释: 查询要的属性在历史中评价不一致 → LLM需要权衡
+```
+
+### 模糊匹配规则
+
+```python
+def fuzzy_match(query_value, historical_value):
+    # 1. 精确匹配
+    if query_value.lower() == historical_value.lower():
+        return True
+    
+    # 2. 包含匹配
+    if query_value.lower() in historical_value.lower():
+        return True
+    if historical_value.lower() in query_value.lower():
+        return True
+    
+    # 3. Token 重叠匹配（>= 50%）
+    query_tokens = set(query_value.split())
+    hist_tokens = set(historical_value.split())
+    overlap = len(query_tokens & hist_tokens)
+    if overlap >= max(1, min(len(query_tokens), len(hist_tokens)) * 0.5):
+        return True
+    
+    return False
 ```
 
 ## 输出格式

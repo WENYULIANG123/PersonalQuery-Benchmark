@@ -15,7 +15,7 @@ import os
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from preference_classifier import PreferenceClassifier, build_three_way_persona_context
+from preference_classifier import PreferenceClassifierV2 as PreferenceClassifier, build_three_way_persona_context_v2 as build_three_way_persona_context
 
 
 def test_basic_classification():
@@ -73,7 +73,7 @@ def test_basic_classification():
     print("Formatted LLM Context:")
     print("=" * 80)
     
-    formatted = classifier.format_classified_preferences(result)
+    formatted = classifier.format_classified_preferences(result, selected_attrs)
     print(formatted)
     
     return result
@@ -234,7 +234,7 @@ def save_classification_examples():
         'category': category,
         'selected_attributes': selected_attrs,
         'classification_result': result,
-        'formatted_context': classifier.format_classified_preferences(result)
+        'formatted_context': classifier.format_classified_preferences(result, selected_attrs)
     }
     
     with open(output_file, 'w') as f:

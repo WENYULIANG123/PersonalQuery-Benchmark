@@ -12,7 +12,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from preference_classifier import build_three_way_persona_context
+from preference_classifier import build_three_way_persona_context_v2 as build_three_way_persona_context
 
 
 def example_1_basic_usage():

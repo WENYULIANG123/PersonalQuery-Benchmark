@@ -3,15 +3,13 @@
 
 from .persona_utils import classify_preference_relevance, build_persona_context
 from .preference_classifier import (
-    PreferenceClassifier,
-    build_three_way_persona_context,
-    classify_preferences
+    PreferenceClassifierV2 as PreferenceClassifier,
+    build_three_way_persona_context_v2 as build_three_way_persona_context
 )
 
 __all__ = [
     'classify_preference_relevance',
     'build_persona_context',
     'PreferenceClassifier',
-    'build_three_way_persona_context',
-    'classify_preferences'
+    'build_three_way_persona_context'
 ]
