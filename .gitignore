@@ -73,7 +73,6 @@ stark/cache/
 stark/
 data/
 result/
-.claude/
 
 # 排除独立的 git 仓库
 Amazon-C4/
