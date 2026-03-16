@@ -5,7 +5,8 @@ import anthropic
 
 
 class LLMClient:
-    def __init__(self, model: str = "MiniMax-M2.5-highspeed"):
+    #def __init__(self, model: str = "MiniMax-M2.5-highspeed"):
+    def __init__(self, model: str = "GLM-4.7"):
         self.model = model
         # MiniMax config
         self.minimax_api_key = "sk-cp-jqg2XWIob99HfZTveS5CqjO1h8BAQguTCcHG0p_vZlQ_rNqJgQLqNMwJ7AHMMwRhogi2I8A7o9FZ-f1dR2jsVNfwUsdLzicgrXm9tM8bqodav3ZhtQ0Ig-Y"
