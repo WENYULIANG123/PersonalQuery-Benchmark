@@ -1764,25 +1764,34 @@ def load_all_results(output_dir, user_ids):
 
 
 def compute_comparison_metrics(aggregated):
-    """Compute clean vs noisy comparison metrics."""
+    """Compute metrics comparison (clean vs noisy if available, else single mode)."""
     logger = logging.getLogger(__name__)
     
     comparison = {}
+    has_both_modes = False
     
     for retriever, modes_data in aggregated.items():
-        if 'clean' not in modes_data or 'noisy' not in modes_data:
+        has_clean = 'clean' in modes_data
+        has_noisy = 'noisy' in modes_data
+        
+        if not (has_clean or has_noisy):
             continue
         
         clean_metrics = {}
         noisy_metrics = {}
         
-        for metric, values in modes_data['clean'].items():
-            if values:
-                clean_metrics[metric] = np.mean(values)
+        if has_clean:
+            for metric, values in modes_data['clean'].items():
+                if values:
+                    clean_metrics[metric] = np.mean(values)
         
-        for metric, values in modes_data['noisy'].items():
-            if values:
-                noisy_metrics[metric] = np.mean(values)
+        if has_noisy:
+            for metric, values in modes_data['noisy'].items():
+                if values:
+                    noisy_metrics[metric] = np.mean(values)
+        
+        if has_clean and has_noisy:
+            has_both_modes = True
         
         comparison[retriever] = {
             'clean': clean_metrics,
@@ -1790,134 +1799,132 @@ def compute_comparison_metrics(aggregated):
             'degradation': {}
         }
         
-        for metric in clean_metrics.keys():
-            if metric in noisy_metrics:
-                clean_val = clean_metrics[metric]
-                noisy_val = noisy_metrics[metric]
-                if clean_val > 0:
-                    degradation = (noisy_val - clean_val) / clean_val * 100
-                else:
-                    degradation = 0
-                comparison[retriever]['degradation'][metric] = degradation
+        if has_both_modes:
+            for metric in clean_metrics.keys():
+                if metric in noisy_metrics:
+                    clean_val = clean_metrics[metric]
+                    noisy_val = noisy_metrics[metric]
+                    if clean_val > 0:
+                        degradation = (noisy_val - clean_val) / clean_val * 100
+                    else:
+                        degradation = 0
+                    comparison[retriever]['degradation'][metric] = degradation
     
-    return comparison
+    return comparison, has_both_modes
 
 
-def print_comparison_report(comparison):
-    """Print comprehensive clean vs noisy comparison report."""
+def print_comparison_report(comparison, has_both_modes=False):
+    """Print retriever metrics report (clean vs noisy if available, else clean only)."""
     logger = logging.getLogger(__name__)
     
     print("\n" + "="*100)
-    print("🔥 CLEAN vs NOISY 性能对比分析 - 全量评估结果".center(100))
+    if has_both_modes:
+        print("🔥 CLEAN vs NOISY 性能对比分析 - 全量评估结果".center(100))
+    else:
+        print("📊 检索器性能评估结果（Clean Mode）".center(100))
     print("="*100)
     
-    # Key metrics for ranking
-    key_metrics = ['ndcg@10', 'p@1', 'p@10', 'map@10', 'mrr@10', 'r@10']
-    
-    # Normalize metric names for comparison
     normalized_comparison = {}
     for retriever, data in comparison.items():
         normalized_comparison[retriever] = {
             'clean': {k.lower(): v for k, v in data['clean'].items()},
-            'noisy': {k.lower(): v for k, v in data['noisy'].items()},
+            'noisy': {k.lower(): v for k, v in data['noisy'].items()} if data['noisy'] else {},
         }
-        # Compute degradation
-        normalized_comparison[retriever]['degradation'] = {}
-        for metric in normalized_comparison[retriever]['clean'].keys():
-            c = normalized_comparison[retriever]['clean'][metric]
-            n = normalized_comparison[retriever]['noisy'].get(metric, c)
-            if c > 0:
-                degradation = (n - c) / c * 100
-            else:
-                degradation = 0
-            normalized_comparison[retriever]['degradation'][metric] = degradation
-    
-    # Print NDCG@10 ranking (most important)
-    print("\n📊 核心指标排序 (NDCG@10 - 最重要)")
-    print("─" * 100)
     
     ndcg_ranking = []
     for retriever, data in normalized_comparison.items():
         ndcg_clean = data['clean'].get('ndcg@10', 0)
-        ndcg_noisy = data['noisy'].get('ndcg@10', 0)
-        ndcg_deg = data['degradation'].get('ndcg@10', 0)
+        ndcg_noisy = data['noisy'].get('ndcg@10', 0) if data['noisy'] else 0
+        if ndcg_clean > 0 and ndcg_noisy > 0:
+            ndcg_deg = (ndcg_noisy - ndcg_clean) / ndcg_clean * 100
+        else:
+            ndcg_deg = 0
         ndcg_ranking.append((retriever, ndcg_clean, ndcg_noisy, ndcg_deg))
     
     ndcg_ranking.sort(key=lambda x: x[1], reverse=True)
     
-    print(f"{'排名':<6} {'模型':<12} {'Clean':<12} {'Noisy':<12} {'变化':<12} {'评级':<12}")
+    print("\n📊 检索器性能排序 (NDCG@10)")
+    print("─" * 100)
+    
+    if has_both_modes:
+        print(f"{'排名':<6} {'模型':<12} {'Clean':<12} {'Noisy':<12} {'变化':<12} {'评级':<12}")
+    else:
+        print(f"{'排名':<6} {'模型':<12} {'NDCG@10':<12} {'P@1':<12} {'P@10':<12} {'MAP@10':<12}")
+    
     print("─" * 100)
     for idx, (retriever, clean, noisy, deg) in enumerate(ndcg_ranking, 1):
-        if deg > 0:
-            rating = "✅ 提升!" if deg > 1 else "✅ 稳定"
-            change = f"↑ +{deg:.2f}%"
-        else:
-            if deg > -2:
-                rating = "✅ 优秀"
-            elif deg > -5:
-                rating = "✓ 良好"
-            elif deg > -10:
-                rating = "⚠️ 一般"
+        if has_both_modes:
+            if deg > 0:
+                rating = "✅ 提升!" if deg > 1 else "✅ 稳定"
+                change = f"↑ +{deg:.2f}%"
             else:
-                rating = "❌ 极差"
-            change = f"↓ {deg:.2f}%"
-        
-        print(f"{idx:<6} {retriever:<12} {clean:<12.4f} {noisy:<12.4f} {change:<12} {rating:<12}")
+                if deg > -2:
+                    rating = "✅ 优秀"
+                elif deg > -5:
+                    rating = "✓ 良好"
+                else:
+                    rating = "⚠️ 一般"
+                change = f"↓ {deg:.2f}%"
+            print(f"{idx:<6} {retriever:<12} {clean:<12.4f} {noisy:<12.4f} {change:<12} {rating:<12}")
+        else:
+            p1 = normalized_comparison[retriever]['clean'].get('p@1', 0)
+            p10 = normalized_comparison[retriever]['clean'].get('p@10', 0)
+            map10 = normalized_comparison[retriever]['clean'].get('map@10', 0)
+            print(f"{idx:<6} {retriever:<12} {clean:<12.4f} {p1:<12.4f} {p10:<12.4f} {map10:<12.4f}")
     
-    # Print all metrics comparison
     print("\n" + "="*100)
-    print("📈 全指标对比矩阵")
+    print("📈 全指标对比 (Clean Mode)")
     print("="*100)
     
-    for retriever, data in normalized_comparison.items():
-        print(f"\n{retriever}")
+    for retriever in sorted(normalized_comparison.keys()):
+        data = normalized_comparison[retriever]
+        print(f"\n{retriever.upper()}")
         print("─" * 80)
         
         metrics_to_show = ['p@1', 'p@10', 'ndcg@10', 'map@10', 'r@10']
-        
         for metric in metrics_to_show:
             clean = data['clean'].get(metric, 0)
-            noisy = data['noisy'].get(metric, 0)
-            deg = data['degradation'].get(metric, 0)
+            noisy = data['noisy'].get(metric, 0) if data['noisy'] else 0
             
-            indicator = "↑" if deg > 0 else "↓"
-            status = "✅" if abs(deg) < 2 else ""
-            
-            print(f"  {metric:<10} Clean: {clean:.4f}  Noisy: {noisy:.4f}  变化: {indicator} {deg:+.2f}%  {status}")
+            if has_both_modes and noisy > 0:
+                deg = (noisy - clean) / clean * 100 if clean > 0 else 0
+                indicator = "↑" if deg > 0 else "↓"
+                print(f"  {metric:<10} Clean: {clean:.4f}  Noisy: {noisy:.4f}  变化: {indicator} {deg:+.2f}%")
+            else:
+                print(f"  {metric:<10} {clean:.4f}")
     
-    # Print robustness ranking
-    print("\n" + "="*100)
-    print("🛡️ 噪声鲁棒性排名 (NDCG@10 降幅)")
-    print("="*100)
-    
-    robustness_ranking = []
-    for retriever, data in normalized_comparison.items():
-        ndcg_deg = data['degradation'].get('ndcg@10', 0)
-        robustness_ranking.append((retriever, ndcg_deg))
-    
-    robustness_ranking.sort(key=lambda x: x[1], reverse=True)
-    
-    print(f"\n{'排名':<6} {'模型':<12} {'降幅':<12} {'评级':<20} {'特征':<30}")
-    print("─" * 80)
-    
-    for idx, (retriever, deg) in enumerate(robustness_ranking, 1):
-        if deg > 0:
-            rating = "🟢 免疫"
-            feature = "唯一提升的模型"
-        elif deg > -2:
-            rating = "✅ 极稳定"
-            feature = "性能最稳定"
-        elif deg > -5:
-            rating = "✓ 稳定"
-            feature = "容错性好"
-        elif deg > -10:
-            rating = "⚠️ 一般"
-            feature = "中等敏感"
-        else:
-            rating = "❌ 极差"
-            feature = "噪声敏感"
+    if has_both_modes:
+        print("\n" + "="*100)
+        print("🛡️ 噪声鲁棒性排名 (NDCG@10 降幅)")
+        print("="*100)
         
-        print(f"{idx:<6} {retriever:<12} {deg:+.2f}%{' ':<6} {rating:<20} {feature:<30}")
+        robustness_ranking = []
+        for idx, (retriever, clean, noisy, deg) in enumerate(ndcg_ranking):
+            robustness_ranking.append((retriever, deg))
+        
+        robustness_ranking.sort(key=lambda x: x[1], reverse=True)
+        
+        print(f"\n{'排名':<6} {'模型':<12} {'降幅':<12} {'评级':<20} {'特征':<30}")
+        print("─" * 80)
+        
+        for idx, (retriever, deg) in enumerate(robustness_ranking, 1):
+            if deg > 0:
+                rating = "🟢 免疫"
+                feature = "唯一提升的模型"
+            elif deg > -2:
+                rating = "✅ 极稳定"
+                feature = "性能最稳定"
+            elif deg > -5:
+                rating = "✓ 稳定"
+                feature = "容错性好"
+            elif deg > -10:
+                rating = "⚠️ 一般"
+                feature = "中等敏感"
+            else:
+                rating = "❌ 极差"
+                feature = "噪声敏感"
+            
+            print(f"{idx:<6} {retriever:<12} {deg:+.2f}%{' ':<6} {rating:<20} {feature:<30}")
     
     print("\n" + "="*100)
     print("✅ 评估完成".center(100))
@@ -1958,8 +1965,8 @@ def main():
     logger.info(f"Loaded {file_count} result files")
     
     if aggregated:
-        comparison = compute_comparison_metrics(aggregated)
-        print_comparison_report(comparison)
+        comparison, has_both_modes = compute_comparison_metrics(aggregated)
+        print_comparison_report(comparison, has_both_modes)
     else:
         logger.warning("No results found for comparison analysis")
 
