@@ -2,21 +2,29 @@
 """
 Stage 4: Extract Character-Level Errors for All Selected Users
 
-主脚本：自动处理所有选中用户的评论，提取字符级拼写错误。
+主脚本：自动处理所有选中用户的评论，提取拼写和语法错误。
 根据 selected_users.json 和 reviews_{USER_ID}.json 文件，批量提取所有用户的评论错误。
+
+支持两种分析方法：
+  1. character_level (默认) - 传统字符级错误检测
+  2. p3_optimal - P3最优prompt模板 (基于MTSummit 2025论文 arXiv:2505.06004)
 
 Input: 
   - /home/wlia0047/ar57/wenyu/result/personal_query/00_data_preparation/selected_users.json
   - /home/wlia0047/ar57/wenyu/result/personal_query/00_data_preparation/reviews_{USER_ID}.json (per user)
-  - Product metadata file (for brand name extraction)
+  - Product metadata file (for brand name extraction, character_level method only)
 
 Output: 
   - /home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/writing_analysis_{user_id}.json (per user)
+  - /home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/p3_analysis_{user_id}.json (p3_optimal method)
   - /home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/all_users_summary.json (summary)
 
 Usage:
-  # Process all selected users (default)
+  # Process all selected users with character-level method (default)
   python 04_extract_all_user_errors.py
+  
+  # Process all selected users with P3 optimal template method
+  python 04_extract_all_user_errors.py --method p3_optimal
   
   # Process specific users only
   python 04_extract_all_user_errors.py --user-ids A13OFOB1394G31 A2GJX2KCUSR0EI
@@ -24,8 +32,11 @@ Usage:
   # Limit reviews per user
   python 04_extract_all_user_errors.py --max-reviews 50
   
-  # Use custom metadata file
+  # Use custom metadata file (character-level method only)
   python 04_extract_all_user_errors.py --metadata-file /path/to/metadata.json
+  
+  # P3 method with specific users
+  python 04_extract_all_user_errors.py --method p3_optimal --user-ids A13OFOB1394G31 --max-reviews 20
 """
 
 import json
@@ -99,6 +110,65 @@ def validate_user_review_files(reviews_dir: str, user_ids: List[str]) -> Set[str
         log_with_timestamp(f"WARNING: {len(missing_users)} users missing or have invalid review files")
     
     return existing_users
+
+def run_p3_analysis(
+    user_ids: List[str],
+    reviews_dir: str,
+    output_dir: str,
+    max_reviews: Optional[int] = None,
+    max_workers: int = 20
+) -> Dict:
+    """运行P3最优prompt模板分析"""
+    script_path = os.path.join(os.path.dirname(__file__), "04_p3_error_extraction.py")
+    
+    if not os.path.exists(script_path):
+        raise FileNotFoundError(f"P3 analysis script not found: {script_path}")
+    
+    log_with_timestamp("="*80)
+    log_with_timestamp("Running P3 optimal template error analysis...")
+    log_with_timestamp("(Method: MTSummit 2025 - arXiv:2505.06004)")
+    log_with_timestamp("="*80)
+    
+    failed_users = []
+    
+    for user_id in user_ids:
+        reviews_file = os.path.join(reviews_dir, f"reviews_{user_id}.json")
+        
+        log_with_timestamp(f"\n[{user_id}] Processing user with P3 template...")
+        log_with_timestamp(f"[{user_id}] Reviews file: {reviews_file}")
+        
+        cmd = [
+            sys.executable, 
+            script_path,
+            "--reviews-file", reviews_file,
+            "--user-ids", user_id,
+            "--output-dir", output_dir,
+            "--max-workers", str(max_workers)
+        ]
+        
+        if max_reviews:
+            cmd.extend(["--max-reviews", str(max_reviews)])
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=False,
+                text=True
+            )
+            log_with_timestamp(f"[{user_id}] ✓ P3 analysis completed successfully")
+            
+        except subprocess.CalledProcessError as e:
+            log_with_timestamp(f"[{user_id}] ✗ P3 analysis FAILED with return code {e.returncode}")
+            failed_users.append(user_id)
+    
+    log_with_timestamp("="*80)
+    if failed_users:
+        log_with_timestamp(f"WARNING: {len(failed_users)} users failed: {', '.join(failed_users)}")
+        return {"success": False, "failed_users": failed_users}
+    else:
+        log_with_timestamp("All users completed P3 analysis successfully!")
+        return {"success": True, "failed_users": []}
 
 def run_character_level_analysis(
     user_ids: List[str],
@@ -335,7 +405,12 @@ def main():
         help="Specific user IDs to process (default: all users from selected_users.json)"
     )
     
-    # 处理参数
+    parser.add_argument(
+        "--method",
+        choices=["character_level", "p3_optimal"],
+        default="character_level",
+        help="Analysis method: character_level (default) or p3_optimal (MTSummit 2025 template)"
+    )
     parser.add_argument(
         "--max-reviews",
         type=int,
@@ -386,19 +461,33 @@ def main():
     
     user_ids_to_process = sorted(list(existing_users))
     
-    # 运行字符级错误分析
-    result = run_character_level_analysis(
-        user_ids=user_ids_to_process,
-        reviews_dir=args.reviews_dir,
-        metadata_file=args.metadata_file,
-        output_dir=args.output_dir,
-        max_reviews=args.max_reviews,
-        max_workers=args.max_workers
-    )
+    log_with_timestamp(f"Selected analysis method: {args.method}")
     
-    if not result["success"]:
-        log_with_timestamp("ERROR: Character-level analysis failed!")
-        sys.exit(1)
+    if args.method == "p3_optimal":
+        result = run_p3_analysis(
+            user_ids=user_ids_to_process,
+            reviews_dir=args.reviews_dir,
+            output_dir=args.output_dir,
+            max_reviews=args.max_reviews,
+            max_workers=args.max_workers
+        )
+        
+        if not result["success"]:
+            log_with_timestamp("ERROR: P3 optimal template analysis failed!")
+            sys.exit(1)
+    else:
+        result = run_character_level_analysis(
+            user_ids=user_ids_to_process,
+            reviews_dir=args.reviews_dir,
+            metadata_file=args.metadata_file,
+            output_dir=args.output_dir,
+            max_reviews=args.max_reviews,
+            max_workers=args.max_workers
+        )
+        
+        if not result["success"]:
+            log_with_timestamp("ERROR: Character-level analysis failed!")
+            sys.exit(1)
     
     # 生成汇总统计
     if not args.skip_summary:
