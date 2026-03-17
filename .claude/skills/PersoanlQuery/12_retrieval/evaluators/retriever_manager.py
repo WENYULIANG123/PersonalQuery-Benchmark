@@ -182,18 +182,11 @@ class RetrieverManager:
             cached_retriever = self._load_from_cache(retriever_name, doc_hash)
             if cached_retriever is not None:
                 if use_lazy_loading and retriever_name in DENSE_RETRIEVERS:
-                    if retriever_name == 'dense':
-                        log_with_timestamp(f"[CACHE_WRAP_START] Wrapping cached {retriever_name} with PreloadedBatchedDenseRetriever...")
-                        before_type = type(cached_retriever).__name__
-                        cached_retriever = PreloadedBatchedDenseRetriever(cached_retriever)
-                        after_type = type(cached_retriever).__name__
-                        log_with_timestamp(f"[CACHE_WRAP_SUCCESS] {retriever_name}: {before_type} → {after_type}")
-                    else:
-                        log_with_timestamp(f"[CACHE_WRAP_START] Wrapping cached {retriever_name} with BatchedLazyRetrieverWrapper...")
-                        before_type = type(cached_retriever).__name__
-                        cached_retriever = BatchedLazyRetrieverWrapper(cached_retriever, batch_size=2500)
-                        after_type = type(cached_retriever).__name__
-                        log_with_timestamp(f"[CACHE_WRAP_SUCCESS] {retriever_name}: {before_type} → {after_type}")
+                    log_with_timestamp(f"[CACHE_WRAP_START] Wrapping cached {retriever_name} with PreloadedBatchedDenseRetriever...")
+                    before_type = type(cached_retriever).__name__
+                    cached_retriever = PreloadedBatchedDenseRetriever(cached_retriever)
+                    after_type = type(cached_retriever).__name__
+                    log_with_timestamp(f"[CACHE_WRAP_SUCCESS] {retriever_name}: {before_type} → {after_type}")
                 else:
                     log_with_timestamp(f"[CACHE_NO_WRAP] {retriever_name}: use_lazy_loading={use_lazy_loading}, skipping wrapper")
                 
@@ -222,18 +215,11 @@ class RetrieverManager:
                     log_with_timestamp(f"  → {retriever_name} doc_embeddings is None")
             
             if use_lazy_loading and retriever_name in DENSE_RETRIEVERS:
-                if retriever_name == 'dense':
-                    log_with_timestamp(f"[WRAP_START] Wrapping {retriever_name} with PreloadedBatchedDenseRetriever...")
-                    before_type = type(retriever).__name__
-                    retriever = PreloadedBatchedDenseRetriever(retriever)
-                    after_type = type(retriever).__name__
-                    log_with_timestamp(f"[WRAP_SUCCESS] {retriever_name}: {before_type} → {after_type}")
-                else:
-                    log_with_timestamp(f"[WRAP_START] Wrapping {retriever_name} with BatchedLazyRetrieverWrapper...")
-                    before_type = type(retriever).__name__
-                    retriever = BatchedLazyRetrieverWrapper(retriever, batch_size=2500)
-                    after_type = type(retriever).__name__
-                    log_with_timestamp(f"[WRAP_SUCCESS] {retriever_name}: {before_type} → {after_type}")
+                log_with_timestamp(f"[WRAP_START] Wrapping {retriever_name} with PreloadedBatchedDenseRetriever...")
+                before_type = type(retriever).__name__
+                retriever = PreloadedBatchedDenseRetriever(retriever)
+                after_type = type(retriever).__name__
+                log_with_timestamp(f"[WRAP_SUCCESS] {retriever_name}: {before_type} → {after_type}")
             else:
                 log_with_timestamp(f"[NO_WRAP] {retriever_name}: use_lazy_loading={use_lazy_loading}, skipping wrapper")
             
