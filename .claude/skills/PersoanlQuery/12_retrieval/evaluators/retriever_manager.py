@@ -90,20 +90,31 @@ class RetrieverManager:
     
     def _load_from_cache(self, retriever_name: str, doc_hash: str) -> Optional[Any]:
         """Load retriever from disk cache if available"""
+        log_with_timestamp(f"[LOAD_CACHE_ATTEMPT] Attempting to load {retriever_name} cache (hash={doc_hash[:8]}...)")
+        
         if retriever_name in DENSE_RETRIEVERS:
-            log_with_timestamp(f"[CACHE_LOAD_START] Loading {retriever_name} from cache...")
-            log_with_timestamp(f"  Using LazyEmbeddingCache for {retriever_name}...")
+            log_with_timestamp(f"[LOAD_CACHE_DENSE] {retriever_name} is DENSE_RETRIEVER, using LazyEmbeddingCache")
+            log_with_timestamp(f"  Calling lazy_cache.load_retriever({retriever_name}, {doc_hash[:8]}...)")
             retriever = self.lazy_cache.load_retriever(retriever_name, doc_hash)
+            log_with_timestamp(f"[LOAD_CACHE_DENSE_RESULT] lazy_cache.load_retriever returned: {type(retriever).__name__ if retriever else 'None'}")
             if retriever:
                 log_with_timestamp(f"[CACHE_LOAD_SUCCESS] Loaded {retriever_name}, embeddings deferred")
                 if hasattr(retriever, '_embeddings_path'):
                     log_with_timestamp(f"  → Embeddings reference: {retriever._embeddings_path}")
+                else:
+                    log_with_timestamp(f"  → WARNING: No _embeddings_path attribute!")
+            else:
+                log_with_timestamp(f"[LOAD_CACHE_DENSE_FAILED] lazy_cache.load_retriever returned None - will rebuild")
             return retriever
         
+        log_with_timestamp(f"[LOAD_CACHE_SPARSE] {retriever_name} is NOT dense, checking old format cache")
         cache_path = self._get_cache_path(retriever_name, doc_hash)
+        log_with_timestamp(f"  Old format cache path: {cache_path}")
+        log_with_timestamp(f"  File exists: {os.path.exists(cache_path)}")
+        
         if os.path.exists(cache_path):
             try:
-                log_with_timestamp(f"[CACHE_LOAD_START] Loading {retriever_name} from cache...")
+                log_with_timestamp(f"[CACHE_LOAD_START] Loading {retriever_name} from old format cache...")
                 cache_size_mb = os.path.getsize(cache_path) / (1024 * 1024)
                 log_with_timestamp(f"  Cache file size: {cache_size_mb:.1f} MB")
                 with open(cache_path, 'rb') as f:
@@ -112,8 +123,11 @@ class RetrieverManager:
                 log_with_timestamp(f"[CACHE_LOAD_SUCCESS] Loaded {retriever_name}, type: {type(retriever).__name__}")
                 return retriever
             except Exception as e:
-                log_with_timestamp(f"Error loading cache for {retriever_name}: {e}")
+                log_with_timestamp(f"[CACHE_LOAD_ERROR] Error loading cache for {retriever_name}: {e}")
+        else:
+            log_with_timestamp(f"[CACHE_NOT_FOUND] Old format cache file does not exist")
         
+        log_with_timestamp(f"[LOAD_CACHE_RETURN_NONE] No cache found for {retriever_name}")
         return None
     
     def _save_to_cache(self, retriever_name: str, doc_hash: str, retriever: Any):
@@ -168,15 +182,21 @@ class RetrieverManager:
         if retriever_name not in self._available_retrievers:
             raise ValueError(f"Unknown retriever: {retriever_name}")
         
+        log_with_timestamp(f"[GET_RETRIEVER] Getting {retriever_name} with {len(documents)} documents")
         doc_hash = self._compute_document_hash(documents)
+        log_with_timestamp(f"[GET_RETRIEVER_HASH] Computed doc_hash: {doc_hash}")
         cache_key = f"{retriever_name}_{doc_hash}"
+        log_with_timestamp(f"[GET_RETRIEVER_KEY] Cache key: {cache_key}")
         
         with self._cache_lock:
+            log_with_timestamp(f"[GET_RETRIEVER_LOCK] Acquired cache lock")
             if cache_key in self._retrievers:
-                log_with_timestamp(f"Using cached {retriever_name} index (memory cache)")
+                log_with_timestamp(f"[GET_RETRIEVER_MEMORY_HIT] Using {retriever_name} from memory cache")
                 return self._retrievers[cache_key]
             
+            log_with_timestamp(f"[GET_RETRIEVER_MEMORY_MISS] Not in memory cache, checking disk...")
             cached_retriever = self._load_from_cache(retriever_name, doc_hash)
+            log_with_timestamp(f"[GET_RETRIEVER_DISK_RESULT] _load_from_cache returned: {type(cached_retriever).__name__ if cached_retriever else 'None'}")
             if cached_retriever is not None:
                 if use_lazy_loading and retriever_name in DENSE_RETRIEVERS:
                     log_with_timestamp(f"[CACHE_WRAP_START] Wrapping cached {retriever_name} with PreloadedBatchedDenseRetriever...")
