@@ -237,6 +237,22 @@ class LazyRetrieverWrapper:
     def __getattr__(self, name):
         """代理所有未找到的属性到原retriever"""
         return getattr(self.retriever, name)
+    
+    def _get_device(self):
+        """获取设备，兼容各种检索器"""
+        if hasattr(self.retriever, 'device'):
+            return self.retriever.device
+        elif hasattr(self.retriever, '_model') and self.retriever._model is not None:
+            if hasattr(self.retriever._model, 'device'):
+                return self.retriever._model.device
+        elif hasattr(self.retriever, '_get_model'):
+            try:
+                model = self.retriever._get_model()
+                if hasattr(model, 'device'):
+                    return model.device
+            except:
+                pass
+        return 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
 class BatchedLazyRetrieverWrapper(LazyRetrieverWrapper):
@@ -267,7 +283,7 @@ class BatchedLazyRetrieverWrapper(LazyRetrieverWrapper):
             search_start = time.time()
             
             model = self.retriever._get_model() if hasattr(self.retriever, '_get_model') else None
-            device = self.retriever.device
+            device = self._get_device()
             
             # 编码query
             if hasattr(self.retriever, '_add_instruction'):
