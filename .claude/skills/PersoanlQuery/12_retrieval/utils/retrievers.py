@@ -430,20 +430,22 @@ class E5Retriever:
         from sentence_transformers import util
         scores = []
 
-        for i, doc_emb in enumerate(self.doc_embeddings):
-            # Handle both list elements (tensors) and numpy array rows
-            if isinstance(doc_emb, np.ndarray):
-                doc_emb = torch.from_numpy(doc_emb).to(self.device)
-            
-            if doc_emb.dim() == 1:
-                # Single-window or pooled embedding: direct cosine similarity
-                score = util.cos_sim(query_embedding, doc_emb.unsqueeze(0))[0][0].item()
-            else:
-                # Multi-window: max-pool across windows
-                window_scores = util.cos_sim(query_embedding, doc_emb)[0]
-                score = window_scores.max().item()
+         for i, doc_emb in enumerate(self.doc_embeddings):
+             # Handle both list elements (tensors) and numpy array rows
+             if isinstance(doc_emb, np.ndarray):
+                 doc_emb = torch.from_numpy(doc_emb).to(query_embedding.device)
+             else:
+                 doc_emb = doc_emb.to(query_embedding.device)
+             
+             if doc_emb.dim() == 1:
+                 # Single-window or pooled embedding: direct cosine similarity
+                 score = util.cos_sim(query_embedding, doc_emb.unsqueeze(0))[0][0].item()
+             else:
+                 # Multi-window: max-pool across windows
+                 window_scores = util.cos_sim(query_embedding, doc_emb)[0]
+                 score = window_scores.max().item()
 
-            scores.append((self.doc_ids[i], score))
+             scores.append((self.doc_ids[i], score))
 
         scores.sort(key=lambda x: -x[1])
         return scores[:top_k]
@@ -601,15 +603,16 @@ class BGERetriever:
         scores = []
 
         for i, doc_emb in enumerate(self.doc_embeddings):
-            if doc_emb.dim() == 1:
-                # 单窗口文档：直接计算余弦相似度
-                score = util.cos_sim(query_embedding, doc_emb.unsqueeze(0))[0][0].item()
-            else:
-                # 多窗口文档：计算每个窗口的分数，取最大值
-                window_scores = util.cos_sim(query_embedding, doc_emb)[0]
-                score = window_scores.max().item()
+             doc_emb = doc_emb.to(query_embedding.device)
+             if doc_emb.dim() == 1:
+                 # 单窗口文档：直接计算余弦相似度
+                 score = util.cos_sim(query_embedding, doc_emb.unsqueeze(0))[0][0].item()
+             else:
+                 # 多窗口文档：计算每个窗口的分数，取最大值
+                 window_scores = util.cos_sim(query_embedding, doc_emb)[0]
+                 score = window_scores.max().item()
 
-            scores.append((self.doc_ids[i], score))
+             scores.append((self.doc_ids[i], score))
 
         # 按分数降序排序
         scores.sort(key=lambda x: -x[1])
@@ -1135,16 +1138,21 @@ class ANCERetriever:
         log_with_timestamp(f"  ANCE index built with {len(self.doc_ids)} docs")
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """Search using ANCE embeddings"""
-        model = self._get_model()
-        query_embedding = model.encode(["query: " + query])
-        
-        from sentence_transformers import util
-        scores = util.cos_sim(query_embedding, self.doc_embeddings)[0]
-        
-        results = [(self.doc_ids[i], scores[i].item()) for i in range(len(self.doc_ids))]
-        results.sort(key=lambda x: -x[1])
-        return results[:top_k]
+         """Search using ANCE embeddings"""
+         model = self._get_model()
+         query_embedding = model.encode(["query: " + query])
+         
+         from sentence_transformers import util
+         # 确保 doc_embeddings 和 query_embedding 在同一设备上
+         doc_embeddings = self.doc_embeddings
+         if torch.is_tensor(doc_embeddings):
+             doc_embeddings = doc_embeddings.to(query_embedding.device)
+         
+         scores = util.cos_sim(query_embedding, doc_embeddings)[0]
+         
+         results = [(self.doc_ids[i], scores[i].item()) for i in range(len(self.doc_ids))]
+         results.sort(key=lambda x: -x[1])
+         return results[:top_k]
 
 
 class STARRetriever:
