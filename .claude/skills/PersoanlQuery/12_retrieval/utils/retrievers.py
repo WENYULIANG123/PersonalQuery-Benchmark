@@ -413,7 +413,7 @@ class E5Retriever:
         # 注意：我们保持 list 格式，因为不同文档可能有不同数量的窗口
         self.doc_embeddings = doc_embeddings_list
 
-        log_with_timestamp(f"  E5 index built with {len(self.doc_ids)} docs:")
+         log_with_timestamp(f"  E5 index built with {len(self.doc_ids)} docs:")
          log_with_timestamp(f"    - Single window: {window_stats['single_window']} docs")
          log_with_timestamp(f"    - Multi window: {window_stats['multi_window']} docs")
          log_with_timestamp(f"    - Max windows per doc: {window_stats['max_windows']}")
