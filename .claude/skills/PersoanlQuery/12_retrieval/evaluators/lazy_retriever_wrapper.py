@@ -146,7 +146,7 @@ class LazyRetrieverWrapper:
         import numpy as np
         
         doc_embeddings = None
-        device = self.retriever.device
+        device = self._get_device()
         
         if hasattr(self.retriever, 'doc_embeddings') and self.retriever.doc_embeddings is not None:
             doc_embeddings = self.retriever.doc_embeddings
