@@ -409,14 +409,14 @@ class E5Retriever:
                     if torch.allclose(doc_embeddings_list[0], doc_embeddings_list[1], atol=1e-7):
                         log_with_timestamp(f"    [E5_FIT_DEBUG] ⚠️ WARNING: First two embeddings are IDENTICAL!")
 
-         # 将列表转换为 tensor（对于单窗口的文档）
-         # 注意：我们保持 list 格式，因为不同文档可能有不同数量的窗口
-         self.doc_embeddings = doc_embeddings_list
+        # 将列表转换为 tensor（对于单窗口的文档）
+        # 注意：我们保持 list 格式，因为不同文档可能有不同数量的窗口
+        self.doc_embeddings = doc_embeddings_list
 
-         log_with_timestamp(f"  E5 index built with {len(self.doc_ids)} docs:")
-         log_with_timestamp(f"    - Single window: {window_stats['single_window']} docs")
-         log_with_timestamp(f"    - Multi window: {window_stats['multi_window']} docs")
-         log_with_timestamp(f"    - Max windows per doc: {window_stats['max_windows']}")
+        log_with_timestamp(f"  E5 index built with {len(self.doc_ids)} docs:")
+        log_with_timestamp(f"    - Single window: {window_stats['single_window']} docs")
+        log_with_timestamp(f"    - Multi window: {window_stats['multi_window']} docs")
+        log_with_timestamp(f"    - Max windows per doc: {window_stats['max_windows']}")
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using E5 (supports both multi-window and pooled embeddings)"""
