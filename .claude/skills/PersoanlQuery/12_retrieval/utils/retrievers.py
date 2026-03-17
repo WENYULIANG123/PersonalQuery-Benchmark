@@ -414,41 +414,41 @@ class E5Retriever:
         self.doc_embeddings = doc_embeddings_list
 
         log_with_timestamp(f"  E5 index built with {len(self.doc_ids)} docs:")
-        log_with_timestamp(f"    - Single window: {window_stats['single_window']} docs")
-        log_with_timestamp(f"    - Multi window: {window_stats['multi_window']} docs")
-        log_with_timestamp(f"    - Max windows per doc: {window_stats['max_windows']}")
+         log_with_timestamp(f"    - Single window: {window_stats['single_window']} docs")
+         log_with_timestamp(f"    - Multi window: {window_stats['multi_window']} docs")
+         log_with_timestamp(f"    - Max windows per doc: {window_stats['max_windows']}")
 
-     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-         """Search using E5 (supports both multi-window and pooled embeddings)"""
-         model = self._get_model()
+    def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+        """Search using E5 (supports both multi-window and pooled embeddings)"""
+        model = self._get_model()
 
-         # 添加 query 前缀
-         query_with_prefix = self._add_instruction(query, is_query=True)
-         query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
+        # 添加 query 前缀
+        query_with_prefix = self._add_instruction(query, is_query=True)
+        query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
 
-         # 计算每个文档的分数
-         from sentence_transformers import util
-         scores = []
+        # 计算每个文档的分数
+        from sentence_transformers import util
+        scores = []
 
-         for i, doc_emb in enumerate(self.doc_embeddings):
-             # Handle both list elements (tensors) and numpy array rows
-             if isinstance(doc_emb, np.ndarray):
-                 doc_emb = torch.from_numpy(doc_emb).to(query_embedding.device)
-             else:
-                 doc_emb = doc_emb.to(query_embedding.device)
-             
-             if doc_emb.dim() == 1:
-                 # Single-window or pooled embedding: direct cosine similarity
-                 score = util.cos_sim(query_embedding, doc_emb.unsqueeze(0))[0][0].item()
-             else:
-                 # Multi-window: max-pool across windows
-                 window_scores = util.cos_sim(query_embedding, doc_emb)[0]
-                 score = window_scores.max().item()
+        for i, doc_emb in enumerate(self.doc_embeddings):
+            # Handle both list elements (tensors) and numpy array rows
+            if isinstance(doc_emb, np.ndarray):
+                doc_emb = torch.from_numpy(doc_emb).to(query_embedding.device)
+            else:
+                doc_emb = doc_emb.to(query_embedding.device)
+            
+            if doc_emb.dim() == 1:
+                # Single-window or pooled embedding: direct cosine similarity
+                score = util.cos_sim(query_embedding, doc_emb.unsqueeze(0))[0][0].item()
+            else:
+                # Multi-window: max-pool across windows
+                window_scores = util.cos_sim(query_embedding, doc_emb)[0]
+                score = window_scores.max().item()
 
-             scores.append((self.doc_ids[i], score))
+            scores.append((self.doc_ids[i], score))
 
-         scores.sort(key=lambda x: -x[1])
-         return scores[:top_k]
+        scores.sort(key=lambda x: -x[1])
+        return scores[:top_k]
 
 
 class BGERetriever:
