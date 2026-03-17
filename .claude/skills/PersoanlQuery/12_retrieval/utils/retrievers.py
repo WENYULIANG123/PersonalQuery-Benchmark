@@ -426,9 +426,9 @@ class E5Retriever:
         query_with_prefix = self._add_instruction(query, is_query=True)
         query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
 
-        # 计算每个文档的分数
-        from sentence_transformers import util
-        scores = []
+         # 计算每个文档的分数
+         from sentence_transformers import util
+         scores = []
 
          for i, doc_emb in enumerate(self.doc_embeddings):
              # Handle both list elements (tensors) and numpy array rows
@@ -447,8 +447,8 @@ class E5Retriever:
 
              scores.append((self.doc_ids[i], score))
 
-        scores.sort(key=lambda x: -x[1])
-        return scores[:top_k]
+         scores.sort(key=lambda x: -x[1])
+         return scores[:top_k]
 
 
 class BGERetriever:
@@ -602,7 +602,7 @@ class BGERetriever:
         from sentence_transformers import util
         scores = []
 
-        for i, doc_emb in enumerate(self.doc_embeddings):
+         for i, doc_emb in enumerate(self.doc_embeddings):
              doc_emb = doc_emb.to(query_embedding.device)
              if doc_emb.dim() == 1:
                  # 单窗口文档：直接计算余弦相似度
@@ -1137,7 +1137,7 @@ class ANCERetriever:
         self.doc_embeddings = model.encode(texts, show_progress_bar=True, batch_size=32)
         log_with_timestamp(f"  ANCE index built with {len(self.doc_ids)} docs")
 
-    def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
          """Search using ANCE embeddings"""
          model = self._get_model()
          query_embedding = model.encode(["query: " + query])
