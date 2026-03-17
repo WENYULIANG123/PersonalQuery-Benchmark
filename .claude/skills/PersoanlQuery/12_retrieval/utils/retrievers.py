@@ -249,9 +249,17 @@ class DenseRetriever:
         model = self._get_model()
         query_embedding = model.encode([query])
         
+        # Ensure doc_embeddings is on the same device as query_embedding
+        doc_embeddings = self.doc_embeddings
+        if isinstance(doc_embeddings, np.ndarray):
+            # Convert numpy array to torch tensor on the correct device
+            doc_embeddings = torch.from_numpy(doc_embeddings).float().to(query_embedding.device)
+        elif torch.is_tensor(doc_embeddings) and doc_embeddings.device != query_embedding.device:
+            doc_embeddings = doc_embeddings.to(query_embedding.device)
+        
         # Cosine similarity
         from sentence_transformers import util
-        scores = util.cos_sim(query_embedding, self.doc_embeddings)[0]
+        scores = util.cos_sim(query_embedding, doc_embeddings)[0]
         
         results = [(self.doc_ids[i], scores[i].item()) for i in range(len(self.doc_ids))]
         results.sort(key=lambda x: -x[1])
@@ -603,18 +611,19 @@ class BGERetriever:
         scores = []
 
         for i, doc_emb in enumerate(self.doc_embeddings):
-            doc_emb = doc_emb.to(query_embedding.device)
+            if isinstance(doc_emb, np.ndarray):
+                doc_emb = torch.from_numpy(doc_emb).float()
+            if torch.is_tensor(doc_emb):
+                doc_emb = doc_emb.to(query_embedding.device)
+            
             if doc_emb.dim() == 1:
-                # 单窗口文档：直接计算余弦相似度
                 score = util.cos_sim(query_embedding, doc_emb.unsqueeze(0))[0][0].item()
             else:
-                # 多窗口文档：计算每个窗口的分数，取最大值
                 window_scores = util.cos_sim(query_embedding, doc_emb)[0]
                 score = window_scores.max().item()
 
             scores.append((self.doc_ids[i], score))
 
-        # 按分数降序排序
         scores.sort(key=lambda x: -x[1])
         return scores[:top_k]
 
@@ -1117,12 +1126,14 @@ class ANCERetriever:
         self.doc_embeddings = None
         self.doc_ids = []
         self.all_metadata = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     def _get_model(self):
         if self.model is None:
             log_with_timestamp(f"  Loading ANCE-compatible model: {self.model_name}")
             from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(self.model_name)
+            self.model = SentenceTransformer(self.model_name, device=self.device)
+            log_with_timestamp(f"  Using device: {self.device}")
         return self.model
 
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
@@ -1143,9 +1154,10 @@ class ANCERetriever:
         query_embedding = model.encode(["query: " + query])
         
         from sentence_transformers import util
-        # 确保 doc_embeddings 和 query_embedding 在同一设备上
         doc_embeddings = self.doc_embeddings
-        if torch.is_tensor(doc_embeddings):
+        if isinstance(doc_embeddings, np.ndarray):
+            doc_embeddings = torch.from_numpy(doc_embeddings).float().to(query_embedding.device)
+        elif torch.is_tensor(doc_embeddings) and doc_embeddings.device != query_embedding.device:
             doc_embeddings = doc_embeddings.to(query_embedding.device)
         
         scores = util.cos_sim(query_embedding, doc_embeddings)[0]
@@ -1168,12 +1180,14 @@ class STARRetriever:
         self.doc_embeddings = None
         self.doc_ids = []
         self.all_metadata = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     def _get_model(self):
         if self.model is None:
             log_with_timestamp(f"  Loading STAR-compatible model: {self.model_name}")
             from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(self.model_name)
+            self.model = SentenceTransformer(self.model_name, device=self.device)
+            log_with_timestamp(f"  Using device: {self.device}")
         return self.model
 
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
@@ -1193,8 +1207,14 @@ class STARRetriever:
         model = self._get_model()
         query_embedding = model.encode([query])
         
+        doc_embeddings = self.doc_embeddings
+        if isinstance(doc_embeddings, np.ndarray):
+            doc_embeddings = torch.from_numpy(doc_embeddings).float().to(query_embedding.device)
+        elif torch.is_tensor(doc_embeddings) and doc_embeddings.device != query_embedding.device:
+            doc_embeddings = doc_embeddings.to(query_embedding.device)
+        
         from sentence_transformers import util
-        scores = util.cos_sim(query_embedding, self.doc_embeddings)[0]
+        scores = util.cos_sim(query_embedding, doc_embeddings)[0]
         
         results = [(self.doc_ids[i], scores[i].item()) for i in range(len(self.doc_ids))]
         results.sort(key=lambda x: -x[1])
