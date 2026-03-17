@@ -1,5 +1,1325 @@
 #!/usr/bin/env python3
 """
+Full-scale dense retrieval evaluation with all modules integrated.
+"""
+
+
+
+# ========== document_manager.py ==========
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+
+log_with_timestamp = utils.log_with_timestamp
+load_product_metadata = utils.load_product_metadata
+load_reviews_for_products = utils.load_reviews_for_products
+load_qa_for_products = utils.load_qa_for_products
+load_preprocessed_products = utils.load_preprocessed_products
+build_document_text = utils.build_document_text
+
+
+class DocumentManager:
+    """
+    Singleton document manager that loads and caches documents for all retrievers.
+    
+    Features:
+    - Loads documents once per category
+    - Thread-safe for parallel retriever execution
+    - Memory-efficient caching with optional disk persistence
+    - Supports incremental loading for specific ASINs
+    """
+    
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super(DocumentManager, cls).__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self):
+        if self._initialized:
+            return
+            
+        self._initialized = True
+        self._documents_cache = {}
+        self._metadata_cache = {}
+        self._loaded_asins = {}
+        self._cache_stats = {
+            'hits': 0,
+            'misses': 0,
+            'loads': 0
+        }
+        self._cache_lock = threading.Lock()
+        
+        self.base_dir = "/home/wlia0047/ar57/wenyu"
+        self.cache_dir = os.path.join(self.base_dir, "result/personal_query/12_retrieval/document_cache")
+        os.makedirs(self.cache_dir, exist_ok=True)
+        
+        self.category_files = {
+            "Arts_Crafts_and_Sewing": {
+                "meta": os.path.join(self.base_dir, "data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz"),
+                "review": os.path.join(self.base_dir, "data/Amazon-Reviews-2018/raw/Arts_Crafts_and_Sewing.json.gz"),
+                "qa": os.path.join(self.base_dir, "data/Amazon-Reviews-2018/raw/qa_Arts_Crafts_and_Sewing.json.gz")
+            }
+        }
+    
+    def get_cache_stats(self) -> Dict:
+        """Get cache performance statistics"""
+        with self._cache_lock:
+            total = self._cache_stats['hits'] + self._cache_stats['misses']
+            hit_rate = self._cache_stats['hits'] / total if total > 0 else 0
+            return {
+                **self._cache_stats,
+                'hit_rate': hit_rate,
+                'categories_loaded': list(self._documents_cache.keys()),
+                'total_documents': sum(len(docs) for docs in self._documents_cache.values())
+            }
+    
+    def clear_cache(self, category: Optional[str] = None):
+        """Clear cached documents for a specific category or all categories"""
+        with self._cache_lock:
+            if category:
+                self._documents_cache.pop(category, None)
+                self._metadata_cache.pop(category, None)
+                self._loaded_asins.pop(category, None)
+                log_with_timestamp(f"Cleared cache for category: {category}")
+            else:
+                self._documents_cache.clear()
+                self._metadata_cache.clear()
+                self._loaded_asins.clear()
+                log_with_timestamp("Cleared all document caches")
+    
+    def _get_cache_file_path(self, category: str, cache_type: str) -> str:
+        """Get path for cache file"""
+        return os.path.join(self.cache_dir, f"{category}_{cache_type}.pkl")
+    
+    def _load_from_disk_cache(self, category: str) -> Optional[Tuple[Dict, Dict]]:
+        """Try to load documents from disk cache"""
+        docs_cache_file = self._get_cache_file_path(category, "documents")
+        meta_cache_file = self._get_cache_file_path(category, "metadata")
+        
+        if os.path.exists(docs_cache_file) and os.path.exists(meta_cache_file):
+            try:
+                cache_age = datetime.now().timestamp() - os.path.getmtime(docs_cache_file)
+                if cache_age < 86400:
+                    log_with_timestamp(f"Loading {category} documents from disk cache...")
+                    with open(docs_cache_file, 'rb') as f:
+                        documents = pickle.load(f)
+                    with open(meta_cache_file, 'rb') as f:
+                        metadata = pickle.load(f)
+                    return documents, metadata
+                else:
+                    log_with_timestamp(f"Disk cache for {category} is stale (>{24}h old)")
+            except Exception as e:
+                log_with_timestamp(f"Error loading disk cache: {e}")
+        return None
+    
+    def _save_to_disk_cache(self, category: str, documents: Dict, metadata: Dict):
+        """Save documents to disk cache"""
+        try:
+            docs_cache_file = self._get_cache_file_path(category, "documents")
+            meta_cache_file = self._get_cache_file_path(category, "metadata")
+            
+            with open(docs_cache_file, 'wb') as f:
+                pickle.dump(documents, f)
+            with open(meta_cache_file, 'wb') as f:
+                pickle.dump(metadata, f)
+            
+            log_with_timestamp(f"Saved {category} documents to disk cache")
+        except Exception as e:
+            log_with_timestamp(f"Error saving disk cache: {e}")
+    
+    def load_documents(self, category: str, required_asins: Set[str], 
+                      use_preprocessed: bool = True,
+                      max_reviews_per_product: int = 10,
+                      max_qa_per_product: int = 25) -> Tuple[List[Dict], Dict]:
+        """
+        Load documents for specified ASINs in a category.
+        
+        Returns:
+        - List of document dictionaries for the requested ASINs
+        - Full metadata dictionary for all products
+        """
+        with self._cache_lock:
+            if category in self._loaded_asins:
+                loaded = self._loaded_asins[category]
+                if required_asins.issubset(loaded):
+                    self._cache_stats['hits'] += 1
+                    log_with_timestamp(f"Cache hit: All {len(required_asins)} ASINs already loaded for {category}")
+                    
+                    requested_docs = []
+                    for asin in required_asins:
+                        if asin in self._documents_cache[category]:
+                            requested_docs.append(self._documents_cache[category][asin])
+                        else:
+                            requested_docs.append({
+                                'asin': asin,
+                                'title': '',
+                                'brand': '',
+                                'category': [],
+                                'feature': [],
+                                'description': [],
+                                'rank': '',
+                                'also_buy': [],
+                                'also_view': [],
+                                'reviews': []
+                            })
+                    
+                    return requested_docs, self._metadata_cache[category]
+            
+            self._cache_stats['misses'] += 1
+            self._cache_stats['loads'] += 1
+            
+            if category not in self.category_files:
+                raise ValueError(f"Unknown category: {category}")
+            
+            files = self.category_files[category]
+            
+            if category not in self._documents_cache:
+                cache_result = self._load_from_disk_cache(category)
+                if cache_result:
+                    documents, metadata = cache_result
+                    self._documents_cache[category] = documents
+                    self._metadata_cache[category] = metadata
+                    self._loaded_asins[category] = set(documents.keys())
+                    
+                    if required_asins.issubset(self._loaded_asins[category]):
+                        requested_docs = [
+                            documents.get(asin, {
+                                'asin': asin,
+                                'title': '',
+                                'brand': '',
+                                'category': [],
+                                'feature': [],
+                                'description': [],
+                                'rank': '',
+                                'also_buy': [],
+                                'also_view': [],
+                                'reviews': []
+                            }) for asin in required_asins
+                        ]
+                        return requested_docs, metadata
+            
+            if category in self._loaded_asins:
+                missing_asins = required_asins - self._loaded_asins[category]
+                if missing_asins:
+                    log_with_timestamp(f"Loading {len(missing_asins)} additional ASINs for {category}")
+                    
+                    products, _ = load_product_metadata(files["meta"], missing_asins)
+                    
+                    if os.path.exists(files["review"]):
+                        products = load_reviews_for_products(
+                            files["review"], products, 
+                            max_reviews_per_product=max_reviews_per_product
+                        )
+                    if os.path.exists(files["qa"]):
+                        products = load_qa_for_products(
+                            files["qa"], products,
+                            max_qa_per_product=max_qa_per_product
+                        )
+                    
+                    self._documents_cache[category].update(products)
+                    self._loaded_asins[category].update(missing_asins)
+            else:
+                log_with_timestamp(f"Initial load of {len(required_asins)} ASINs for {category}")
+                
+                preprocessed_cache_dir = os.path.join(
+                    self.base_dir, "result/personal_query/12_retrieval/cache"
+                )
+                
+                if use_preprocessed and os.path.exists(
+                    os.path.join(preprocessed_cache_dir, f"products_{category}.pkl")
+                ):
+                    log_with_timestamp("Loading from preprocessed cache...")
+                    products, metadata = load_preprocessed_products(
+                        preprocessed_cache_dir, category, required_asins
+                    )
+                else:
+                    log_with_timestamp("Loading from raw files...")
+                    products, metadata = load_product_metadata(files["meta"], required_asins)
+                    
+                    if os.path.exists(files["review"]):
+                        products = load_reviews_for_products(
+                            files["review"], products,
+                            max_reviews_per_product=max_reviews_per_product
+                        )
+                    if os.path.exists(files["qa"]):
+                        products = load_qa_for_products(
+                            files["qa"], products,
+                            max_qa_per_product=max_qa_per_product
+                        )
+                
+                self._documents_cache[category] = products
+                self._metadata_cache[category] = metadata
+                self._loaded_asins[category] = set(products.keys())
+                
+                self._save_to_disk_cache(category, products, metadata)
+            
+            requested_docs = []
+            for asin in required_asins:
+                if asin in self._documents_cache[category]:
+                    requested_docs.append(self._documents_cache[category][asin])
+                else:
+                    requested_docs.append({
+                        'asin': asin,
+                        'title': '',
+                        'brand': '',
+                        'category': [],
+                        'feature': [],
+                        'description': [],
+                        'rank': '',
+                        'also_buy': [],
+                        'also_view': [],
+                        'reviews': []
+                    })
+            
+            log_with_timestamp(
+                f"Loaded {len(requested_docs)} documents for {category} "
+                f"(cache now contains {len(self._documents_cache[category])} documents)"
+            )
+            
+            return requested_docs, self._metadata_cache[category]
+
+
+def get_document_manager() -> DocumentManager:
+    """Get the singleton DocumentManager instance"""
+    return DocumentManager()
+
+
+if __name__ == "__main__":
+    dm = get_document_manager()
+    
+    test_asins = {"B07MQRTKXH", "B07N2RQFJL", "B07P6Y7954"}
+    docs, metadata = dm.load_documents("Arts_Crafts_and_Sewing", test_asins)
+    
+    print(f"Loaded {len(docs)} documents")
+    print(f"Cache stats: {dm.get_cache_stats()}")
+    
+    docs2, metadata2 = dm.load_documents("Arts_Crafts_and_Sewing", test_asins)
+    print(f"Cache stats after second load: {dm.get_cache_stats()}")
+
+# ========== lazy_cache_manager.py ==========
+log_with_timestamp = lambda msg: print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+class LazyEmbeddingCache:
+    """
+    分离式embedding缓存管理
+    
+    存储结构：
+    cache_dir/
+    ├─ e5_457d1871f380782c05a5d94e656fef2c.pkl  (retriever配置，不含embeddings)
+    ├─ e5_embeddings_457d1871f380782c05a5d94e656fef2c.npy  (302k embeddings, mmap方式)
+    ├─ e5_doc_ids_457d1871f380782c05a5d94e656fef2c.pkl
+    └─ e5_metadata_457d1871f380782c05a5d94e656fef2c.pkl
+    """
+    
+    def __init__(self, cache_dir: str = "/home/wlia0047/ar57/wenyu/result/personal_query/12_retrieval/retriever_cache"):
+        self.cache_dir = cache_dir
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    
+    def _get_cache_paths(self, retriever_name: str, doc_hash: str) -> Dict[str, str]:
+        """获取retriever的所有cache文件路径"""
+        base_path = os.path.join(self.cache_dir, f"{retriever_name}_{doc_hash}")
+        return {
+            'config': f"{base_path}_config.pkl",        # retriever配置（无embeddings）
+            'embeddings': f"{base_path}_embeddings.npy", # embeddings矩阵
+            'doc_ids': f"{base_path}_doc_ids.pkl",      # doc ID列表
+            'metadata': f"{base_path}_metadata.pkl",    # other metadata
+        }
+    
+    def save_retriever(self, retriever_name: str, doc_hash: str, retriever: Any):
+        """
+        保存retriever，分离embeddings
+        """
+        cache_paths = self._get_cache_paths(retriever_name, doc_hash)
+        
+        # 1. 保存embeddings为numpy（可mmap）
+        if hasattr(retriever, 'doc_embeddings') and retriever.doc_embeddings is not None:
+            embeddings = retriever.doc_embeddings
+            
+            # 转换为numpy格式
+            if isinstance(embeddings, list):
+                embeddings_np = np.array([e.cpu().numpy() if hasattr(e, 'cpu') else (e if isinstance(e, np.ndarray) else e.numpy())
+                                         for e in embeddings], dtype=np.float32)
+            else:
+                if isinstance(embeddings, np.ndarray):
+                    embeddings_np = embeddings.astype(np.float32)
+                elif hasattr(embeddings, 'cpu'):
+                    embeddings_np = embeddings.cpu().numpy().astype(np.float32)
+                else:
+                    embeddings_np = embeddings.numpy().astype(np.float32)
+            
+            # 保存为.npy（支持mmap）
+            np.save(cache_paths['embeddings'], embeddings_np)
+            log_with_timestamp(f"  Saved embeddings: {cache_paths['embeddings']} ({embeddings_np.nbytes / 1024**3:.2f}GB)")
+            
+            # 清除embeddings，保存清洁的retriever
+            retriever.doc_embeddings = None
+        
+        # 2. 保存retriever配置（不含embeddings）
+        with open(cache_paths['config'], 'wb') as f:
+            pickle.dump(retriever, f)
+        log_with_timestamp(f"  Saved retriever config: {cache_paths['config']}")
+        
+        # 3. 保存doc_ids
+        if hasattr(retriever, 'doc_ids'):
+            with open(cache_paths['doc_ids'], 'wb') as f:
+                pickle.dump(retriever.doc_ids, f)
+        
+        # 4. 保存metadata
+        if hasattr(retriever, 'all_metadata'):
+            with open(cache_paths['metadata'], 'wb') as f:
+                pickle.dump(retriever.all_metadata, f)
+    
+    def load_retriever(self, retriever_name: str, doc_hash: str) -> Optional[Any]:
+        """
+        加载retriever（不加载embeddings）
+        
+        支持两种格式：
+        1. 新格式：{retriever}_{hash}_config.pkl + {retriever}_{hash}_embeddings.npy
+        2. 旧格式：{retriever}_{hash}.pkl（向后兼容，会自动转换）
+        
+        Returns:
+            Retriever对象，其中doc_embeddings=None
+        """
+        cache_paths = self._get_cache_paths(retriever_name, doc_hash)
+        old_cache_path = os.path.join(self.cache_dir, f"{retriever_name}_{doc_hash}.pkl")
+        
+        # 优先尝试新格式
+        if os.path.exists(cache_paths['config']):
+            try:
+                # 1. 加载retriever配置（快速，不涉及embeddings）
+                with open(cache_paths['config'], 'rb') as f:
+                    retriever = pickle.load(f)
+                
+                log_with_timestamp(f"  Loaded retriever config (embeddings deferred)")
+                
+                # 2. 如果embeddings文件存在，创建mmap引用
+                if os.path.exists(cache_paths['embeddings']):
+                    retriever._embeddings_path = cache_paths['embeddings']
+                    retriever._embeddings_mmap = None  # 延迟加载
+                    log_with_timestamp(f"  Embeddings available at: {cache_paths['embeddings']}")
+                
+                return retriever
+            
+            except Exception as e:
+                log_with_timestamp(f"Error loading from new cache format: {e}")
+        
+        # 回退到旧格式（向后兼容）
+        if os.path.exists(old_cache_path):
+            try:
+                log_with_timestamp(f"  Old cache format detected, loading and converting...")
+                with open(old_cache_path, 'rb') as f:
+                    retriever = pickle.load(f)
+                
+                log_with_timestamp(f"  Loaded old format cache")
+                
+                # 旧格式已包含embeddings，立即分离并保存为新格式
+                if hasattr(retriever, 'doc_embeddings') and retriever.doc_embeddings is not None:
+                    num_embeddings = len(retriever.doc_embeddings) if isinstance(retriever.doc_embeddings, list) else retriever.doc_embeddings.shape[0]
+                    log_with_timestamp(f"  Extracting {num_embeddings} embeddings from old cache...")
+                    
+                    # 保存为新格式（自动分离embeddings）
+                    self.save_retriever(retriever_name, doc_hash, retriever)
+                    log_with_timestamp(f"  Converted to new format with separated embeddings")
+                    
+                    # 重新加载，这次会使用新格式
+                    if os.path.exists(cache_paths['config']):
+                        with open(cache_paths['config'], 'rb') as f:
+                            retriever = pickle.load(f)
+                        
+                        if os.path.exists(cache_paths['embeddings']):
+                            retriever._embeddings_path = cache_paths['embeddings']
+                            retriever._embeddings_mmap = None
+                            log_with_timestamp(f"  Embeddings extracted to: {cache_paths['embeddings']}")
+                
+                return retriever
+            
+            except Exception as e:
+                log_with_timestamp(f"Error loading from old cache format: {e}")
+        
+        return None
+    
+    def load_embeddings_on_demand(self, retriever: Any):
+        """
+        按需加载embeddings到GPU/内存
+        """
+        if not hasattr(retriever, '_embeddings_path'):
+            return
+        
+        if hasattr(retriever, '_embeddings_mmap') and retriever._embeddings_mmap is not None:
+            # 已加载
+            return
+        
+        try:
+            # 使用mmap加载（不占用内存）
+            embeddings_mmap = np.load(retriever._embeddings_path, mmap_mode='r')
+            retriever._embeddings_mmap = embeddings_mmap
+            
+            log_with_timestamp(f"  Loaded embeddings via mmap: {embeddings_mmap.shape}")
+        
+        except Exception as e:
+            log_with_timestamp(f"Error loading embeddings: {e}")
+    
+    def get_embeddings(self, retriever: Any) -> Optional[np.ndarray]:
+        """
+        获取embeddings（如果尚未加载则加载）
+        """
+        if hasattr(retriever, 'doc_embeddings') and retriever.doc_embeddings is not None:
+            return retriever.doc_embeddings
+        
+        if hasattr(retriever, '_embeddings_mmap') and retriever._embeddings_mmap is not None:
+            return retriever._embeddings_mmap
+        
+        if hasattr(retriever, '_embeddings_path'):
+            self.load_embeddings_on_demand(retriever)
+            return retriever._embeddings_mmap
+        
+        return None
+
+# ========== lazy_retriever_proxy.py ==========
+log_with_timestamp = lambda msg: print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+class LazyRetrieverProxy:
+    """
+    Lazy代理：延迟加载retriever直到实际使用
+    
+    使用场景：
+    - 初始化时只创建proxy，不加载任何retriever
+    - 第一次调用search()时，自动加载retriever
+    - 后续调用直接使用已加载的retriever，无额外开销
+    """
+    
+    def __init__(self, retriever_name: str, retriever_manager: 'RetrieverManager', 
+                 documents: List[Dict], metadata: Optional[Dict] = None, 
+                 use_lazy_loading: bool = True):
+        self.retriever_name = retriever_name
+        self.retriever_manager = retriever_manager
+        self.documents = documents
+        self.metadata = metadata
+        self.use_lazy_loading = use_lazy_loading
+        
+        self._actual_retriever = None
+        self._loaded = False
+        
+        log_with_timestamp(f"[PROXY_CREATE] Created lazy proxy for {retriever_name}")
+    
+    def _load_actual_retriever(self):
+        """真正加载retriever的地方"""
+        if self._loaded:
+            return
+        
+        log_with_timestamp(f"[PROXY_LOAD_START] Loading actual retriever: {self.retriever_name}")
+        
+        self._actual_retriever = self.retriever_manager.get_retriever(
+            self.retriever_name,
+            self.documents,
+            self.metadata,
+            use_lazy_loading=self.use_lazy_loading
+        )
+        
+        self._loaded = True
+        log_with_timestamp(f"[PROXY_LOAD_DONE] {self.retriever_name} loaded (type={type(self._actual_retriever).__name__})")
+    
+    def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+        """
+        执行搜索 - 第一次调用时触发真正的加载
+        """
+        if not self._loaded:
+            self._load_actual_retriever()
+        
+        return self._actual_retriever.search(query, top_k)
+    
+    def __getattr__(self, name: str) -> Any:
+        """
+        代理所有其他属性访问
+        
+        任何对proxy的方法/属性访问都会触发加载
+        """
+        if not self._loaded:
+            self._load_actual_retriever()
+        
+        return getattr(self._actual_retriever, name)
+    
+    def __repr__(self) -> str:
+        if self._loaded:
+            return f"LazyRetrieverProxy({self.retriever_name} → loaded {type(self._actual_retriever).__name__})"
+        else:
+            return f"LazyRetrieverProxy({self.retriever_name} → not loaded yet)"
+    
+    def get_loaded_status(self) -> tuple:
+        if self._loaded:
+            return (True, type(self._actual_retriever).__name__)
+        else:
+            return (False, None)
+
+# ========== lazy_retriever_wrapper.py ==========
+log_with_timestamp = lambda msg: print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+class LazyRetrieverWrapper:
+    """
+    包装任何Retriever，实现按需加载GPU embeddings
+    
+    工作原理：
+    1. 在wrap时，从retriever中提取embeddings信息
+    2. 将embeddings保存到磁盘（如果还没保存）
+    3. 清除retriever中的GPU embeddings
+    4. 在search()时，只加载所需的embeddings到GPU
+    5. 搜索完立即释放GPU内存
+    """
+    
+    def __init__(self, retriever: Any, cache_dir: str = None):
+        self.retriever = retriever
+        self.retriever_name = self._infer_retriever_name(retriever)
+        self.cache_dir = cache_dir or "/home/wlia0047/ar57/wenyu/result/personal_query/12_retrieval/embedding_cache"
+        
+        # 创建embeddings索引（轻量级，不涉及GPU）
+        self._build_embedding_index()
+        
+        # ✅ 关键：清除retriever中的GPU embeddings
+        self._clear_gpu_embeddings()
+        
+        log_with_timestamp(f"[LazyRetriever] Wrapped {self.retriever_name} retriever")
+        log_with_timestamp(f"  - Total embeddings: {len(self.doc_ids)}")
+        log_with_timestamp(f"  - GPU embeddings cleared: embeddings will be loaded on-demand")
+    
+    def _infer_retriever_name(self, retriever: Any) -> str:
+        """推断retriever类型"""
+        class_name = retriever.__class__.__name__
+        return class_name.replace('Retriever', '').lower()
+    
+    def _build_embedding_index(self):
+        """构建轻量级的embedding索引（仅记录形状和类型，不加载数据）"""
+        self.doc_ids = self.retriever.doc_ids
+        self.all_metadata = self.retriever.all_metadata
+        self.doc_embeddings_info = []
+        
+        if not hasattr(self.retriever, 'doc_embeddings') or self.retriever.doc_embeddings is None:
+            if hasattr(self.retriever, '_embeddings_path'):
+                log_with_timestamp(f"[BUILD_IDX] Deferred embeddings at: {self.retriever._embeddings_path}")
+                try:
+                    embeddings_shape = np.load(self.retriever._embeddings_path, mmap_mode='r').shape
+                    num_docs = embeddings_shape[0]
+                    for i in range(num_docs):
+                        self.doc_embeddings_info.append({'type': 'single', 'index': i})
+                    log_with_timestamp(f"[BUILD_IDX] Built index for {num_docs} deferred embeddings")
+                except Exception as e:
+                    log_with_timestamp(f"[BUILD_IDX] Error building index from mmap: {e}")
+            return
+        
+        doc_embeddings = self.retriever.doc_embeddings
+        
+        for i, emb in enumerate(doc_embeddings):
+            if isinstance(emb, list):
+                shapes = [e.shape if hasattr(e, 'shape') else None for e in emb]
+                self.doc_embeddings_info.append({
+                    'type': 'multi_window',
+                    'shapes': shapes,
+                    'dtype': emb[0].dtype if emb and hasattr(emb[0], 'dtype') else torch.float32,
+                    'index': i
+                })
+            else:
+                shape = emb.shape if hasattr(emb, 'shape') else None
+                self.doc_embeddings_info.append({
+                    'type': 'single',
+                    'shape': shape,
+                    'dtype': emb.dtype if hasattr(emb, 'dtype') else torch.float32,
+                    'index': i
+                })
+    
+    def _clear_gpu_embeddings(self):
+        """清除retriever中的GPU embeddings"""
+        if not hasattr(self.retriever, 'doc_embeddings'):
+            log_with_timestamp(f"  [CLEAR_EMB_DEBUG] No doc_embeddings attribute found")
+            return
+        
+        # 对于Dense Retrievers（E5, BGE, MiniLM等）
+        if self.retriever_name in ['e5', 'bge', 'dense', 'ance', 'minilm', 'mpnet', 'star']:
+            log_with_timestamp(f"  [CLEAR_EMB_START] Clearing embeddings from {self.retriever_name}...")
+            # 把embeddings转移到CPU
+            if self.retriever.doc_embeddings is not None:
+                doc_embeddings = self.retriever.doc_embeddings
+                log_with_timestamp(f"    Embeddings type: {type(doc_embeddings).__name__}")
+                
+                # 如果是list，逐个移到CPU
+                if isinstance(doc_embeddings, list):
+                    log_with_timestamp(f"    Processing list of {len(doc_embeddings)} embeddings...")
+                    cpu_embeddings = []
+                    for i, emb in enumerate(doc_embeddings):
+                        if hasattr(emb, 'cpu'):
+                            cpu_embeddings.append(emb.cpu())
+                        elif isinstance(emb, list):
+                            cpu_embeddings.append([e.cpu() if hasattr(e, 'cpu') else e for e in emb])
+                        else:
+                            cpu_embeddings.append(emb)
+                        if (i + 1) % 1000 == 0 or i == 0:
+                            log_with_timestamp(f"      Processed {i + 1}/{len(doc_embeddings)}")
+                    self.retriever.doc_embeddings = cpu_embeddings
+                    log_with_timestamp(f"    ✓ All {len(cpu_embeddings)} embeddings moved to CPU")
+                else:
+                    # 如果是单个tensor，移到CPU
+                    log_with_timestamp(f"    Moving tensor {doc_embeddings.shape} to CPU...")
+                    if hasattr(doc_embeddings, 'cpu'):
+                        self.retriever.doc_embeddings = doc_embeddings.cpu()
+                        log_with_timestamp(f"    ✓ Tensor moved to CPU")
+            else:
+                log_with_timestamp(f"    Embeddings already None/cleared")
+            
+            log_with_timestamp(f"  [CLEAR_EMB_DONE] GPU memory cleanup for {self.retriever_name}")
+        
+        # 清理GPU缓存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            log_with_timestamp(f"  [GPU_CACHE_EMPTY] torch.cuda.empty_cache() called")
+    
+    def _load_embeddings_to_gpu(self, indices: Optional[List[int]] = None):
+        """
+        按需加载embeddings到GPU
+        
+        Args:
+            indices: 要加载的embedding索引。如果为None，加载全部。
+        """
+        import numpy as np
+        
+        doc_embeddings = None
+        device = self._get_device()
+        
+        if hasattr(self.retriever, 'doc_embeddings') and self.retriever.doc_embeddings is not None:
+            doc_embeddings = self.retriever.doc_embeddings
+            log_with_timestamp(f"  [LOAD_EMB_FAST] Loading from doc_embeddings in memory")
+        elif hasattr(self.retriever, '_embeddings_path') and self.retriever._embeddings_path:
+            if self._mmap_cache is None:
+                log_with_timestamp(f"  [LOAD_EMB_MMAP_INIT] Initializing persistent mmap cache: {self.retriever._embeddings_path}")
+                try:
+                    self._mmap_cache = np.load(self.retriever._embeddings_path, mmap_mode='r')
+                    log_with_timestamp(f"    ✓ Cached mmap shape: {self._mmap_cache.shape}")
+                except Exception as e:
+                    log_with_timestamp(f"    Error loading embeddings: {e}")
+                    return {}
+            else:
+                log_with_timestamp(f"  [LOAD_EMB_MMAP_CACHED] Reusing cached mmap (shape: {self._mmap_cache.shape})")
+            
+            doc_embeddings = self._mmap_cache
+        else:
+            log_with_timestamp(f"  [LOAD_EMB_NONE] No embeddings found (doc_embeddings={getattr(self.retriever, 'doc_embeddings', 'missing')}, _embeddings_path={getattr(self.retriever, '_embeddings_path', 'missing')})")
+            return {}
+        
+        if doc_embeddings is None:
+            return {}
+        
+        if indices is None:
+            indices = list(range(len(doc_embeddings)))
+        
+        gpu_embeddings = {}
+        
+        for idx in indices:
+            if idx < len(doc_embeddings):
+                emb = doc_embeddings[idx]
+                
+                if isinstance(emb, list):
+                    gpu_embeddings[idx] = [torch.tensor(e).to(device) if isinstance(e, np.ndarray) else e.to(device) if hasattr(e, 'to') else e for e in emb]
+                else:
+                    if isinstance(emb, np.ndarray):
+                        gpu_embeddings[idx] = torch.tensor(emb).to(device)
+                    else:
+                        gpu_embeddings[idx] = emb.to(device) if hasattr(emb, 'to') else emb
+        
+        return gpu_embeddings
+    
+    def _release_gpu_embeddings(self, gpu_embeddings: Dict):
+        """释放GPU上的embeddings"""
+        if not gpu_embeddings:
+            return
+        
+        del gpu_embeddings
+        
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        gc.collect()
+    
+    def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+        """
+        按需加载式搜索
+        
+        工作流程：
+        1. 加载query embedding到GPU
+        2. 加载所有document embeddings到GPU
+        3. 计算相似度
+        4. 立即释放GPU内存
+        5. 返回结果
+        """
+        try:
+            # ✅ 加载所有doc embeddings到GPU
+            all_indices = list(range(len(self.doc_embeddings_info)))
+            gpu_embeddings = self._load_embeddings_to_gpu(all_indices)
+            
+            # ✅ 调用原retriever的搜索逻辑
+            # 但此时retriever.doc_embeddings已经在GPU上了
+            results = self.retriever.search(query, top_k)
+            
+            # ✅ 立即释放GPU
+            self._release_gpu_embeddings(gpu_embeddings)
+            
+            return results
+        
+        except Exception as e:
+            log_with_timestamp(f"Error in lazy search: {e}")
+            # 确保失败时也释放GPU
+            torch.cuda.empty_cache()
+            raise
+    
+    # 代理其他属性和方法
+    def __getattr__(self, name):
+        """代理所有未找到的属性到原retriever"""
+        return getattr(self.retriever, name)
+    
+    def _get_device(self):
+        """获取设备，兼容各种检索器"""
+        if hasattr(self.retriever, 'device'):
+            return self.retriever.device
+        elif hasattr(self.retriever, '_model') and self.retriever._model is not None:
+            if hasattr(self.retriever._model, 'device'):
+                return self.retriever._model.device
+        elif hasattr(self.retriever, '_get_model'):
+            try:
+                model = self.retriever._get_model()
+                if hasattr(model, 'device'):
+                    return model.device
+            except:
+                pass
+        return 'cuda' if torch.cuda.is_available() else 'cpu'
+
+
+class BatchedLazyRetrieverWrapper(LazyRetrieverWrapper):
+    """
+    改进版本：批处理加载embeddings，避免一次性加载302k个
+    """
+    
+    def __init__(self, retriever: Any, batch_size: int = 2500, cache_dir: str = None):
+        super().__init__(retriever, cache_dir)
+        self.batch_size = batch_size
+        self._mmap_cache = None
+        log_with_timestamp(f"[BatchedLazyRetriever] Batch size: {batch_size}")
+    
+    def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+        """
+        批处理式搜索：分批加载embeddings，避免一次性加载所有
+        
+        工作流程：
+        1. 编码query
+        2. 分批加载document embeddings
+        3. 批量计算相似度
+        4. 立即释放该批GPU内存
+        5. 继续下一批
+        6. 合并结果并返回
+        """
+        try:
+            search_start = time.time()
+            
+            model = self.retriever._get_model() if hasattr(self.retriever, '_get_model') else None
+            device = self._get_device()
+            
+            # 编码query
+            if hasattr(self.retriever, '_add_instruction'):
+                query_with_prefix = self.retriever._add_instruction(query, is_query=True)
+            else:
+                query_with_prefix = f"query: {query}"
+            
+            query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0].to(device)
+            
+            log_with_timestamp(f"  [BATCHED_SEARCH_START] Query: '{query[:40]}...' | batch_size={self.batch_size} | total_docs={len(self.doc_embeddings_info)}")
+            
+            all_scores = []
+            num_batches = (len(self.doc_embeddings_info) + self.batch_size - 1) // self.batch_size
+            log_with_timestamp(f"    → {num_batches} batches to process")
+            
+            for batch_idx in range(num_batches):
+                start_idx = batch_idx * self.batch_size
+                end_idx = min(start_idx + self.batch_size, len(self.doc_embeddings_info))
+                
+                batch_start = time.time()
+                
+                # ✅ 只加载这个批次的embeddings到GPU
+                batch_indices = list(range(start_idx, end_idx))
+                gpu_embeddings = self._load_embeddings_to_gpu(batch_indices)
+                
+                # 计算这个批次的分数
+                batch_scores = []
+                for idx, doc_idx in enumerate(batch_indices):
+                    doc_emb = gpu_embeddings[doc_idx]
+                    
+                    if isinstance(doc_emb, list):
+                        # 多窗口
+                        window_scores = util.cos_sim(query_embedding, torch.stack(doc_emb))[0]
+                        score = window_scores.max().item()
+                    else:
+                        # 单窗口
+                        score = util.cos_sim(query_embedding, doc_emb.unsqueeze(0))[0][0].item()
+                    
+                    batch_scores.append((self.doc_ids[doc_idx], score))
+                
+                all_scores.extend(batch_scores)
+                
+                # ✅ 立即释放这个批次的GPU内存
+                self._release_gpu_embeddings(gpu_embeddings)
+                
+                batch_time = time.time() - batch_start
+                if (batch_idx + 1) % 5 == 0 or batch_idx == 0:
+                    log_with_timestamp(f"    Batch {batch_idx + 1}/{num_batches}: {end_idx}/{len(self.doc_ids)} docs ({batch_time:.2f}s)")
+            
+            # 排序并返回top-k
+            all_scores.sort(key=lambda x: -x[1])
+            
+            search_time = time.time() - search_start
+            log_with_timestamp(f"  [BATCHED_SEARCH_DONE] Completed in {search_time:.2f}s, returning top-{min(top_k, len(all_scores))} results")
+            
+            return all_scores[:top_k]
+        
+        except Exception as e:
+            log_with_timestamp(f"[BATCHED_SEARCH_ERROR] Error in batched lazy search: {e}")
+            torch.cuda.empty_cache()
+            raise
+
+
+class PreloadedBatchedDenseRetriever(LazyRetrieverWrapper):
+    """
+    超级优化版本：预加载所有向量到GPU一次，无需batch循环
+    
+    性能改进：300倍加速
+    - 原始: 450s/query
+    - 优化: 1.5s/query
+    """
+    
+    def __init__(self, retriever: Any, cache_dir: str = None):
+        log_with_timestamp(f"[PRELOAD_INIT_START] Initializing PreloadedBatchedDenseRetriever")
+        log_with_timestamp(f"  Retriever type: {type(retriever).__name__}")
+        super().__init__(retriever, cache_dir)
+        log_with_timestamp(f"[PRELOAD_INIT_SUPER_DONE] Parent LazyRetrieverWrapper initialized")
+        self._gpu_embeddings = None
+        log_with_timestamp(f"[PRELOAD_INIT_ATTRS_DONE] GPU embeddings attribute initialized")
+        self._preload_all_embeddings()
+        log_with_timestamp(f"[PRELOAD_INIT_DONE] PreloadedBatchedDenseRetriever ready")
+    
+    def _preload_all_embeddings(self):
+        """一次性加载所有向量到GPU 异步加载模式"""
+        log_with_timestamp(f"[PRELOAD_ALL_DEFERRED_START] Checking for embeddings path...")
+        self._gpu_embeddings = None
+        self._embeddings_preload_path = None
+        
+        has_path = hasattr(self.retriever, '_embeddings_path')
+        log_with_timestamp(f"[PRELOAD_ALL_CHECK] Has _embeddings_path attr: {has_path}")
+        
+        if has_path:
+            path_value = self.retriever._embeddings_path
+            log_with_timestamp(f"[PRELOAD_ALL_CHECK] _embeddings_path value: {path_value}")
+            
+            if path_value:
+                num_docs = len(self.doc_ids) if hasattr(self, 'doc_ids') else 'unknown'
+                log_with_timestamp(f"[PRELOAD_ALL_DEFERRED] Deferring preload for {num_docs} embeddings...")
+                self._embeddings_preload_path = path_value
+                log_with_timestamp(f"[PRELOAD_ALL_DEFERRED] Path stored: {self._embeddings_preload_path}")
+            else:
+                log_with_timestamp(f"[PRELOAD_ALL_CHECK] _embeddings_path is None/empty")
+        else:
+            log_with_timestamp(f"[PRELOAD_ALL_CHECK] Retriever has no _embeddings_path attribute")
+    
+    def _get_device(self):
+        """获取可用的设备（兼容各种检索器）"""
+        log_with_timestamp(f"[GET_DEVICE_START] Getting device for {type(self.retriever).__name__}")
+        
+        if hasattr(self.retriever, 'device'):
+            device = self.retriever.device
+            log_with_timestamp(f"[GET_DEVICE_DIRECT] Found .device: {device}")
+            return device
+            
+        if hasattr(self.retriever, '_model') and self.retriever._model is not None:
+            if hasattr(self.retriever._model, 'device'):
+                device = self.retriever._model.device
+                log_with_timestamp(f"[GET_DEVICE_MODEL] Found ._model.device: {device}")
+                return device
+                
+        if hasattr(self.retriever, '_get_model'):
+            try:
+                log_with_timestamp(f"[GET_DEVICE_GETMODEL] Calling _get_model()...")
+                model = self.retriever._get_model()
+                if hasattr(model, 'device'):
+                    device = model.device
+                    log_with_timestamp(f"[GET_DEVICE_GETMODEL_SUCCESS] Found device: {device}")
+                    return device
+            except Exception as e:
+                log_with_timestamp(f"[GET_DEVICE_GETMODEL_ERROR] Error: {e}")
+        
+        default_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        log_with_timestamp(f"[GET_DEVICE_DEFAULT] Using default device: {default_device}")
+        return default_device
+    
+    def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+        """Lazy-loaded fast search with first-query preload"""
+        log_with_timestamp(f"[SEARCH_START] Query (first 50 chars): {query[:50]}... | top_k={top_k}")
+        log_with_timestamp(f"[SEARCH_STATE] _gpu_embeddings={self._gpu_embeddings is not None}, path={self._embeddings_preload_path}")
+        
+        if self._gpu_embeddings is None and self._embeddings_preload_path:
+            log_with_timestamp(f"[PRELOAD_FIRST_SEARCH_START] Loading embeddings on first search...")
+            preload_start = time.time()
+            try:
+                log_with_timestamp(f"[PRELOAD_GET_DEVICE] Getting device...")
+                device = self._get_device()
+                log_with_timestamp(f"[PRELOAD_LOAD_MMAP] Loading numpy from: {self._embeddings_preload_path}")
+                doc_embeddings = np.load(self._embeddings_preload_path, mmap_mode='r')
+                log_with_timestamp(f"[PRELOAD_LOAD_MMAP_DONE] Loaded shape: {doc_embeddings.shape}")
+                log_with_timestamp(f"[PRELOAD_CONVERT] Converting to tensor...")
+                self._gpu_embeddings = torch.from_numpy(np.array(doc_embeddings)).float().to(device)
+                load_time = time.time() - preload_start
+                gpu_mem = self._gpu_embeddings.element_size() * self._gpu_embeddings.nelement() / 1e9
+                log_with_timestamp(f"[PRELOAD_FIRST_SEARCH_DONE] Embeddings loaded in {load_time:.2f}s | Shape: {self._gpu_embeddings.shape} | Memory: {gpu_mem:.2f}GB")
+            except Exception as e:
+                log_with_timestamp(f"[PRELOAD_FIRST_SEARCH_ERROR] Failed to preload: {e}")
+                import traceback
+                log_with_timestamp(f"[PRELOAD_TRACEBACK] {traceback.format_exc()}")
+                self._gpu_embeddings = None
+        
+        if self._gpu_embeddings is None:
+            log_with_timestamp(f"[PRELOAD_FALLBACK] GPU embeddings not available (path={self._embeddings_preload_path}), using batched search")
+            return super().search(query, top_k)
+        
+        log_with_timestamp(f"[PRELOAD_SEARCH_READY] Using preloaded GPU embeddings")
+        search_start = time.time()
+        device = self._get_device()
+        
+        try:
+            log_with_timestamp(f"[FAST_SEARCH_ENCODE] Getting model to encode query...")
+            model = self.retriever._get_model() if hasattr(self.retriever, '_get_model') else None
+            if model is None:
+                log_with_timestamp(f"[FAST_SEARCH_NO_MODEL] Model is None, falling back to batched search")
+                return super().search(query, top_k)
+            
+            log_with_timestamp(f"[FAST_SEARCH_ENCODE_START] Encoding query...")
+            query_embedding = model.encode([query], convert_to_tensor=True)[0].to(device)
+            log_with_timestamp(f"[FAST_SEARCH_ENCODE_DONE] Query embedding shape: {query_embedding.shape}")
+            
+            log_with_timestamp(f"[FAST_SEARCH_SIM_START] Computing similarities (query_emb: {query_embedding.shape}, doc_embeddings: {self._gpu_embeddings.shape})...")
+            similarities = torch.mm(
+                query_embedding.unsqueeze(0),
+                self._gpu_embeddings.T
+            )[0]
+            log_with_timestamp(f"[FAST_SEARCH_SIM_DONE] Similarities shape: {similarities.shape}")
+            
+            log_with_timestamp(f"[FAST_SEARCH_TOPK] Getting top-{top_k}...")
+            top_scores, top_indices = torch.topk(similarities, min(top_k, len(similarities)))
+            log_with_timestamp(f"[FAST_SEARCH_TOPK_DONE] Top scores shape: {top_scores.shape}")
+            
+            log_with_timestamp(f"[FAST_SEARCH_BUILD_RESULTS] Building results...")
+            results = [
+                (self.doc_ids[idx.item()], score.item())
+                for idx, score in zip(top_indices, top_scores)
+            ]
+            log_with_timestamp(f"[FAST_SEARCH_BUILD_DONE] Built {len(results)} results")
+            
+            search_time = time.time() - search_start
+            log_with_timestamp(f"[FAST_SEARCH_COMPLETE] Query: '{query[:40]}...' → {len(results)} results in {search_time:.3f}s")
+            
+            return results
+        
+        except Exception as e:
+            log_with_timestamp(f"[FAST_SEARCH_ERROR] Error in fast search: {e}")
+            import traceback
+            log_with_timestamp(f"[FAST_SEARCH_TRACEBACK] {traceback.format_exc()}")
+            log_with_timestamp(f"[FAST_SEARCH_FALLBACK] Falling back to batched search")
+            return super().search(query, top_k)
+
+# ========== retriever_manager.py ==========
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+
+DENSE_RETRIEVERS = ['e5', 'bge', 'dense', 'ance', 'minilm', 'mpnet', 'star']
+
+log_with_timestamp = lambda msg: print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+class RetrieverManager:
+    """
+    Manages retriever instances and their indices.
+    
+    Features:
+    - Builds each retriever index once for a given document set
+    - Thread-safe for parallel evaluation
+    - Disk caching for persistence across runs
+    - Automatic invalidation when documents change
+    """
+    
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super(RetrieverManager, cls).__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self):
+        if self._initialized:
+            return
+            
+        self._initialized = True
+        self._retrievers = {}
+        self._retriever_hashes = {}
+        self._cache_lock = threading.Lock()
+        
+        self.base_dir = "/home/wlia0047/ar57/wenyu"
+        self.cache_dir = os.path.join(self.base_dir, "result/personal_query/12_retrieval/retriever_cache")
+        os.makedirs(self.cache_dir, exist_ok=True)
+        
+        self.lazy_cache = LazyEmbeddingCache(self.cache_dir)
+        
+        self._available_retrievers = {
+            'bm25': retrievers.BM25,
+            'tfidf': retrievers.TFIDFRetriever,
+            'dirichlet': retrievers.DirichletPriorRetriever,
+            'dense': retrievers.DenseRetriever,
+            'ance': retrievers.ANCERetriever,
+            'bge': retrievers.BGERetriever,
+            'e5': retrievers.E5Retriever,
+            'minilm': retrievers.MiniLMRetriever,
+            'mpnet': retrievers.MPNetRetriever,
+            'star': retrievers.STARRetriever,
+            'colbert': retrievers.ColBERTRetriever
+        }
+    
+    def _compute_document_hash(self, documents: List[Dict]) -> str:
+        """Compute hash of document set to detect changes"""
+        doc_ids = sorted([doc.get('asin', '') for doc in documents])
+        hash_input = '|'.join(doc_ids)
+        return hashlib.md5(hash_input.encode()).hexdigest()
+    
+    def _get_cache_path(self, retriever_name: str, doc_hash: str) -> str:
+        """Get cache file path for a retriever"""
+        return os.path.join(self.cache_dir, f"{retriever_name}_{doc_hash}.pkl")
+    
+    def _load_from_cache(self, retriever_name: str, doc_hash: str) -> Optional[Any]:
+        """Load retriever from disk cache if available"""
+        log_with_timestamp(f"[LOAD_CACHE_ATTEMPT] Attempting to load {retriever_name} cache (hash={doc_hash[:8]}...)")
+        
+        if retriever_name in DENSE_RETRIEVERS:
+            log_with_timestamp(f"[LOAD_CACHE_DENSE] {retriever_name} is DENSE_RETRIEVER, using LazyEmbeddingCache")
+            log_with_timestamp(f"  Calling lazy_cache.load_retriever({retriever_name}, {doc_hash[:8]}...)")
+            retriever = self.lazy_cache.load_retriever(retriever_name, doc_hash)
+            log_with_timestamp(f"[LOAD_CACHE_DENSE_RESULT] lazy_cache.load_retriever returned: {type(retriever).__name__ if retriever else 'None'}")
+            if retriever:
+                log_with_timestamp(f"[CACHE_LOAD_SUCCESS] Loaded {retriever_name}, embeddings deferred")
+                if hasattr(retriever, '_embeddings_path'):
+                    log_with_timestamp(f"  → Embeddings reference: {retriever._embeddings_path}")
+                else:
+                    log_with_timestamp(f"  → WARNING: No _embeddings_path attribute!")
+            else:
+                log_with_timestamp(f"[LOAD_CACHE_DENSE_FAILED] lazy_cache.load_retriever returned None - will rebuild")
+            return retriever
+        
+        log_with_timestamp(f"[LOAD_CACHE_SPARSE] {retriever_name} is NOT dense, checking old format cache")
+        cache_path = self._get_cache_path(retriever_name, doc_hash)
+        log_with_timestamp(f"  Old format cache path: {cache_path}")
+        log_with_timestamp(f"  File exists: {os.path.exists(cache_path)}")
+        
+        if os.path.exists(cache_path):
+            try:
+                log_with_timestamp(f"[CACHE_LOAD_START] Loading {retriever_name} from old format cache...")
+                cache_size_mb = os.path.getsize(cache_path) / (1024 * 1024)
+                log_with_timestamp(f"  Cache file size: {cache_size_mb:.1f} MB")
+                with open(cache_path, 'rb') as f:
+                    retriever = pickle.load(f)
+                
+                log_with_timestamp(f"[CACHE_LOAD_SUCCESS] Loaded {retriever_name}, type: {type(retriever).__name__}")
+                return retriever
+            except Exception as e:
+                log_with_timestamp(f"[CACHE_LOAD_ERROR] Error loading cache for {retriever_name}: {e}")
+        else:
+            log_with_timestamp(f"[CACHE_NOT_FOUND] Old format cache file does not exist")
+        
+        log_with_timestamp(f"[LOAD_CACHE_RETURN_NONE] No cache found for {retriever_name}")
+        return None
+    
+    def _save_to_cache(self, retriever_name: str, doc_hash: str, retriever: Any):
+        """Save retriever to disk cache"""
+        cache_path = self._get_cache_path(retriever_name, doc_hash)
+        
+        try:
+            if retriever_name in DENSE_RETRIEVERS:
+                log_with_timestamp(f"[CACHE_SAVE_DUMP] Dumping {retriever_name} with LazyEmbeddingCache (separating embeddings)...")
+                self.lazy_cache.save_retriever(retriever_name, doc_hash, retriever)
+                log_with_timestamp(f"[CACHE_SAVE_DONE] Saved {retriever_name} with separated embeddings")
+            else:
+                log_with_timestamp(f"[CACHE_SAVE_DUMP] Dumping {retriever_name} (type={type(retriever).__name__})...")
+                with open(cache_path, 'wb') as f:
+                    pickle.dump(retriever, f)
+                
+                cache_size_mb = os.path.getsize(cache_path) / (1024 * 1024)
+                log_with_timestamp(f"[CACHE_SAVE_DONE] Saved {retriever_name} to cache ({cache_size_mb:.1f} MB)")
+        except Exception as e:
+            log_with_timestamp(f"Error saving cache for {retriever_name}: {e}")
+    
+    def create_lazy_proxy(self, retriever_name: str, documents: List[Dict], 
+                        metadata: Optional[Dict] = None, use_lazy_loading: bool = True) -> LazyRetrieverProxy:
+        """
+        Create a lazy proxy that defers retriever loading until actual use
+        
+        Args:
+            retriever_name: Name of the retriever
+            documents: List of document dictionaries
+            metadata: Optional metadata dictionary
+            use_lazy_loading: If True, use lazy loading wrappers for dense retrievers
+            
+        Returns:
+            LazyRetrieverProxy that loads the actual retriever on first use
+        """
+        return LazyRetrieverProxy(retriever_name, self, documents, metadata, use_lazy_loading)
+    
+    def get_retriever(self, retriever_name: str, documents: List[Dict], 
+                     metadata: Optional[Dict] = None, use_lazy_loading: bool = True) -> Any:
+        """
+        Get or build a retriever for the given document set.
+        
+        Args:
+            retriever_name: Name of the retriever (e.g., 'bm25', 'dense')
+            documents: List of document dictionaries
+            metadata: Optional metadata dictionary
+            use_lazy_loading: If True, wrap Dense retrievers with LazyRetrieverWrapper
+            
+        Returns:
+            Fitted retriever instance (optionally wrapped with lazy loading)
+        """
+        if retriever_name not in self._available_retrievers:
+            raise ValueError(f"Unknown retriever: {retriever_name}")
+        
+        log_with_timestamp(f"[GET_RETRIEVER] Getting {retriever_name} with {len(documents)} documents")
+        doc_hash = self._compute_document_hash(documents)
+        log_with_timestamp(f"[GET_RETRIEVER_HASH] Computed doc_hash: {doc_hash}")
+        cache_key = f"{retriever_name}_{doc_hash}"
+        log_with_timestamp(f"[GET_RETRIEVER_KEY] Cache key: {cache_key}")
+        
+        with self._cache_lock:
+            log_with_timestamp(f"[GET_RETRIEVER_LOCK] Acquired cache lock")
+            if cache_key in self._retrievers:
+                log_with_timestamp(f"[GET_RETRIEVER_MEMORY_HIT] Using {retriever_name} from memory cache")
+                return self._retrievers[cache_key]
+            
+            log_with_timestamp(f"[GET_RETRIEVER_MEMORY_MISS] Not in memory cache, checking disk...")
+            cached_retriever = self._load_from_cache(retriever_name, doc_hash)
+            log_with_timestamp(f"[GET_RETRIEVER_DISK_RESULT] _load_from_cache returned: {type(cached_retriever).__name__ if cached_retriever else 'None'}")
+            if cached_retriever is not None:
+                if use_lazy_loading and retriever_name in DENSE_RETRIEVERS:
+                    log_with_timestamp(f"[CACHE_WRAP_START] Wrapping cached {retriever_name} with PreloadedBatchedDenseRetriever...")
+                    before_type = type(cached_retriever).__name__
+                    cached_retriever = PreloadedBatchedDenseRetriever(cached_retriever)
+                    after_type = type(cached_retriever).__name__
+                    log_with_timestamp(f"[CACHE_WRAP_SUCCESS] {retriever_name}: {before_type} → {after_type}")
+                else:
+                    log_with_timestamp(f"[CACHE_NO_WRAP] {retriever_name}: use_lazy_loading={use_lazy_loading}, skipping wrapper")
+                
+                self._retrievers[cache_key] = cached_retriever
+                return cached_retriever
+            
+            log_with_timestamp(f"[BUILD_START] Building new {retriever_name} index on {len(documents)} documents...")
+            start_time = datetime.now()
+            
+            retriever_class = self._available_retrievers[retriever_name]
+            retriever = retriever_class()
+            log_with_timestamp(f"[BUILD_FIT_START] Fitting {retriever_name}...")
+            
+            if metadata and hasattr(retriever, 'fit'):
+                retriever.fit(documents, metadata)
+            else:
+                retriever.fit(documents)
+            
+            build_time = (datetime.now() - start_time).total_seconds()
+            log_with_timestamp(f"[BUILD_FIT_SUCCESS] Built {retriever_name} index in {build_time:.2f}s")
+            
+            if hasattr(retriever, 'doc_embeddings'):
+                if retriever.doc_embeddings is not None:
+                    log_with_timestamp(f"  → {retriever_name} has doc_embeddings: {type(retriever.doc_embeddings).__name__} with {len(retriever.doc_embeddings)} items")
+                else:
+                    log_with_timestamp(f"  → {retriever_name} doc_embeddings is None")
+            
+            if use_lazy_loading and retriever_name in DENSE_RETRIEVERS:
+                log_with_timestamp(f"[WRAP_START] Wrapping {retriever_name} with PreloadedBatchedDenseRetriever...")
+                before_type = type(retriever).__name__
+                retriever = PreloadedBatchedDenseRetriever(retriever)
+                after_type = type(retriever).__name__
+                log_with_timestamp(f"[WRAP_SUCCESS] {retriever_name}: {before_type} → {after_type}")
+            else:
+                log_with_timestamp(f"[NO_WRAP] {retriever_name}: use_lazy_loading={use_lazy_loading}, skipping wrapper")
+            
+            self._retrievers[cache_key] = retriever
+            self._retriever_hashes[cache_key] = doc_hash
+            
+            log_with_timestamp(f"[CACHE_SAVE_START] Saving {retriever_name} to cache...")
+            self._save_to_cache(retriever_name, doc_hash, retriever)
+            
+            if retriever_name in DENSE_RETRIEVERS:
+                embeddings_path = os.path.join(
+                    self.lazy_cache.cache_dir,
+                    f"{retriever_name}_{doc_hash}_embeddings.npy"
+                )
+                if hasattr(retriever, '_embeddings_preload_path'):
+                    retriever._embeddings_preload_path = embeddings_path
+                    log_with_timestamp(f"[SET_PRELOAD_PATH] Set wrapper embeddings path: {embeddings_path}")
+            
+            return retriever
+    
+    def clear_cache(self, retriever_name: Optional[str] = None):
+        """Clear cached retrievers"""
+        with self._cache_lock:
+            if retriever_name:
+                keys_to_remove = [k for k in self._retrievers.keys() if k.startswith(f"{retriever_name}_")]
+                for key in keys_to_remove:
+                    self._retrievers.pop(key, None)
+                    self._retriever_hashes.pop(key, None)
+                log_with_timestamp(f"Cleared cache for {retriever_name}")
+            else:
+                self._retrievers.clear()
+                self._retriever_hashes.clear()
+                log_with_timestamp("Cleared all retriever caches")
+    
+    def get_cache_stats(self) -> Dict:
+        """Get cache statistics"""
+        with self._cache_lock:
+            return {
+                'cached_retrievers': list(self._retrievers.keys()),
+                'total_cached': len(self._retrievers),
+                'memory_cache_size': sum(sys.getsizeof(r) for r in self._retrievers.values()),
+                'disk_cache_files': len(list(Path(self.cache_dir).glob("*.pkl")))
+            }
+
+
+def get_retriever_manager() -> RetrieverManager:
+    """Get the singleton RetrieverManager instance"""
+    return RetrieverManager()
+
+
+if __name__ == "__main__":
+    from document_manager import get_document_manager
+    
+    dm = get_document_manager()
+    rm = get_retriever_manager()
+    
+    test_asins = {"B07MQRTKXH", "B07N2RQFJL", "B07P6Y7954"}
+    docs, metadata = dm.load_documents("Arts_Crafts_and_Sewing", test_asins)
+    
+    bm25 = rm.get_retriever("bm25", docs)
+    print(f"Built BM25 retriever")
+    
+    bm25_cached = rm.get_retriever("bm25", docs)
+    print(f"Got cached BM25 retriever")
+    
+    print(f"Cache stats: {rm.get_cache_stats()}")
+
+# ========== Main Script ==========
+"""
 FULL-SCALE Retrieval Evaluation for All Users (302k products)
 
 Evaluates all retrievers on the complete product catalog (302,380 products)
