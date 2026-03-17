@@ -3,10 +3,46 @@
 Full-scale dense retrieval evaluation with all modules integrated.
 """
 
+#!/usr/bin/env python3
+"""
+Full-scale dense retrieval evaluation with all modules integrated.
+"""
 
+# ===== Standard Library Imports =====
+import sys
+import os
+import pickle
+import json
+import hashlib
+import threading
+import logging
+import time
+import gc
+import glob
+import shutil
+import traceback
+import argparse
+from datetime import datetime
+from pathlib import Path
+from collections import defaultdict
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
-# ========== document_manager.py ==========
+# ===== Third-party Imports =====
+import numpy as np
+import torch
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
+# ===== Type Hints =====
+from typing import List, Dict, Tuple, Set, Optional, Any
+
+# ========== Setup Path and Imports ==========
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+from utils import utils
+from utils import retrievers
 
 log_with_timestamp = utils.log_with_timestamp
 load_product_metadata = utils.load_product_metadata
@@ -527,12 +563,21 @@ class LazyRetrieverProxy:
     
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """
-        执行搜索 - 第一次调用时触发真正的加载
+        执行搜索 - 包装lazy loading逻辑以处理None embeddings
         """
         if not self._loaded:
             self._load_actual_retriever()
         
-        return self._actual_retriever.search(query, top_k)
+        retriever = self._actual_retriever
+        
+        if retriever.doc_embeddings is None:
+            raise RuntimeError(f"{self.retriever_name} embeddings not loaded - got None")
+        
+        if isinstance(retriever.doc_embeddings, list) and any(e is None for e in retriever.doc_embeddings):
+            non_none_count = sum(1 for e in retriever.doc_embeddings if e is not None)
+            log_with_timestamp(f"[PROXY_WARN] {self.retriever_name}: {non_none_count}/{len(retriever.doc_embeddings)} embeddings are valid")
+        
+        return retriever.search(query, top_k)
     
     def __getattr__(self, name: str) -> Any:
         """
@@ -745,33 +790,44 @@ class LazyRetrieverWrapper:
     
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """
-        按需加载式搜索
-        
-        工作流程：
-        1. 加载query embedding到GPU
-        2. 加载所有document embeddings到GPU
-        3. 计算相似度
-        4. 立即释放GPU内存
-        5. 返回结果
+        按需加载式搜索 - 安全的embeddings重建
         """
         try:
-            # ✅ 加载所有doc embeddings到GPU
             all_indices = list(range(len(self.doc_embeddings_info)))
             gpu_embeddings = self._load_embeddings_to_gpu(all_indices)
             
-            # ✅ 调用原retriever的搜索逻辑
-            # 但此时retriever.doc_embeddings已经在GPU上了
-            results = self.retriever.search(query, top_k)
+            if not gpu_embeddings:
+                log_with_timestamp(f"[SEARCH_FAIL] No embeddings loaded for {self.retriever_name}")
+                raise RuntimeError(f"Failed to load embeddings for {self.retriever_name}")
             
-            # ✅ 立即释放GPU
-            self._release_gpu_embeddings(gpu_embeddings)
+            expected_count = len(self.doc_embeddings_info)
+            loaded_count = len(gpu_embeddings)
+            if loaded_count != expected_count:
+                log_with_timestamp(f"[SEARCH_WARN] Expected {expected_count} embeddings but got {loaded_count}")
+            
+            embeddings_array = []
+            for i in range(expected_count):
+                if i in gpu_embeddings:
+                    embeddings_array.append(gpu_embeddings[i])
+                else:
+                    log_with_timestamp(f"[SEARCH_WARN] Missing embedding at index {i}")
+                    embeddings_array.append(None)
+            
+            original_embeddings = self.retriever.doc_embeddings
+            
+            try:
+                self.retriever.doc_embeddings = embeddings_array
+                results = self.retriever.search(query, top_k)
+            finally:
+                self.retriever.doc_embeddings = original_embeddings
+                self._release_gpu_embeddings(gpu_embeddings)
             
             return results
         
         except Exception as e:
-            log_with_timestamp(f"Error in lazy search: {e}")
-            # 确保失败时也释放GPU
-            torch.cuda.empty_cache()
+            log_with_timestamp(f"[SEARCH_ERROR] {self.retriever_name}: {str(e)[:200]}")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             raise
     
     # 代理其他属性和方法
@@ -886,152 +942,6 @@ class BatchedLazyRetrieverWrapper(LazyRetrieverWrapper):
             torch.cuda.empty_cache()
             raise
 
-
-class PreloadedBatchedDenseRetriever(LazyRetrieverWrapper):
-    """
-    超级优化版本：预加载所有向量到GPU一次，无需batch循环
-    
-    性能改进：300倍加速
-    - 原始: 450s/query
-    - 优化: 1.5s/query
-    """
-    
-    def __init__(self, retriever: Any, cache_dir: str = None):
-        log_with_timestamp(f"[PRELOAD_INIT_START] Initializing PreloadedBatchedDenseRetriever")
-        log_with_timestamp(f"  Retriever type: {type(retriever).__name__}")
-        super().__init__(retriever, cache_dir)
-        log_with_timestamp(f"[PRELOAD_INIT_SUPER_DONE] Parent LazyRetrieverWrapper initialized")
-        self._gpu_embeddings = None
-        log_with_timestamp(f"[PRELOAD_INIT_ATTRS_DONE] GPU embeddings attribute initialized")
-        self._preload_all_embeddings()
-        log_with_timestamp(f"[PRELOAD_INIT_DONE] PreloadedBatchedDenseRetriever ready")
-    
-    def _preload_all_embeddings(self):
-        """一次性加载所有向量到GPU 异步加载模式"""
-        log_with_timestamp(f"[PRELOAD_ALL_DEFERRED_START] Checking for embeddings path...")
-        self._gpu_embeddings = None
-        self._embeddings_preload_path = None
-        
-        has_path = hasattr(self.retriever, '_embeddings_path')
-        log_with_timestamp(f"[PRELOAD_ALL_CHECK] Has _embeddings_path attr: {has_path}")
-        
-        if has_path:
-            path_value = self.retriever._embeddings_path
-            log_with_timestamp(f"[PRELOAD_ALL_CHECK] _embeddings_path value: {path_value}")
-            
-            if path_value:
-                num_docs = len(self.doc_ids) if hasattr(self, 'doc_ids') else 'unknown'
-                log_with_timestamp(f"[PRELOAD_ALL_DEFERRED] Deferring preload for {num_docs} embeddings...")
-                self._embeddings_preload_path = path_value
-                log_with_timestamp(f"[PRELOAD_ALL_DEFERRED] Path stored: {self._embeddings_preload_path}")
-            else:
-                log_with_timestamp(f"[PRELOAD_ALL_CHECK] _embeddings_path is None/empty")
-        else:
-            log_with_timestamp(f"[PRELOAD_ALL_CHECK] Retriever has no _embeddings_path attribute")
-    
-    def _get_device(self):
-        """获取可用的设备（兼容各种检索器）"""
-        log_with_timestamp(f"[GET_DEVICE_START] Getting device for {type(self.retriever).__name__}")
-        
-        if hasattr(self.retriever, 'device'):
-            device = self.retriever.device
-            log_with_timestamp(f"[GET_DEVICE_DIRECT] Found .device: {device}")
-            return device
-            
-        if hasattr(self.retriever, '_model') and self.retriever._model is not None:
-            if hasattr(self.retriever._model, 'device'):
-                device = self.retriever._model.device
-                log_with_timestamp(f"[GET_DEVICE_MODEL] Found ._model.device: {device}")
-                return device
-                
-        if hasattr(self.retriever, '_get_model'):
-            try:
-                log_with_timestamp(f"[GET_DEVICE_GETMODEL] Calling _get_model()...")
-                model = self.retriever._get_model()
-                if hasattr(model, 'device'):
-                    device = model.device
-                    log_with_timestamp(f"[GET_DEVICE_GETMODEL_SUCCESS] Found device: {device}")
-                    return device
-            except Exception as e:
-                log_with_timestamp(f"[GET_DEVICE_GETMODEL_ERROR] Error: {e}")
-        
-        default_device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        log_with_timestamp(f"[GET_DEVICE_DEFAULT] Using default device: {default_device}")
-        return default_device
-    
-    def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """Lazy-loaded fast search with first-query preload"""
-        log_with_timestamp(f"[SEARCH_START] Query (first 50 chars): {query[:50]}... | top_k={top_k}")
-        log_with_timestamp(f"[SEARCH_STATE] _gpu_embeddings={self._gpu_embeddings is not None}, path={self._embeddings_preload_path}")
-        
-        if self._gpu_embeddings is None and self._embeddings_preload_path:
-            log_with_timestamp(f"[PRELOAD_FIRST_SEARCH_START] Loading embeddings on first search...")
-            preload_start = time.time()
-            try:
-                log_with_timestamp(f"[PRELOAD_GET_DEVICE] Getting device...")
-                device = self._get_device()
-                log_with_timestamp(f"[PRELOAD_LOAD_MMAP] Loading numpy from: {self._embeddings_preload_path}")
-                doc_embeddings = np.load(self._embeddings_preload_path, mmap_mode='r')
-                log_with_timestamp(f"[PRELOAD_LOAD_MMAP_DONE] Loaded shape: {doc_embeddings.shape}")
-                log_with_timestamp(f"[PRELOAD_CONVERT] Converting to tensor...")
-                self._gpu_embeddings = torch.from_numpy(np.array(doc_embeddings)).float().to(device)
-                load_time = time.time() - preload_start
-                gpu_mem = self._gpu_embeddings.element_size() * self._gpu_embeddings.nelement() / 1e9
-                log_with_timestamp(f"[PRELOAD_FIRST_SEARCH_DONE] Embeddings loaded in {load_time:.2f}s | Shape: {self._gpu_embeddings.shape} | Memory: {gpu_mem:.2f}GB")
-            except Exception as e:
-                log_with_timestamp(f"[PRELOAD_FIRST_SEARCH_ERROR] Failed to preload: {e}")
-                import traceback
-                log_with_timestamp(f"[PRELOAD_TRACEBACK] {traceback.format_exc()}")
-                self._gpu_embeddings = None
-        
-        if self._gpu_embeddings is None:
-            log_with_timestamp(f"[PRELOAD_FALLBACK] GPU embeddings not available (path={self._embeddings_preload_path}), using batched search")
-            return super().search(query, top_k)
-        
-        log_with_timestamp(f"[PRELOAD_SEARCH_READY] Using preloaded GPU embeddings")
-        search_start = time.time()
-        device = self._get_device()
-        
-        try:
-            log_with_timestamp(f"[FAST_SEARCH_ENCODE] Getting model to encode query...")
-            model = self.retriever._get_model() if hasattr(self.retriever, '_get_model') else None
-            if model is None:
-                log_with_timestamp(f"[FAST_SEARCH_NO_MODEL] Model is None, falling back to batched search")
-                return super().search(query, top_k)
-            
-            log_with_timestamp(f"[FAST_SEARCH_ENCODE_START] Encoding query...")
-            query_embedding = model.encode([query], convert_to_tensor=True)[0].to(device)
-            log_with_timestamp(f"[FAST_SEARCH_ENCODE_DONE] Query embedding shape: {query_embedding.shape}")
-            
-            log_with_timestamp(f"[FAST_SEARCH_SIM_START] Computing similarities (query_emb: {query_embedding.shape}, doc_embeddings: {self._gpu_embeddings.shape})...")
-            similarities = torch.mm(
-                query_embedding.unsqueeze(0),
-                self._gpu_embeddings.T
-            )[0]
-            log_with_timestamp(f"[FAST_SEARCH_SIM_DONE] Similarities shape: {similarities.shape}")
-            
-            log_with_timestamp(f"[FAST_SEARCH_TOPK] Getting top-{top_k}...")
-            top_scores, top_indices = torch.topk(similarities, min(top_k, len(similarities)))
-            log_with_timestamp(f"[FAST_SEARCH_TOPK_DONE] Top scores shape: {top_scores.shape}")
-            
-            log_with_timestamp(f"[FAST_SEARCH_BUILD_RESULTS] Building results...")
-            results = [
-                (self.doc_ids[idx.item()], score.item())
-                for idx, score in zip(top_indices, top_scores)
-            ]
-            log_with_timestamp(f"[FAST_SEARCH_BUILD_DONE] Built {len(results)} results")
-            
-            search_time = time.time() - search_start
-            log_with_timestamp(f"[FAST_SEARCH_COMPLETE] Query: '{query[:40]}...' → {len(results)} results in {search_time:.3f}s")
-            
-            return results
-        
-        except Exception as e:
-            log_with_timestamp(f"[FAST_SEARCH_ERROR] Error in fast search: {e}")
-            import traceback
-            log_with_timestamp(f"[FAST_SEARCH_TRACEBACK] {traceback.format_exc()}")
-            log_with_timestamp(f"[FAST_SEARCH_FALLBACK] Falling back to batched search")
-            return super().search(query, top_k)
 
 # ========== retriever_manager.py ==========
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -1212,64 +1122,24 @@ class RetrieverManager:
             cached_retriever = self._load_from_cache(retriever_name, doc_hash)
             log_with_timestamp(f"[GET_RETRIEVER_DISK_RESULT] _load_from_cache returned: {type(cached_retriever).__name__ if cached_retriever else 'None'}")
             if cached_retriever is not None:
-                if use_lazy_loading and retriever_name in DENSE_RETRIEVERS:
-                    log_with_timestamp(f"[CACHE_WRAP_START] Wrapping cached {retriever_name} with PreloadedBatchedDenseRetriever...")
-                    before_type = type(cached_retriever).__name__
-                    cached_retriever = PreloadedBatchedDenseRetriever(cached_retriever)
-                    after_type = type(cached_retriever).__name__
-                    log_with_timestamp(f"[CACHE_WRAP_SUCCESS] {retriever_name}: {before_type} → {after_type}")
-                else:
-                    log_with_timestamp(f"[CACHE_NO_WRAP] {retriever_name}: use_lazy_loading={use_lazy_loading}, skipping wrapper")
+                log_with_timestamp(f"[CACHE_LOADED] Using cached {retriever_name}")
+                
+                if hasattr(cached_retriever, '_embeddings_path') and cached_retriever._embeddings_path:
+                    if cached_retriever.doc_embeddings is None:
+                        log_with_timestamp(f"[EMBEDDINGS_LAZY_LOAD] {retriever_name} keeping mmap reference for lazy loading")
+                        try:
+                            embeddings_mmap = np.load(cached_retriever._embeddings_path, mmap_mode='r')
+                            cached_retriever.doc_embeddings = embeddings_mmap
+                            log_with_timestamp(f"[EMBEDDINGS_LOADED] Using mmap for {embeddings_mmap.shape[0]} embeddings ({embeddings_mmap.shape})")
+                        except Exception as e:
+                            log_with_timestamp(f"[EMBEDDINGS_LOAD_ERROR] Failed to setup embeddings: {e}")
+                            raise RuntimeError(f"Failed to load embeddings for {retriever_name}: {e}")
                 
                 self._retrievers[cache_key] = cached_retriever
                 return cached_retriever
             
-            log_with_timestamp(f"[BUILD_START] Building new {retriever_name} index on {len(documents)} documents...")
-            start_time = datetime.now()
-            
-            retriever_class = self._available_retrievers[retriever_name]
-            retriever = retriever_class()
-            log_with_timestamp(f"[BUILD_FIT_START] Fitting {retriever_name}...")
-            
-            if metadata and hasattr(retriever, 'fit'):
-                retriever.fit(documents, metadata)
-            else:
-                retriever.fit(documents)
-            
-            build_time = (datetime.now() - start_time).total_seconds()
-            log_with_timestamp(f"[BUILD_FIT_SUCCESS] Built {retriever_name} index in {build_time:.2f}s")
-            
-            if hasattr(retriever, 'doc_embeddings'):
-                if retriever.doc_embeddings is not None:
-                    log_with_timestamp(f"  → {retriever_name} has doc_embeddings: {type(retriever.doc_embeddings).__name__} with {len(retriever.doc_embeddings)} items")
-                else:
-                    log_with_timestamp(f"  → {retriever_name} doc_embeddings is None")
-            
-            if use_lazy_loading and retriever_name in DENSE_RETRIEVERS:
-                log_with_timestamp(f"[WRAP_START] Wrapping {retriever_name} with PreloadedBatchedDenseRetriever...")
-                before_type = type(retriever).__name__
-                retriever = PreloadedBatchedDenseRetriever(retriever)
-                after_type = type(retriever).__name__
-                log_with_timestamp(f"[WRAP_SUCCESS] {retriever_name}: {before_type} → {after_type}")
-            else:
-                log_with_timestamp(f"[NO_WRAP] {retriever_name}: use_lazy_loading={use_lazy_loading}, skipping wrapper")
-            
-            self._retrievers[cache_key] = retriever
-            self._retriever_hashes[cache_key] = doc_hash
-            
-            log_with_timestamp(f"[CACHE_SAVE_START] Saving {retriever_name} to cache...")
-            self._save_to_cache(retriever_name, doc_hash, retriever)
-            
-            if retriever_name in DENSE_RETRIEVERS:
-                embeddings_path = os.path.join(
-                    self.lazy_cache.cache_dir,
-                    f"{retriever_name}_{doc_hash}_embeddings.npy"
-                )
-                if hasattr(retriever, '_embeddings_preload_path'):
-                    retriever._embeddings_preload_path = embeddings_path
-                    log_with_timestamp(f"[SET_PRELOAD_PATH] Set wrapper embeddings path: {embeddings_path}")
-            
-            return retriever
+            log_with_timestamp(f"[ERROR] No cached index found for {retriever_name}")
+            raise RuntimeError(f"Retriever {retriever_name} not in cache. Script only uses pre-built cached indices.")
     
     def clear_cache(self, retriever_name: Optional[str] = None):
         """Clear cached retrievers"""
@@ -1302,8 +1172,6 @@ def get_retriever_manager() -> RetrieverManager:
 
 
 if __name__ == "__main__":
-    from document_manager import get_document_manager
-    
     dm = get_document_manager()
     rm = get_retriever_manager()
     
@@ -1340,16 +1208,6 @@ import psutil
 import torch
 import threading
 from datetime import datetime
-from pathlib import Path
-from typing import List, Dict, Set, Tuple, Optional
-import concurrent.futures
-from collections import defaultdict
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-from utils import utils
-from document_manager import get_document_manager
-from retriever_manager import get_retriever_manager
-
 log_with_timestamp = utils.log_with_timestamp
 evaluate_retriever = utils.evaluate_retriever
 
@@ -1862,6 +1720,208 @@ def evaluate_batch_fullscale(
     return results
 
 
+def load_all_results(output_dir, user_ids):
+    """Load all evaluation result files and aggregate metrics."""
+    logger = logging.getLogger(__name__)
+    
+    # Result structure: {retriever: {mode: {metric: value}}}
+    aggregated = defaultdict(lambda: defaultdict(dict))
+    file_count = 0
+    
+    for user_id in user_ids:
+        user_dir = os.path.join(output_dir, user_id)
+        if not os.path.exists(user_dir):
+            continue
+        
+        for result_file in glob.glob(os.path.join(user_dir, "retrieval_*.json")):
+            try:
+                filename = os.path.basename(result_file)
+                parts = filename.replace("retrieval_", "").replace("_fullscale.json", "").split("_")
+                
+                if len(parts) >= 2:
+                    mode = parts[-1]
+                    retriever = "_".join(parts[:-1])
+                    
+                    with open(result_file, 'r') as f:
+                        data = json.load(f)
+                    
+                    if 'metrics' in data:
+                        metrics = data['metrics']
+                        for metric_key, metric_val in metrics.items():
+                            if isinstance(metric_val, (int, float)):
+                                key = f"{metric_key}"
+                                if key not in aggregated[retriever][mode]:
+                                    aggregated[retriever][mode][key] = []
+                                aggregated[retriever][mode][key].append(metric_val)
+                    
+                    file_count += 1
+            except Exception as e:
+                logger.error(f"Error loading {result_file}: {e}")
+    
+    return aggregated, file_count
+
+
+def compute_comparison_metrics(aggregated):
+    """Compute clean vs noisy comparison metrics."""
+    logger = logging.getLogger(__name__)
+    
+    comparison = {}
+    
+    for retriever, modes_data in aggregated.items():
+        if 'clean' not in modes_data or 'noisy' not in modes_data:
+            continue
+        
+        clean_metrics = {}
+        noisy_metrics = {}
+        
+        for metric, values in modes_data['clean'].items():
+            if values:
+                clean_metrics[metric] = np.mean(values)
+        
+        for metric, values in modes_data['noisy'].items():
+            if values:
+                noisy_metrics[metric] = np.mean(values)
+        
+        comparison[retriever] = {
+            'clean': clean_metrics,
+            'noisy': noisy_metrics,
+            'degradation': {}
+        }
+        
+        for metric in clean_metrics.keys():
+            if metric in noisy_metrics:
+                clean_val = clean_metrics[metric]
+                noisy_val = noisy_metrics[metric]
+                if clean_val > 0:
+                    degradation = (noisy_val - clean_val) / clean_val * 100
+                else:
+                    degradation = 0
+                comparison[retriever]['degradation'][metric] = degradation
+    
+    return comparison
+
+
+def print_comparison_report(comparison):
+    """Print comprehensive clean vs noisy comparison report."""
+    logger = logging.getLogger(__name__)
+    
+    print("\n" + "="*100)
+    print("🔥 CLEAN vs NOISY 性能对比分析 - 全量评估结果".center(100))
+    print("="*100)
+    
+    # Key metrics for ranking
+    key_metrics = ['ndcg@10', 'p@1', 'p@10', 'map@10', 'mrr@10', 'r@10']
+    
+    # Normalize metric names for comparison
+    normalized_comparison = {}
+    for retriever, data in comparison.items():
+        normalized_comparison[retriever] = {
+            'clean': {k.lower(): v for k, v in data['clean'].items()},
+            'noisy': {k.lower(): v for k, v in data['noisy'].items()},
+        }
+        # Compute degradation
+        normalized_comparison[retriever]['degradation'] = {}
+        for metric in normalized_comparison[retriever]['clean'].keys():
+            c = normalized_comparison[retriever]['clean'][metric]
+            n = normalized_comparison[retriever]['noisy'].get(metric, c)
+            if c > 0:
+                degradation = (n - c) / c * 100
+            else:
+                degradation = 0
+            normalized_comparison[retriever]['degradation'][metric] = degradation
+    
+    # Print NDCG@10 ranking (most important)
+    print("\n📊 核心指标排序 (NDCG@10 - 最重要)")
+    print("─" * 100)
+    
+    ndcg_ranking = []
+    for retriever, data in normalized_comparison.items():
+        ndcg_clean = data['clean'].get('ndcg@10', 0)
+        ndcg_noisy = data['noisy'].get('ndcg@10', 0)
+        ndcg_deg = data['degradation'].get('ndcg@10', 0)
+        ndcg_ranking.append((retriever, ndcg_clean, ndcg_noisy, ndcg_deg))
+    
+    ndcg_ranking.sort(key=lambda x: x[1], reverse=True)
+    
+    print(f"{'排名':<6} {'模型':<12} {'Clean':<12} {'Noisy':<12} {'变化':<12} {'评级':<12}")
+    print("─" * 100)
+    for idx, (retriever, clean, noisy, deg) in enumerate(ndcg_ranking, 1):
+        if deg > 0:
+            rating = "✅ 提升!" if deg > 1 else "✅ 稳定"
+            change = f"↑ +{deg:.2f}%"
+        else:
+            if deg > -2:
+                rating = "✅ 优秀"
+            elif deg > -5:
+                rating = "✓ 良好"
+            elif deg > -10:
+                rating = "⚠️ 一般"
+            else:
+                rating = "❌ 极差"
+            change = f"↓ {deg:.2f}%"
+        
+        print(f"{idx:<6} {retriever:<12} {clean:<12.4f} {noisy:<12.4f} {change:<12} {rating:<12}")
+    
+    # Print all metrics comparison
+    print("\n" + "="*100)
+    print("📈 全指标对比矩阵")
+    print("="*100)
+    
+    for retriever, data in normalized_comparison.items():
+        print(f"\n{retriever}")
+        print("─" * 80)
+        
+        metrics_to_show = ['p@1', 'p@10', 'ndcg@10', 'map@10', 'r@10']
+        
+        for metric in metrics_to_show:
+            clean = data['clean'].get(metric, 0)
+            noisy = data['noisy'].get(metric, 0)
+            deg = data['degradation'].get(metric, 0)
+            
+            indicator = "↑" if deg > 0 else "↓"
+            status = "✅" if abs(deg) < 2 else ""
+            
+            print(f"  {metric:<10} Clean: {clean:.4f}  Noisy: {noisy:.4f}  变化: {indicator} {deg:+.2f}%  {status}")
+    
+    # Print robustness ranking
+    print("\n" + "="*100)
+    print("🛡️ 噪声鲁棒性排名 (NDCG@10 降幅)")
+    print("="*100)
+    
+    robustness_ranking = []
+    for retriever, data in normalized_comparison.items():
+        ndcg_deg = data['degradation'].get('ndcg@10', 0)
+        robustness_ranking.append((retriever, ndcg_deg))
+    
+    robustness_ranking.sort(key=lambda x: x[1], reverse=True)
+    
+    print(f"\n{'排名':<6} {'模型':<12} {'降幅':<12} {'评级':<20} {'特征':<30}")
+    print("─" * 80)
+    
+    for idx, (retriever, deg) in enumerate(robustness_ranking, 1):
+        if deg > 0:
+            rating = "🟢 免疫"
+            feature = "唯一提升的模型"
+        elif deg > -2:
+            rating = "✅ 极稳定"
+            feature = "性能最稳定"
+        elif deg > -5:
+            rating = "✓ 稳定"
+            feature = "容错性好"
+        elif deg > -10:
+            rating = "⚠️ 一般"
+            feature = "中等敏感"
+        else:
+            rating = "❌ 极差"
+            feature = "噪声敏感"
+        
+        print(f"{idx:<6} {retriever:<12} {deg:+.2f}%{' ':<6} {rating:<20} {feature:<30}")
+    
+    print("\n" + "="*100)
+    print("✅ 评估完成".center(100))
+    print("="*100)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Full-scale Retrieval Evaluation')
     parser.add_argument('--mode', default='both', choices=['clean', 'noisy', 'both'])
@@ -1889,6 +1949,17 @@ def main():
     logger.info("\n" + "=" * 80)
     logger.info(f"Completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("=" * 80)
+    
+    # Load all results and print comparison report
+    logger.info("\nLoading all results for comparison analysis...")
+    aggregated, file_count = load_all_results(OUTPUT_DIR, user_ids)
+    logger.info(f"Loaded {file_count} result files")
+    
+    if aggregated:
+        comparison = compute_comparison_metrics(aggregated)
+        print_comparison_report(comparison)
+    else:
+        logger.warning("No results found for comparison analysis")
 
 
 if __name__ == '__main__':

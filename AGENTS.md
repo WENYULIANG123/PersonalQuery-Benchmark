@@ -60,6 +60,14 @@ When a task is complete, provide a concise summary of:
 - This must be the last sentence in your response after task completion
 - Use this in all task completion summaries
 
+### Rule 6: ALWAYS Respond in Chinese (中文)
+- ✅ **ALWAYS**: Every response MUST be in Chinese (中文)
+- ❌ **NEVER**: Use English in replies to the user
+- ❌ **NEVER**: Mix English and Chinese in explanations
+- Code comments and technical identifiers (file paths, function names) may remain in English
+- ✅ **Always**: Use clear, professional Chinese for all explanations and instructions
+- **Exception**: When quoting exact file content or code, preserve original formatting
+
 ---
 
 ## Example Commands

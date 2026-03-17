@@ -419,66 +419,33 @@ class E5Retriever:
         log_with_timestamp(f"    - Max windows per doc: {window_stats['max_windows']}")
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """
-        使用 E5 搜索（支持多窗口文档）
-        """
+        """Search using E5 (supports both multi-window and pooled embeddings)"""
         model = self._get_model()
 
         # 添加 query 前缀
         query_with_prefix = self._add_instruction(query, is_query=True)
         query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
 
-        # [DEBUG] Log query embedding info
-        log_with_timestamp(f"  [E5_DEBUG] Query: {query[:50]}...")
-        log_with_timestamp(f"  [E5_DEBUG] query_embedding shape: {query_embedding.shape}")
-        log_with_timestamp(f"  [E5_DEBUG] query_embedding norm: {query_embedding.norm().item():.6f}")
-        if query_embedding.dim() > 1:
-            log_with_timestamp(f"  [E5_DEBUG] ⚠️ query_embedding has batch size > 1! Shape: {query_embedding.shape}")
-
         # 计算每个文档的分数
         from sentence_transformers import util
         scores = []
 
-        # [DEBUG] Check if all doc embeddings are identical
-        if len(self.doc_embeddings) > 1:
-            first_emb = self.doc_embeddings[0]
-            all_same = True
-            checked_count = 0
-            for i in range(1, min(5, len(self.doc_embeddings))):
-                # 只比较相同形状的 embeddings（单窗口 vs 单窗口，多窗口 vs 多窗口）
-                if first_emb.shape == self.doc_embeddings[i].shape:
-                    if not torch.allclose(first_emb, self.doc_embeddings[i], atol=1e-7):
-                        all_same = False
-                        break
-                    checked_count += 1
-            if all_same and checked_count > 0:
-                log_with_timestamp(f"  [E5_DEBUG] ⚠️ WARNING: First {checked_count+1} DOC EMBEDDINGS ARE IDENTICAL!")
-            elif checked_count > 0:
-                log_with_timestamp(f"  [E5_DEBUG] ✓ Doc embeddings are different (checked first {checked_count+1} with same shape)")
-            else:
-                log_with_timestamp(f"  [E5_DEBUG] ⚠️ Cannot compare: embeddings have different shapes")
-
         for i, doc_emb in enumerate(self.doc_embeddings):
+            # Handle both list elements (tensors) and numpy array rows
+            if isinstance(doc_emb, np.ndarray):
+                doc_emb = torch.from_numpy(doc_emb).to(self.device)
+            
             if doc_emb.dim() == 1:
-                # 单窗口文档：直接计算余弦相似度
+                # Single-window or pooled embedding: direct cosine similarity
                 score = util.cos_sim(query_embedding, doc_emb.unsqueeze(0))[0][0].item()
             else:
-                # 多窗口文档：计算每个窗口的分数，取最大值
+                # Multi-window: max-pool across windows
                 window_scores = util.cos_sim(query_embedding, doc_emb)[0]
                 score = window_scores.max().item()
 
             scores.append((self.doc_ids[i], score))
-            
-            # [DEBUG] Log first 3 scores
-            if i < 3:
-                log_with_timestamp(f"  [E5_DEBUG] doc[{i}] ({self.doc_ids[i]}): score={score:.6f}, doc_emb shape={doc_emb.shape if hasattr(doc_emb, 'shape') else 'N/A'}")
 
-        # 按分数降序排序
         scores.sort(key=lambda x: -x[1])
-        
-        # [DEBUG] Log final ranking
-        log_with_timestamp(f"  [E5_DEBUG] Top 3 scores after sort: {[s for _, s in scores[:3]]}")
-        
         return scores[:top_k]
 
 

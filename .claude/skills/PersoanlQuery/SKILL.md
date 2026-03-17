@@ -307,13 +307,21 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 
 ### Stage 12: 检索评估
 
-**阶段描述**：使用优化的批量评估系统，高效评估所有用户的查询在多种检索模型下的表现。该系统通过共享文档加载和检索器索引，大幅提升评估效率。
+**阶段描述**：提取构建索引文件。
 
-**主要特性**：
-- **一次加载，多次使用**：文档只需加载一次，所有检索器共享
-- **索引复用**：每种检索器的索引只构建一次，跨用户复用
-- **并行处理**：支持多个检索器并行评估
-- **自动缓存**：文档和索引自动缓存到磁盘，支持断点续传
+**运行命令**：
+
+```bash
+# 批量处理所有用户（自动发现完成Stage 6的用户）
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
+    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+     cd /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/12_retrieval/evaluators && \
+     python -u 12_build_retriever_indices.py"
+```
+
+
+**阶段描述**：使用优化的批量评估系统，高效评估所有用户的查询在多种检索模型下的表现。该系统通过共享文档加载和检索器索引，大幅提升评估效率。
 
 **运行命令**：
 
@@ -326,135 +334,3 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
      python -u 12_evaluate_all_users_fullscale.py"
 ```
 
-### Stage 13: LLM Reranking
-
-**阶段描述**：使用大语言模型（GLM、Minimax、Qwen）对 Stage 12 的检索结果进行重排序，利用用户画像上下文提升个性化效果。
-
-**主要特性**：
-- **Persona Context**: 基于 Stage 1 偏好自动构建用户画像上下文
-- **Conflict Resolution**: 自动识别并过滤与查询冲突的偏好
-- **Two Modes**: 支持 Standard（无画像）和 Personalized（含画像）双模式对比评估
-
----
-
-#### 🧠 GLM Reranker（智谱 AI）
-
-**脚本路径**：`.claude/skills/PersoanlQuery/13_rerank/llm_reranking/`
-
-**架构**: BM25 召回 → GLM API 重排
-
-**支持模型**：
-- **GLM-4.5V**: 视觉语言模型
-- **GLM-4.7**: 高级推理模型
-- **GLM-5**: 最新旗舰模型
-
-**运行示例**：
-
-```bash
-# GLM-4.5V
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_rerank/llm_reranking/13_evaluate_glm_4_5v_both.py \
-     --user-id A13OFOB1394G31"
-
-# GLM-4.7
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_rerank/llm_reranking/13_evaluate_glm_4_7_both.py \
-     --user-id A13OFOB1394G31"
-
-# GLM-5
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_rerank/llm_reranking/13_evaluate_glm_5_both.py \
-     --user-id A13OFOB1394G31"
-```
-
----
-
-#### ⚡ Minimax Reranker
-
-**脚本路径**：`.claude/skills/PersoanlQuery/13_rerank/llm_reranking/`
-
-**架构**: E5 召回 → Minimax API 重排
-
-**支持模型**：
-- **M2.5-highspeed**: 高速推理版本（推荐）
-- **M2.1**: 优化版本
-- **M2**: 基础版本
-
-**特性**：
-- 自动 500 错误重试
-- 支持并发请求（提升速度）
-- 完整的错误日志
-
-**运行示例**：
-
-```bash
-# M2.5-highspeed（推荐）
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_rerank/llm_reranking/13_evaluate_minimax_m2_5_highspeed.py \
-     --user-id A13OFOB1394G31"
-
-# M2.1
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_rerank/llm_reranking/13_evaluate_minimax_m2_1.py \
-     --user-id A13OFOB1394G31"
-
-# M2
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_rerank/llm_reranking/13_evaluate_minimax_m2.py \
-     --user-id A13OFOB1394G31"
-```
-
----
-
-#### 🤖 Qwen Reranker
-
-**脚本路径**：`.claude/skills/PersoanlQuery/13_rerank/llm_reranking/13_evaluate_qwen_7b.py`
-
-**架构**: BM25 召回 → Qwen-7B 重排
-
-```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/13_rerank/llm_reranking/13_evaluate_qwen_7b.py \
-     --user-id A13OFOB1394G31"
-```
-
----
-
-#### 📊 输出格式
-
-**输出目录**：`result/personal_query/13_rerank/`
-
-**文件命名**：
-- Standard 模式：`rerank_{model}_standard_{user_id}.json`
-- Personalized 模式：`rerank_{model}_personalized_{user_id}.json`
-
-**指标**：
-- Recall@K（K=1,3,5,10）
-- MRR（Mean Reciprocal Rank）
-- NDCG@K（Normalized Discounted Cumulative Gain）
-- MAP（Mean Average Precision）
-
-**详细文档**：`/home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/13_rerank/README.md`
-
----
