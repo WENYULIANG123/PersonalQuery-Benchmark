@@ -1126,13 +1126,15 @@ class RetrieverManager:
                 
                 if hasattr(cached_retriever, '_embeddings_path') and cached_retriever._embeddings_path:
                     if cached_retriever.doc_embeddings is None:
-                        log_with_timestamp(f"[EMBEDDINGS_LAZY_LOAD] {retriever_name} keeping mmap reference for lazy loading")
+                        log_with_timestamp(f"[EMBEDDINGS_LOAD] {retriever_name} loading from mmap, will make writable copy")
                         try:
                             embeddings_mmap = np.load(cached_retriever._embeddings_path, mmap_mode='r')
-                            cached_retriever.doc_embeddings = embeddings_mmap
-                            log_with_timestamp(f"[EMBEDDINGS_LOADED] Using mmap for {embeddings_mmap.shape[0]} embeddings ({embeddings_mmap.shape})")
+                            log_with_timestamp(f"[EMBEDDINGS_SIZE] Shape: {embeddings_mmap.shape}")
+                            embeddings_tensor = torch.from_numpy(embeddings_mmap).float().clone()
+                            cached_retriever.doc_embeddings = embeddings_tensor
+                            log_with_timestamp(f"[EMBEDDINGS_READY] Tensor shape: {embeddings_tensor.shape}, writable: {embeddings_tensor.is_cuda or True}")
                         except Exception as e:
-                            log_with_timestamp(f"[EMBEDDINGS_LOAD_ERROR] Failed to setup embeddings: {e}")
+                            log_with_timestamp(f"[EMBEDDINGS_FAIL] {str(e)[:200]}")
                             raise RuntimeError(f"Failed to load embeddings for {retriever_name}: {e}")
                 
                 self._retrievers[cache_key] = cached_retriever
