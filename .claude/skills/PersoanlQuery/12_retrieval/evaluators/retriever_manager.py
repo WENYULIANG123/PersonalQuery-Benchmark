@@ -103,16 +103,14 @@ class RetrieverManager:
         cache_path = self._get_cache_path(retriever_name, doc_hash)
         if os.path.exists(cache_path):
             try:
-                cache_age = datetime.now().timestamp() - os.path.getmtime(cache_path)
-                if cache_age < 604800:  # 7 days
-                    log_with_timestamp(f"[CACHE_LOAD_START] Loading {retriever_name} from cache...")
-                    cache_size_mb = os.path.getsize(cache_path) / (1024 * 1024)
-                    log_with_timestamp(f"  Cache file size: {cache_size_mb:.1f} MB")
-                    with open(cache_path, 'rb') as f:
-                        retriever = pickle.load(f)
-                    
-                    log_with_timestamp(f"[CACHE_LOAD_SUCCESS] Loaded {retriever_name}, type: {type(retriever).__name__}")
-                    return retriever
+                log_with_timestamp(f"[CACHE_LOAD_START] Loading {retriever_name} from cache...")
+                cache_size_mb = os.path.getsize(cache_path) / (1024 * 1024)
+                log_with_timestamp(f"  Cache file size: {cache_size_mb:.1f} MB")
+                with open(cache_path, 'rb') as f:
+                    retriever = pickle.load(f)
+                
+                log_with_timestamp(f"[CACHE_LOAD_SUCCESS] Loaded {retriever_name}, type: {type(retriever).__name__}")
+                return retriever
             except Exception as e:
                 log_with_timestamp(f"Error loading cache for {retriever_name}: {e}")
         
