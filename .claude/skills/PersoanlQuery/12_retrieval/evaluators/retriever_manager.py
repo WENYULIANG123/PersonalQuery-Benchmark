@@ -90,8 +90,17 @@ class RetrieverManager:
     
     def _load_from_cache(self, retriever_name: str, doc_hash: str) -> Optional[Any]:
         """Load retriever from disk cache if available"""
-        cache_path = self._get_cache_path(retriever_name, doc_hash)
+        if retriever_name in DENSE_RETRIEVERS:
+            log_with_timestamp(f"[CACHE_LOAD_START] Loading {retriever_name} from cache...")
+            log_with_timestamp(f"  Using LazyEmbeddingCache for {retriever_name}...")
+            retriever = self.lazy_cache.load_retriever(retriever_name, doc_hash)
+            if retriever:
+                log_with_timestamp(f"[CACHE_LOAD_SUCCESS] Loaded {retriever_name}, embeddings deferred")
+                if hasattr(retriever, '_embeddings_path'):
+                    log_with_timestamp(f"  → Embeddings reference: {retriever._embeddings_path}")
+            return retriever
         
+        cache_path = self._get_cache_path(retriever_name, doc_hash)
         if os.path.exists(cache_path):
             try:
                 cache_age = datetime.now().timestamp() - os.path.getmtime(cache_path)
@@ -99,21 +108,11 @@ class RetrieverManager:
                     log_with_timestamp(f"[CACHE_LOAD_START] Loading {retriever_name} from cache...")
                     cache_size_mb = os.path.getsize(cache_path) / (1024 * 1024)
                     log_with_timestamp(f"  Cache file size: {cache_size_mb:.1f} MB")
+                    with open(cache_path, 'rb') as f:
+                        retriever = pickle.load(f)
                     
-                    if retriever_name in DENSE_RETRIEVERS:
-                        log_with_timestamp(f"  Using LazyEmbeddingCache for {retriever_name}...")
-                        retriever = self.lazy_cache.load_retriever(retriever_name, doc_hash)
-                        if retriever:
-                            log_with_timestamp(f"[CACHE_LOAD_SUCCESS] Loaded {retriever_name}, embeddings deferred")
-                            if hasattr(retriever, '_embeddings_path'):
-                                log_with_timestamp(f"  → Embeddings reference: {retriever._embeddings_path}")
-                        return retriever
-                    else:
-                        with open(cache_path, 'rb') as f:
-                            retriever = pickle.load(f)
-                        
-                        log_with_timestamp(f"[CACHE_LOAD_SUCCESS] Loaded {retriever_name}, type: {type(retriever).__name__}")
-                        return retriever
+                    log_with_timestamp(f"[CACHE_LOAD_SUCCESS] Loaded {retriever_name}, type: {type(retriever).__name__}")
+                    return retriever
             except Exception as e:
                 log_with_timestamp(f"Error loading cache for {retriever_name}: {e}")
         
