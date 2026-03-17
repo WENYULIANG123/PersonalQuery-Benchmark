@@ -151,13 +151,18 @@ class LazyRetrieverWrapper:
             doc_embeddings = self.retriever.doc_embeddings
             log_with_timestamp(f"  [LOAD_EMB_FAST] Loading from doc_embeddings in memory")
         elif hasattr(self.retriever, '_embeddings_path') and self.retriever._embeddings_path:
-            log_with_timestamp(f"  [LOAD_EMB_MMAP] Loading from mmap: {self.retriever._embeddings_path}")
-            try:
-                doc_embeddings = np.load(self.retriever._embeddings_path, mmap_mode='r')
-                log_with_timestamp(f"    Loaded {doc_embeddings.shape}")
-            except Exception as e:
-                log_with_timestamp(f"    Error loading embeddings: {e}")
-                return {}
+            if self._mmap_cache is None:
+                log_with_timestamp(f"  [LOAD_EMB_MMAP_INIT] Initializing persistent mmap cache: {self.retriever._embeddings_path}")
+                try:
+                    self._mmap_cache = np.load(self.retriever._embeddings_path, mmap_mode='r')
+                    log_with_timestamp(f"    ✓ Cached mmap shape: {self._mmap_cache.shape}")
+                except Exception as e:
+                    log_with_timestamp(f"    Error loading embeddings: {e}")
+                    return {}
+            else:
+                log_with_timestamp(f"  [LOAD_EMB_MMAP_CACHED] Reusing cached mmap (shape: {self._mmap_cache.shape})")
+            
+            doc_embeddings = self._mmap_cache
         else:
             log_with_timestamp(f"  [LOAD_EMB_NONE] No embeddings found (doc_embeddings={getattr(self.retriever, 'doc_embeddings', 'missing')}, _embeddings_path={getattr(self.retriever, '_embeddings_path', 'missing')})")
             return {}
@@ -241,6 +246,7 @@ class BatchedLazyRetrieverWrapper(LazyRetrieverWrapper):
     def __init__(self, retriever: Any, batch_size: int = 2500, cache_dir: str = None):
         super().__init__(retriever, cache_dir)
         self.batch_size = batch_size
+        self._mmap_cache = None
         log_with_timestamp(f"[BatchedLazyRetriever] Batch size: {batch_size}")
     
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:

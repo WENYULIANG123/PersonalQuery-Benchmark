@@ -69,12 +69,12 @@ RETRIEVER_NAMES = [
 DEFAULT_K_VALUES = [1, 3, 5, 10]
 
 RETRIEVER_TYPES = {
-    'sparse': [],  # TEMPORARILY DISABLED FOR DEBUGGING DENSE TIMEOUT ISSUE
+    'sparse': [],
     'dense': ['dense', 'ance', 'bge', 'e5', 'minilm', 'mpnet', 'star'],
     'late': []  # ['colbert']  ← 暂时禁用 ColBERT 评估
 }
 
-RETRIEVER_ORDER = ['dense']  # FOCUS: Dense retriever debugging only (skipping sparse)
+RETRIEVER_ORDER = ['dense']
 
 
 def setup_logging():
