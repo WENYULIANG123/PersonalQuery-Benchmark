@@ -229,6 +229,16 @@ class RetrieverManager:
             log_with_timestamp(f"[CACHE_SAVE_START] Saving {retriever_name} to cache...")
             self._save_to_cache(retriever_name, doc_hash, retriever)
             
+            # Set embeddings path for PreloadedBatchedDenseRetriever to find cached embeddings
+            if retriever_name in DENSE_RETRIEVERS:
+                embeddings_path = os.path.join(
+                    self.lazy_cache.cache_dir,
+                    f"{retriever_name}_{doc_hash}_embeddings.npy"
+                )
+                if hasattr(retriever, '_embeddings_path'):
+                    retriever._embeddings_path = embeddings_path
+                    log_with_timestamp(f"[SET_EMB_PATH] Set _embeddings_path for {retriever_name}: {embeddings_path}")
+            
             return retriever
     
     def clear_cache(self, retriever_name: Optional[str] = None):
