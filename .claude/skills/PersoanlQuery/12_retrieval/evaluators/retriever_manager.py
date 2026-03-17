@@ -229,18 +229,14 @@ class RetrieverManager:
             log_with_timestamp(f"[CACHE_SAVE_START] Saving {retriever_name} to cache...")
             self._save_to_cache(retriever_name, doc_hash, retriever)
             
-            # Set embeddings path and re-trigger preload detection
             if retriever_name in DENSE_RETRIEVERS:
                 embeddings_path = os.path.join(
                     self.lazy_cache.cache_dir,
                     f"{retriever_name}_{doc_hash}_embeddings.npy"
                 )
-                if hasattr(retriever, '_embeddings_path'):
-                    retriever._embeddings_path = embeddings_path
-                    log_with_timestamp(f"[SET_EMB_PATH] Set _embeddings_path for {retriever_name}: {embeddings_path}")
-                    if hasattr(retriever, '_preload_all_embeddings'):
-                        retriever._preload_all_embeddings()
-                        log_with_timestamp(f"[REDETECT_PATH] Re-triggered embeddings detection after path set")
+                if hasattr(retriever, '_embeddings_preload_path'):
+                    retriever._embeddings_preload_path = embeddings_path
+                    log_with_timestamp(f"[SET_PRELOAD_PATH] Set wrapper embeddings path: {embeddings_path}")
             
             return retriever
     
