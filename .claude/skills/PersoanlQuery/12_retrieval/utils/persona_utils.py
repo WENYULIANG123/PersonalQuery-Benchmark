@@ -7,7 +7,7 @@ Used by all LLM evaluation scripts
 import os
 import re
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple, Any, Set
 
 
 def classify_preference_relevance(preference: Dict, query_info: Dict) -> str:
@@ -248,3 +248,190 @@ Analysis:'''
 
 # Alias for backward compatibility
 build_persona_context = build_enhanced_persona_context
+
+
+# ============================================================================
+# Personalization Boost for Retrieval Ranking
+# ============================================================================
+
+def _collect_user_related_asins(
+    persona_context: Dict,
+    all_metadata: Dict[str, Dict],
+) -> Set[str]:
+    """
+    Collect ASINs that appear in also_buy / also_view of the user's
+    previously interacted products.
+
+    Args:
+        persona_context: Dict that may contain 'user_history_asins'
+                         (set/list of ASINs the user interacted with).
+        all_metadata:    Full product metadata keyed by ASIN.
+
+    Returns:
+        Set of ASINs related to the user through also_buy / also_view.
+    """
+    related: Set[str] = set()
+    history_asins = persona_context.get('user_history_asins', [])
+    for asin in history_asins:
+        meta = all_metadata.get(asin, {})
+        for asin_rel in meta.get('also_buy', []):
+            related.add(asin_rel)
+        for asin_rel in meta.get('also_view', []):
+            related.add(asin_rel)
+    return related
+
+
+def compute_personalization_boost(
+    candidate_asin: str,
+    persona_context: Optional[Dict],
+    user_category: str,
+    all_metadata: Dict[str, Dict],
+) -> float:
+    """
+    Compute a personalization boost score for a candidate product.
+
+    Boost logic (additive, capped at [0, 1]):
+      +0.3  if candidate is in also_buy / also_view of user's history items
+      +0.4  per REQUIRED attribute that matches the candidate product text
+      +0.2  per RELEVANT attribute that matches the candidate product text
+      -0.3  per CONFLICTING attribute that matches the candidate product text
+
+    Args:
+        candidate_asin:  ASIN of the candidate product.
+        persona_context: Dict with keys:
+            - 'classified' : {'REQUIRED': [...], 'RELEVANT': [...],
+                              'CONFLICTING': [...], 'IRRELEVANT': [...]}
+            - 'user_history_asins': list/set of ASINs (optional)
+        user_category:   Product category string (unused currently, kept for
+                         future category-specific weighting).
+        all_metadata:    Full product metadata dict keyed by ASIN.
+
+    Returns:
+        Float in [0.0, 1.0].
+    """
+    if not persona_context:
+        return 0.0
+
+    boost = 0.0
+
+    related_asins = _collect_user_related_asins(persona_context, all_metadata)
+    if candidate_asin in related_asins:
+        boost += 0.3
+
+    classified = persona_context.get('classified', {})
+    candidate_meta = all_metadata.get(candidate_asin, {})
+
+    candidate_text = ' '.join([
+        str(candidate_meta.get('title', '')),
+        str(candidate_meta.get('brand', '')),
+        ' '.join(str(f) for f in candidate_meta.get('feature', []) if f),
+        ' '.join(str(d) for d in candidate_meta.get('description', []))
+            if isinstance(candidate_meta.get('description'), list)
+            else str(candidate_meta.get('description', '')),
+    ]).lower()
+
+    # REQUIRED attributes: +0.4 if matched
+    for attr in classified.get('REQUIRED', []):
+        attr_value = attr.get('attribute', attr.get('value', '')).lower()
+        if attr_value and attr_value in candidate_text:
+            boost += 0.4
+
+    # RELEVANT attributes: +0.2 if matched
+    for attr in classified.get('RELEVANT', []):
+        attr_value = attr.get('attribute', attr.get('value', '')).lower()
+        if attr_value and attr_value in candidate_text:
+            boost += 0.2
+
+    # CONFLICTING attributes: -0.3 if matched
+    for attr in classified.get('CONFLICTING', []):
+        attr_value = attr.get('attribute', attr.get('value', '')).lower()
+        if attr_value and attr_value in candidate_text:
+            boost -= 0.3
+
+    # Clamp to [0, 1]
+    return max(0.0, min(1.0, boost))
+
+
+class PersonalizedRetriever:
+    """
+    Wrapper that applies user-preference personalization boosts on top of
+    any base retriever's scores, then returns reranked results.
+
+    Usage::
+
+        pr = PersonalizedRetriever(base_retriever, persona_context,
+                                   all_metadata, user_category)
+        results = pr.search("query text", top_k=10)
+
+    When *persona_context* is ``None`` the wrapper is transparent and
+    simply delegates to the base retriever.
+    """
+
+    def __init__(
+        self,
+        base_retriever: Any,
+        persona_context: Optional[Dict] = None,
+        all_metadata: Optional[Dict[str, Dict]] = None,
+        user_category: str = "",
+        boost_weight: float = 0.15,
+    ) -> None:
+        """
+        Args:
+            base_retriever:  Any object that exposes
+                             ``.search(query, top_k) -> List[Tuple[str, float]]``.
+            persona_context: Output of persona classification (may include
+                             'classified' and 'user_history_asins' keys).
+                             Pass ``None`` to disable personalization.
+            all_metadata:    Full product metadata dict (needed for
+                             also_buy/also_view and attribute matching).
+            user_category:   Product category (e.g. "Clothing").
+            boost_weight:    Weight applied to the personalization boost
+                             before combining with the base score.
+                             ``final = base_score + boost_weight * boost``
+                             Default 0.15 keeps ranking stable while
+                             nudging related products up.
+        """
+        self.base_retriever = base_retriever
+        self.persona_context = persona_context
+        self.all_metadata = all_metadata or {}
+        self.user_category = user_category
+        self.boost_weight = boost_weight
+
+    def search(
+        self, query: str, top_k: int = 10
+    ) -> List[Tuple[str, float]]:
+        """
+        Run base retrieval, apply personalization boost, return reranked
+        top-k results.
+
+        Args:
+            query:  Search query string.
+            top_k:  Number of results to return.
+
+        Returns:
+            List of ``(asin, boosted_score)`` tuples sorted descending.
+        """
+        # Retrieve more candidates so boosting can promote items into top-k
+        fetch_k = max(top_k * 2, top_k + 20)
+        base_results: List[Tuple[str, float]] = self.base_retriever.search(
+            query, top_k=fetch_k
+        )
+
+        if not self.persona_context or not base_results:
+            return base_results[:top_k]
+
+        # Apply personalization boost
+        boosted: List[Tuple[str, float]] = []
+        for asin, base_score in base_results:
+            p_boost = compute_personalization_boost(
+                candidate_asin=asin,
+                persona_context=self.persona_context,
+                user_category=self.user_category,
+                all_metadata=self.all_metadata,
+            )
+            final_score = base_score + self.boost_weight * p_boost
+            boosted.append((asin, final_score))
+
+        # Re-sort by boosted score descending
+        boosted.sort(key=lambda x: -x[1])
+        return boosted[:top_k]

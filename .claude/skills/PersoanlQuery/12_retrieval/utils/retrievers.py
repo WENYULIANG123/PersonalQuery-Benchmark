@@ -8,6 +8,7 @@ Contains all base retriever classes:
 - E5Retriever: E5-large-v2 dense retrieval
 - BGERetriever: BGE-large-en dense retrieval
 - ColBERTRetriever: Token-level late interaction
+- HybridRetriever: BM25 + Dense score fusion hybrid retrieval
 - TFIDFRetriever: TF-IDF baseline
 - DirichletPriorRetriever: Query likelihood with Dirichlet smoothing
 """
@@ -20,75 +21,196 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils import log_with_timestamp, build_document_text
 
+try:
+    import bm25s
+except ImportError:
+    log_with_timestamp("WARNING: bm25s not installed. BM25 will not work properly.")
+    bm25s = None
+
 
 class BM25:
-    """BM25 retrieval model"""
+    """BM25 retrieval model using bm25s library with proper tokenization"""
     def __init__(self, k1=1.5, b=0.75):
         self.k1 = k1
         self.b = b
-        self.doc_len = []
-        self.avgdl = 0
-        self.doc_freqs = {}
-        self.idf = {}
-        self.doc_tokens = []
-        self.doc_asins = []  # 添加 ASIN 列表
+        self.retriever = None
+        self.doc_asins = []
+        self.corpus = []
+        self.corpus_to_asin = {}
         
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
-        """Build BM25 index using enhanced document text"""
-        log_with_timestamp("  Building BM25 index...")
-        nd = {}
+        """Build BM25 index using bm25s with proper tokenization"""
+        log_with_timestamp("  Building BM25 index using bm25s...")
+        
+        if bm25s is None:
+            raise RuntimeError("bm25s library is required but not installed")
+        
+        self.corpus = []
+        self.doc_asins = []
+        self.corpus_to_asin = {}
+        
         for doc in documents:
             asin = doc.get('asin', '')
-            self.doc_asins.append(asin)  # 存储 ASIN
-            # 使用增强的文档文本构建
+            self.doc_asins.append(asin)
             text = build_document_text(doc, all_metadata)
-            tokens = text.lower().split()
-            self.doc_tokens.append(tokens)
-            self.doc_len.append(len(tokens))
-
-            frequencies = {}
-            for token in tokens:
-                frequencies[token] = frequencies.get(token, 0) + 1
-
-            for token, freq in frequencies.items():
-                if token not in nd:
-                    nd[token] = 0
-                nd[token] += 1
-
-        self.avgdl = sum(self.doc_len) / len(self.doc_len) if self.doc_len else 0
-
-        # Calculate IDF
-        N = len(documents)
-        for token, freq in nd.items():
-            self.idf[token] = np.log((N - freq + 0.5) / (freq + 0.5) + 1)
-
-        log_with_timestamp(f"  BM25 index built with {len(self.doc_tokens)} docs, {len(self.idf)} terms")
+            self.corpus.append(text)
+            self.corpus_to_asin[text] = asin
+        
+        log_with_timestamp(f"  Tokenizing {len(self.corpus)} documents...")
+        tokenized_corpus = bm25s.tokenize(
+            self.corpus,
+            lower=True,
+            stopwords="english",
+            show_progress=False
+        )
+        
+        self.retriever = bm25s.BM25(corpus=self.corpus)
+        self.retriever.index(tokenized_corpus)
+        
+        log_with_timestamp(f"  BM25 index built with {len(self.corpus)} docs using bm25s")
     
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """Search using BM25"""
-        query_tokens = query.lower().split()
-        scores = []
+        """Search using BM25 with bm25s library"""
+        if self.retriever is None:
+            return []
+        
+        tokenized_query = bm25s.tokenize(
+            query,
+            lower=True,
+            stopwords="english",
+            show_progress=False
+        )
+        
+        results, scores = self.retriever.retrieve(tokenized_query, k=top_k)
+        
+        output = []
+        retrieved_texts = results[0]
+        scores_list = scores[0].tolist()
+        
+        for doc_text, score in zip(retrieved_texts, scores_list):
+            asin = self.corpus_to_asin.get(doc_text, '')
+            if asin:
+                output.append((asin, float(score)))
+        
+        return output
 
-        for doc_id, tokens in enumerate(self.doc_tokens):
-            score = 0
-            doc_len = self.doc_len[doc_id]
 
-            frequencies = {}
-            for token in tokens:
-                frequencies[token] = frequencies.get(token, 0) + 1
+class HybridRetriever:
+    """Hybrid retrieval combining BM25 sparse scores with Dense embedding scores via weighted score fusion.
 
-            for token in query_tokens:
-                if token in frequencies:
-                    freq = frequencies[token]
-                    idf = self.idf.get(token, 0)
-                    score += idf * (freq * (self.k1 + 1)) / (freq + self.k1 * (1 - self.b + self.b * doc_len / self.avgdl))
+    Runs both BM25 and a dense retriever (default: E5-large-v2), normalizes their
+    scores to [0, 1] via min-max scaling, and returns a weighted combination.
 
-            # 返回 (asin, score) 而不是 (doc_id, score)
-            asin = self.doc_asins[doc_id]
-            scores.append((asin, score))
+    Default weights: 0.4 BM25 + 0.6 Dense (empirically tuned for product search).
+    """
 
-        scores.sort(key=lambda x: -x[1])
-        return scores[:top_k]
+    def __init__(self, bm25_weight: float = 0.4, dense_weight: float = 0.6,
+                 dense_model_name: str = "intfloat/e5-large-v2"):
+        """
+        Args:
+            bm25_weight: Weight for normalized BM25 scores (default 0.4).
+            dense_weight: Weight for normalized Dense scores (default 0.6).
+            dense_model_name: HuggingFace model ID for the dense retriever.
+        """
+        self.bm25_weight = bm25_weight
+        self.dense_weight = dense_weight
+        self.dense_model_name = dense_model_name
+        self.bm25: BM25 = BM25()
+        self.dense: "E5Retriever" = None  # type: ignore[assignment]
+        self.doc_ids: List[str] = []
+        self.is_fitted: bool = False
+
+    def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
+        """Initialize BOTH BM25 and Dense (E5) indices from the same document set.
+
+        Args:
+            documents: List of document dicts, each must contain an 'asin' key.
+            all_metadata: Optional metadata dict keyed by ASIN for enriched text.
+        """
+        log_with_timestamp("  Building Hybrid (BM25 + E5 Dense) index...")
+        self.doc_ids = [doc.get('asin', '') for doc in documents]
+
+        self.bm25.fit(documents, all_metadata)
+
+        self.dense = E5Retriever(model_name=self.dense_model_name)
+        self.dense.fit(documents, all_metadata)
+
+        self.is_fitted = True
+        log_with_timestamp(
+            f"  Hybrid index built with {len(self.doc_ids)} docs "
+            f"(weights: BM25={self.bm25_weight}, Dense={self.dense_weight})"
+        )
+
+    @staticmethod
+    def _normalize_scores(scores: List[Tuple[str, float]]) -> Dict[str, float]:
+        """Min-max normalize raw scores to [0, 1].
+
+        Args:
+            scores: List of (asin, raw_score) tuples.
+
+        Returns:
+            Dict mapping asin -> normalized score in [0, 1].
+        """
+        if not scores:
+            return {}
+
+        raw = [s for _, s in scores]
+        min_s = min(raw)
+        max_s = max(raw)
+        score_range = max_s - min_s
+
+        if score_range < 1e-12:
+            # All scores identical -> uniform mid-point
+            return {asin: 0.5 for asin, _ in scores}
+
+        return {asin: (score - min_s) / score_range for asin, score in scores}
+
+    def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+        """Run both retrievers, fuse normalized scores, return merged top-k.
+
+        Score fusion:
+            combined = bm25_weight * norm_bm25 + dense_weight * norm_dense
+        Missing results from either side receive 0.0 for that component.
+
+        Args:
+            query: Search query string.
+            top_k: Number of results to return.
+
+        Returns:
+            List of (asin, fused_score) sorted descending by score.
+        """
+        if not self.is_fitted:
+            return []
+
+        fetch_k = max(top_k * 3, 50)
+        bm25_results = self.bm25.search(query, top_k=fetch_k)
+        dense_results = self.dense.search(query, top_k=fetch_k)
+
+        # Handle edge cases: one or both empty
+        if not bm25_results and not dense_results:
+            return []
+        if not bm25_results:
+            return dense_results[:top_k]
+        if not dense_results:
+            return bm25_results[:top_k]
+
+        # Normalize each score set to [0, 1]
+        bm25_norm = self._normalize_scores(bm25_results)
+        dense_norm = self._normalize_scores(dense_results)
+
+        # Union of all candidate ASINs
+        all_asins = set(bm25_norm.keys()) | set(dense_norm.keys())
+
+        # Weighted fusion (missing component -> 0.0)
+        fused: List[Tuple[str, float]] = []
+        for asin in all_asins:
+            b_score = bm25_norm.get(asin, 0.0)
+            d_score = dense_norm.get(asin, 0.0)
+            combined = self.bm25_weight * b_score + self.dense_weight * d_score
+            fused.append((asin, float(combined)))
+
+        fused.sort(key=lambda x: -x[1])
+        return fused[:top_k]
 
 
 class DenseRetriever:
@@ -310,7 +432,7 @@ class E5Retriever:
         log_with_timestamp(f"  [E5_DEBUG] Query: {query[:50]}...")
         log_with_timestamp(f"  [E5_DEBUG] query_embedding shape: {query_embedding.shape}")
         log_with_timestamp(f"  [E5_DEBUG] query_embedding norm: {query_embedding.norm().item():.6f}")
-        if query_embedding.shape[0] > 1:
+        if query_embedding.dim() > 1:
             log_with_timestamp(f"  [E5_DEBUG] ⚠️ query_embedding has batch size > 1! Shape: {query_embedding.shape}")
 
         # 计算每个文档的分数
@@ -683,6 +805,16 @@ class ColBERTRetriever:
         log_with_timestamp(f"    - Single window: {window_stats['single_window']} docs")
         log_with_timestamp(f"    - Multi window: {window_stats['multi_window']} docs")
         log_with_timestamp(f"    - Max windows per doc: {window_stats['max_windows']}")
+        
+        # THREAD SAFETY FIX: Pre-move all embeddings to device during fit()
+        # This avoids concurrent .to(device) calls in search() which cause "Already borrowed" errors
+        log_with_timestamp("  Moving embeddings to device for thread safety...")
+        self.doc_embeddings = [
+            [w.to(self.device) for w in emb] if isinstance(emb, list)
+            else emb.to(self.device)
+            for emb in self.doc_embeddings
+        ]
+        log_with_timestamp(f"  All embeddings moved to {self.device}")
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """
@@ -710,8 +842,6 @@ class ColBERTRetriever:
                 # 多窗口文档：计算每个窗口的分数，取最大值
                 window_scores = []
                 for window_emb in doc_emb:
-                    window_emb = window_emb.to(self.device)  # [window_len, hidden_size]
-
                     # 归一化窗口 embeddings
                     window_emb_normalized = window_emb / window_emb.norm(dim=-1, keepdim=True).clamp(min=1e-8)
 
@@ -725,8 +855,6 @@ class ColBERTRetriever:
                 score = max(window_scores)
             else:
                 # 单窗口文档：直接计算
-                doc_emb = doc_emb.to(self.device)  # [doc_len, hidden_size]
-
                 # 归一化文档 embeddings
                 doc_emb_normalized = doc_emb / doc_emb.norm(dim=-1, keepdim=True).clamp(min=1e-8)
 

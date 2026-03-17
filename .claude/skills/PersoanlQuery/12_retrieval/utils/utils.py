@@ -54,7 +54,11 @@ def clean_data(item) -> str:
         return ''
     if isinstance(item, str):
         parser = _get_bs4_parser()
-        item = ' '.join(parser(item, "lxml").text.split())
+        # Explicitly pass 'lxml' to avoid BeautifulSoup warnings about URL-like strings
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning, message=".*MarkupResemblesLocatorWarning.*")
+            item = ' '.join(parser(item, "lxml").text.split())
     elif isinstance(item, list):
         item = ' '.join(str(x) for x in item if x)
     else:
@@ -652,23 +656,40 @@ def evaluate_retriever(
     queries: List[Dict], 
     all_asins: List[str], 
     k_values: List[int] = [1, 3, 5, 10], 
-    save_candidates_path: str = None
+    save_candidates_path: str = None,
+    mode: str = None
 ) -> Dict:
     """Evaluate a retriever on queries"""
+    import time
+    
+    retriever_type = type(retriever).__name__
+    log_with_timestamp(f"[EVAL_RETRIEVER_START] Starting evaluation with {retriever_type} ({len(queries)} queries)")
+    
     all_metrics = {k: [] for k in k_values}
     all_candidates = []
+    
+    search_times = []
     
     for idx, q in enumerate(queries):
         asin = q.get('asin', '')
         query_text = q.get('query', '')
         
         if not query_text:
+            pq = q.get('personalized_query', {})
+            query_text = pq.get('original', '') or pq.get('noisy', '')
+        
+        if not query_text:
             continue
         
+        search_start = time.time()
         results = retriever.search(query_text, top_k=max(k_values))
+        search_time = time.time() - search_start
+        search_times.append(search_time)
+        
         retrieved_asins = [r[0] for r in results]
         
-        log_with_timestamp(f"  Processed query {idx + 1}/{len(queries)}: {query_text[:50]}... -> {len(results)} results")
+        mode_tag = f"[{mode}]" if mode else ""
+        log_with_timestamp(f"  Processed query {idx + 1}/{len(queries)} {mode_tag}: {query_text[:50]}... -> {len(results)} results ({search_time:.2f}s)")
         
         if save_candidates_path:
             all_candidates.append({
@@ -701,6 +722,11 @@ def evaluate_retriever(
             aggregated[f'MAP@{k}'] = round(avg_ap, 4)
             aggregated[f'NDCG@{k}'] = round(avg_ndcg, 4)
             aggregated[f'MRR@{k}'] = round(avg_mrr, 4)
+    
+    if search_times:
+        avg_search_time = np.mean(search_times)
+        log_with_timestamp(f"[EVAL_RETRIEVER_DONE] {retriever_type} evaluation complete")
+        log_with_timestamp(f"  → {len(queries)} queries, avg search time: {avg_search_time:.3f}s/query")
     
     return aggregated
 

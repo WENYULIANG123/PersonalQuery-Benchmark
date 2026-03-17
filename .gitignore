@@ -71,8 +71,14 @@ spelling_errors_detected_idf_jaccard.json
 stark/cache/
 
 stark/
+
+stark/
 data/
-result/
+
+# 排除模型checkpoint中的大文件
+.claude/skills/PersoanlQuery/14_fine_tuning/checkpoint_e5/model.safetensors
+.claude/skills/PersoanlQuery/14_fine_tuning/checkpoint_e5_v2_contrastive/model.safetensors
+**/*.safetensors
 
 # 排除独立的 git 仓库
 Amazon-C4/

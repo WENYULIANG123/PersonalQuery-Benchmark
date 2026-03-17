@@ -307,7 +307,13 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 
 ### Stage 12: 检索评估
 
-**阶段描述**：批量评估所有用户的查询在多种检索模型下的表现，计算 Recall@K, MAP, NDCG, MRR 等指标。
+**阶段描述**：使用优化的批量评估系统，高效评估所有用户的查询在多种检索模型下的表现。该系统通过共享文档加载和检索器索引，大幅提升评估效率。
+
+**主要特性**：
+- **一次加载，多次使用**：文档只需加载一次，所有检索器共享
+- **索引复用**：每种检索器的索引只构建一次，跨用户复用
+- **并行处理**：支持多个检索器并行评估
+- **自动缓存**：文档和索引自动缓存到磁盘，支持断点续传
 
 **运行命令**：
 
@@ -317,7 +323,7 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/12_retrieval/evaluators && \
-     python 12_evaluate_all_users_retrieval.py"
+     python -u 12_evaluate_all_users_fullscale.py"
 ```
 
 ### Stage 13: LLM Reranking

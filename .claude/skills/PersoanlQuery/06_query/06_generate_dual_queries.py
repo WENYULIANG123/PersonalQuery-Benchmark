@@ -29,6 +29,16 @@ from difflib import SequenceMatcher
 sys.path.insert(0, '/fs04/ar57/wenyu/.claude/skills')
 from llm_client import LLMClient
 
+# Import BM25 tokenizer for vocabulary validation alignment
+try:
+    import bm25s
+except ImportError:
+    bm25s = None
+
+# Import build_document_text for consistent text source
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '12_retrieval', 'utils'))
+from utils import build_document_text
+
 
 def log_with_timestamp(message: str):
     """带时间戳的日志"""
@@ -200,7 +210,7 @@ class ProductVocabulary:
 
     def load_vocabulary_for_asin(self, asin: str) -> bool:
         """
-        加载单个产品的词汇
+        加载单个产品的词汇，使用与BM25一致的tokenization
 
         Returns:
             是否成功加载
@@ -214,18 +224,30 @@ class ProductVocabulary:
                     try:
                         product = json.loads(line)
                         if product.get('asin') == asin:
-                            # 提取文档文本
+                            # 提取文档文本（使用核心字段，与原有方式相同，避免性能问题）
                             title = product.get('title', '')
                             brand = product.get('brand', '')
                             feature = product.get('feature', [])
                             description = product.get('description', [])
 
-                            # 合并所有文本
                             document_parts = [title, brand] + feature + description
                             document_text = ' '.join(document_parts)
 
-                            # 提取词汇
-                            words = extract_words_from_text(document_text, min_length=4)
+                            # 使用bm25s.tokenize进行分词，与BM25索引的tokenization保持一致
+                            # 这确保了验证使用与BM25相同的stopwords过滤和分词逻辑
+                            if bm25s is not None:
+                                tokenized = bm25s.tokenize(
+                                    [document_text],
+                                    lower=True,
+                                    stopwords="english",
+                                    show_progress=False
+                                )
+                                # bm25s.tokenize返回Tokenized对象，vocab包含实际的词
+                                words = set(tokenized.vocab)
+                            else:
+                                # 回退方案：如果bm25s不可用，使用原有的提取方式
+                                words = extract_words_from_text(document_text, min_length=4)
+                            
                             self.product_vocabularies[asin] = words
                             self.asin_documents[asin] = document_text
                             return True
@@ -254,6 +276,37 @@ class ProductVocabulary:
         if asin in self.product_vocabularies:
             return word.lower() in self.product_vocabularies[asin]
         return False
+    
+    def word_percentage_exists_in_product(self, phrase: str, asin: str) -> float:
+        """
+        计算属性值（短语）中有多少百分比的词在产品词汇中存在
+        
+        方案A改进：允许属性值只需部分词在商品中（而非所有词）
+        
+        Args:
+            phrase: 属性值短语，如 "floral pattern"
+            asin: 产品ASIN
+        
+        Returns:
+            0-1之间的匹配比例。1.0表示100%词都在，0.5表示50%词在，等等
+        """
+        # 确保词汇已加载
+        if asin not in self.product_vocabularies:
+            self.load_vocabulary_for_asin(asin)
+        
+        if asin not in self.product_vocabularies:
+            return 0.0
+        
+        # 提取短语中的词
+        words = extract_words_from_text(phrase, min_length=2)
+        if not words:
+            return 0.0
+        
+        # 计算有多少词在产品中
+        product_vocab = self.product_vocabularies[asin]
+        words_in_product = sum(1 for word in words if word.lower() in product_vocab)
+        
+        return words_in_product / len(words) if words else 0.0
 
 
 # ============================================================================
@@ -265,15 +318,20 @@ def select_dimensions_with_improved_priority(
     user_error_patterns: Dict[str, List[str]],
     product_vocabulary: ProductVocabulary,
     target_asin: str,
-    num_dimensions: int = 5
+    num_dimensions: int = 5,
+    product_metadata: Optional[Dict[str, Dict]] = None
 ) -> Tuple[List[Tuple[str, str]], Dict]:
     """
-    改进的优先级选择：考虑词在产品中的存在
+    改进的优先级选择：要求最终的属性值必须100%在商品文本中
+    并优先选择包含商品品牌或标题词的属性
 
-    优先级分类：
-    1. 最高优先级：包含用户错误词 AND 词在目标产品中
-    2. 中优先级：包含用户错误词 BUT 词不在目标产品中
-    3. 低优先级：不包含用户错误词
+    优先级分类（按选择顺序）：
+    1. 超高优先级：包含品牌名称或产品标题词的属性（100%词汇验证）
+    2. 最高优先级：包含用户错误词 AND 词在目标产品中 AND 100%词汇验证通过
+    3. 中优先级：100%词在产品中 + 不包含错误词
+    4. 备选优先级：50%-99%词汇匹配
+
+    最终过滤：选定的5个属性值必须全部通过100%验证（所有词都在商品中）
 
     Args:
         attributes_by_dimension: 维度到属性列表的映射
@@ -281,20 +339,35 @@ def select_dimensions_with_improved_priority(
         product_vocabulary: 产品词汇库
         target_asin: 目标产品ASIN
         num_dimensions: 需要选择的维度数量
+        product_metadata: 可选的产品元数据字典 {asin: {brand, title, ...}}
 
     Returns:
         (选择的属性列表, 统计信息)
     """
 
-    # 分类属性
-    highest_priority = []  # 包含错误词 + 在产品中
-    medium_priority = []   # 包含错误词 + 不在产品中
-    low_priority = []      # 不包含错误词
+    # 提取目标产品的品牌和标题词
+    brand_lower = ''
+    title_words = set()
+    
+    if product_metadata and target_asin in product_metadata:
+        product_info = product_metadata[target_asin]
+        brand_lower = product_info.get('brand', '').lower()
+        title = product_info.get('title', '').lower()
+        title_words = set(w for w in title.split()[:15] if len(w) > 2)
+    
+    # 分类属性 - 超高优先级用于包含品牌/标题的属性
+    brand_title_priority = []  # 包含品牌/标题 + 100%词汇验证通过
+    highest_priority = []      # 100%词在产品中 + 包含错误词
+    medium_priority = []       # 100%词在产品中 + 不包含错误词
+    fallback_priority = []     # 50%+词在产品中 + 包含错误词
+    low_priority = []          # 50%+词在产品中 + 不包含错误词
 
     stats = {
         'total_attrs': 0,
+        'brand_title_priority': 0,
         'highest_priority': 0,
         'medium_priority': 0,
+        'fallback_priority': 0,
         'low_priority': 0
     }
 
@@ -306,44 +379,116 @@ def select_dimensions_with_improved_priority(
             attr_value = attr.get('attribute', '')
             stats['total_attrs'] += 1
 
-            # 检查是否包含用户错误词（支持模糊匹配）
-            error_matches = contains_user_error_word(attr_value, user_error_patterns)
-
-            if error_matches:
-                # 找到包含的用户错误词
-                for correct_word, matched_word, match_type in error_matches:
-                    # 检查该词是否在目标产品中（也使用模糊匹配）
-                    if product_vocabulary.word_exists_in_product(matched_word, target_asin):
-                        highest_priority.append((dim, attr_value, correct_word, matched_word))
-                        stats['highest_priority'] += 1
-                    else:
-                        medium_priority.append((dim, attr_value, correct_word, matched_word))
-                        stats['medium_priority'] += 1
+            # 检查属性值的词汇匹配比例
+            match_ratio = product_vocabulary.word_percentage_exists_in_product(attr_value, target_asin)
+            
+            # 检查是否包含品牌名称或产品标题词
+            attr_value_lower = attr_value.lower()
+            has_brand = brand_lower and brand_lower in attr_value_lower
+            has_title = any(word in attr_value_lower for word in title_words)
+            
+            # 如果属性值包含品牌或标题词且通过100%验证，放入超高优先级
+            if (has_brand or has_title) and match_ratio >= 1.0:
+                brand_title_priority.append((dim, attr_value))
+                stats['brand_title_priority'] += 1
+            # 否则，按照常规优先级分类
             else:
-                low_priority.append((dim, attr_value))
-                stats['low_priority'] += 1
+                # 检查是否包含用户错误词（支持模糊匹配）
+                error_matches = contains_user_error_word(attr_value, user_error_patterns)
 
-    # 按优先级选择
+                if error_matches:
+                    # 找到包含的用户错误词
+                    for correct_word, matched_word, match_type in error_matches:
+                        # 优先选择100%词汇匹配的
+                        if match_ratio >= 1.0:
+                            highest_priority.append((dim, attr_value, correct_word, matched_word))
+                            stats['highest_priority'] += 1
+                        # 次优：至少50%词汇匹配
+                        elif match_ratio >= 0.5:
+                            fallback_priority.append((dim, attr_value, correct_word, matched_word))
+                            stats['fallback_priority'] += 1
+                        else:
+                            low_priority.append((dim, attr_value, correct_word, matched_word))
+                            stats['low_priority'] += 1
+                else:
+                    # 不包含用户错误词的属性
+                    if match_ratio >= 1.0:
+                        medium_priority.append((dim, attr_value))
+                        stats['medium_priority'] += 1
+                    elif match_ratio >= 0.5:
+                        fallback_priority.append((dim, attr_value))
+                        stats['fallback_priority'] += 1
+
+    # 按优先级选择（严格执行100%词汇验证）
     selected = []
+    selection_record = []
 
-    # 先从最高优先级选择
-    if highest_priority:
-        num_highest = min(num_dimensions, len(highest_priority))
+    # 第零优先级（超高）：包含品牌名称或产品标题词的属性（MUST选中）
+    if brand_title_priority:
+        num_brand_title = min(num_dimensions, len(brand_title_priority))
+        chosen = random.sample(brand_title_priority, num_brand_title)
+        for dim, attr in chosen:
+            selected.append((dim, attr))
+            selection_record.append({
+                'dimension': dim,
+                'attribute': attr,
+                'priority_level': 'brand_title',
+                'reason': '包含品牌名称或产品标题词 + 100%词汇验证通过',
+                'word_match_ratio': 1.0
+            })
+
+    # 第一优先级：100%词在产品中 + 包含错误词
+    if len(selected) < num_dimensions and highest_priority:
+        num_highest = min(num_dimensions - len(selected), len(highest_priority))
         chosen = random.sample(highest_priority, num_highest)
-        selected.extend([(dim, attr) for dim, attr, _, _ in chosen])
+        for dim, attr, _, _ in chosen:
+            selected.append((dim, attr))
+            selection_record.append({
+                'dimension': dim,
+                'attribute': attr,
+                'priority_level': 'highest',
+                'reason': '100%词汇验证通过 + 包含用户错误词',
+                'word_match_ratio': 1.0
+            })
 
-    # 不足时从中优先级选择
+    # 第二优先级：100%词在产品中 + 不包含错误词（但满足关键要求）
     if len(selected) < num_dimensions and medium_priority:
         num_medium = min(num_dimensions - len(selected), len(medium_priority))
         chosen = random.sample(medium_priority, num_medium)
-        selected.extend([(dim, attr) for dim, attr, _, _ in chosen])
+        for dim, attr in chosen:
+            match_ratio = product_vocabulary.word_percentage_exists_in_product(attr, target_asin)
+            selected.append((dim, attr))
+            selection_record.append({
+                'dimension': dim,
+                'attribute': attr,
+                'priority_level': 'medium',
+                'reason': '100%词汇验证通过 + 不包含用户错误词',
+                'word_match_ratio': match_ratio
+            })
 
-    # 还不足时从低优先级选择
-    if len(selected) < num_dimensions and low_priority:
-        num_low = min(num_dimensions - len(selected), len(low_priority))
-        chosen = random.sample(low_priority, num_low)
-        selected.extend([(dim, attr) for dim, attr in chosen])
+    # 第三优先级（备选）：50%-99%词汇匹配 + 包含错误词
+    # 仅在无法凑够5个维度时使用
+    if len(selected) < num_dimensions and fallback_priority:
+        num_fallback = min(num_dimensions - len(selected), len(fallback_priority))
+        chosen = random.sample(fallback_priority, num_fallback)
+        for item in chosen:
+            if len(item) == 4:  # 包含错误词的情况
+                dim, attr, _, _ = item
+            else:  # 不包含错误词的情况
+                dim, attr = item
+            match_ratio = product_vocabulary.word_percentage_exists_in_product(attr, target_asin)
+            selected.append((dim, attr))
+            selection_record.append({
+                'dimension': dim,
+                'attribute': attr,
+                'priority_level': 'fallback',
+                'reason': f'{match_ratio*100:.0f}%词汇验证通过 (低于100%)',
+                'word_match_ratio': match_ratio
+            })
 
+    stats['selection_record'] = selection_record
+    stats['final_selected_count'] = len(selected)
+    stats['target_count'] = num_dimensions
     return selected, stats
 
 
@@ -362,9 +507,39 @@ class ImprovedPrioritySelector:
 
         log_with_timestamp(f"用户错误模式: {len(self.user_error_patterns)} 个正确词")
 
-        # 缓存已加载的产品词汇
+        # 缓存已加载的产品词汇和元数据
         self.loaded_asins = set()
         self.product_vocabularies = {}
+        self.product_metadata_cache = {}
+
+    def _load_product_metadata(self, asins: List[str]) -> Dict[str, Dict]:
+        """加载指定ASIN的产品元数据（品牌和标题）"""
+        result = {}
+        
+        for asin in asins:
+            if asin in self.product_metadata_cache:
+                result[asin] = self.product_metadata_cache[asin]
+                continue
+            
+            try:
+                with gzip.open(self.meta_file, 'rt') as f:
+                    for line in f:
+                        try:
+                            data = json.loads(line)
+                            if data.get('asin') == asin:
+                                metadata = {
+                                    'brand': data.get('brand', ''),
+                                    'title': data.get('title', '')
+                                }
+                                self.product_metadata_cache[asin] = metadata
+                                result[asin] = metadata
+                                break
+                        except:
+                            continue
+            except Exception as e:
+                log_with_timestamp(f"  ⚠️  加载产品元数据失败 {asin}: {e}")
+        
+        return result
 
     def select_for_product(self,
                           attributes_by_dimension: Dict[str, List[Dict]],
@@ -385,13 +560,17 @@ class ImprovedPrioritySelector:
         vocab = ProductVocabulary(self.meta_file, [target_asin])
         vocab.load_vocabulary_for_asin(target_asin)
 
+        # 加载产品元数据（品牌和标题）
+        product_metadata = self._load_product_metadata([target_asin])
+
         # 使用改进的选择逻辑
         return select_dimensions_with_improved_priority(
             attributes_by_dimension,
             self.user_error_patterns,
             vocab,
             target_asin,
-            num_dimensions
+            num_dimensions,
+            product_metadata=product_metadata
         )
 
 
@@ -710,7 +889,7 @@ def process_query_set(query_set: Dict,
     #     llm_client, mass_market_selected, category, 'mass_market', user_error_patterns
     # )
 
-    # Build result with validation status
+    # Build result with validation status and priority tracking
     result = {
         'asin': asin,
         'category': category,
@@ -725,7 +904,8 @@ def process_query_set(query_set: Dict,
             'selected_attributes': [
                 {'dimension': dim, 'value': attr}
                 for dim, attr in target_user_selected
-            ]
+            ],
+            'attribute_priority_tracking': tu_stats.get('selection_record', [])
         },
         # MASS MARKET QUERY DISABLED
         # 'mass_market_query': {
