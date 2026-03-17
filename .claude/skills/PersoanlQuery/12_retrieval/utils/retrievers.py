@@ -418,13 +418,13 @@ class E5Retriever:
         log_with_timestamp(f"    - Multi window: {window_stats['multi_window']} docs")
         log_with_timestamp(f"    - Max windows per doc: {window_stats['max_windows']}")
 
-    def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """Search using E5 (supports both multi-window and pooled embeddings)"""
-        model = self._get_model()
+     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+         """Search using E5 (supports both multi-window and pooled embeddings)"""
+         model = self._get_model()
 
-        # 添加 query 前缀
-        query_with_prefix = self._add_instruction(query, is_query=True)
-        query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
+         # 添加 query 前缀
+         query_with_prefix = self._add_instruction(query, is_query=True)
+         query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
 
          # 计算每个文档的分数
          from sentence_transformers import util
