@@ -16,10 +16,15 @@ Contains all base retriever classes:
 import numpy as np
 import torch
 from typing import List, Dict, Tuple
+import threading
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils import log_with_timestamp, build_document_text
+
+# Global lock for thread-safe model inference
+# Prevents CUDA/GIL deadlocks when multiple threads call model.encode() simultaneously
+_model_inference_lock = threading.Lock()
 
 try:
     import bm25s
@@ -246,18 +251,24 @@ class DenseRetriever:
     
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using dense vectors"""
-        model = self._get_model()
-        query_embedding = model.encode([query])
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Ensure doc_embeddings is on the same device as query_embedding
+        model = self._get_model()
+        
+        with _model_inference_lock:
+            query_embedding = model.encode([query])
+        
+        if isinstance(query_embedding, np.ndarray):
+            query_embedding = torch.from_numpy(query_embedding).float().to(self.device)
+        
         doc_embeddings = self.doc_embeddings
         if isinstance(doc_embeddings, np.ndarray):
-            # Convert numpy array to torch tensor on the correct device
             doc_embeddings = torch.from_numpy(doc_embeddings).float().to(query_embedding.device)
-        elif torch.is_tensor(doc_embeddings) and doc_embeddings.device != query_embedding.device:
-            doc_embeddings = doc_embeddings.to(query_embedding.device)
+        if torch.is_tensor(doc_embeddings):
+            if doc_embeddings.device != query_embedding.device:
+                doc_embeddings = doc_embeddings.to(query_embedding.device)
         
-        # Cosine similarity
         from sentence_transformers import util
         scores = util.cos_sim(query_embedding, doc_embeddings)[0]
         
@@ -428,28 +439,27 @@ class E5Retriever:
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using E5 (supports both multi-window and pooled embeddings)"""
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
         model = self._get_model()
 
-        # 添加 query 前缀
-        query_with_prefix = self._add_instruction(query, is_query=True)
-        query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
+        with _model_inference_lock:
+            query_with_prefix = self._add_instruction(query, is_query=True)
+            query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
 
-        # 计算每个文档的分数
         from sentence_transformers import util
         scores = []
 
         for i, doc_emb in enumerate(self.doc_embeddings):
-            # Handle both list elements (tensors) and numpy array rows
             if isinstance(doc_emb, np.ndarray):
                 doc_emb = torch.from_numpy(doc_emb).to(query_embedding.device)
             else:
                 doc_emb = doc_emb.to(query_embedding.device)
             
             if doc_emb.dim() == 1:
-                # Single-window or pooled embedding: direct cosine similarity
                 score = util.cos_sim(query_embedding, doc_emb.unsqueeze(0))[0][0].item()
             else:
-                # Multi-window: max-pool across windows
                 window_scores = util.cos_sim(query_embedding, doc_emb)[0]
                 score = window_scores.max().item()
 
@@ -597,24 +607,25 @@ class BGERetriever:
         log_with_timestamp(f"    - Max windows per doc: {window_stats['max_windows']}")
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """
-        使用 BGE 搜索（支持多窗口文档）
-        """
+        """Search using BGE (supports multi-window documents)"""
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
         model = self._get_model()
 
-        # 添加 instruction 前缀
-        query_with_prefix = self._add_instruction(query, is_query=True)
-        query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
+        with _model_inference_lock:
+            query_with_prefix = self._add_instruction(query, is_query=True)
+            query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
 
-        # 计算每个文档的分数
         from sentence_transformers import util
         scores = []
 
         for i, doc_emb in enumerate(self.doc_embeddings):
             if isinstance(doc_emb, np.ndarray):
-                doc_emb = torch.from_numpy(doc_emb).float()
+                doc_emb = torch.from_numpy(doc_emb).float().to(query_embedding.device)
             if torch.is_tensor(doc_emb):
-                doc_emb = doc_emb.to(query_embedding.device)
+                if doc_emb.device != query_embedding.device:
+                    doc_emb = doc_emb.to(query_embedding.device)
             
             if doc_emb.dim() == 1:
                 score = util.cos_sim(query_embedding, doc_emb.unsqueeze(0))[0][0].item()
@@ -1150,15 +1161,25 @@ class ANCERetriever:
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using ANCE embeddings"""
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
         model = self._get_model()
-        query_embedding = model.encode(["query: " + query])
+        
+        with _model_inference_lock:
+            query_embedding = model.encode(["query: " + query])
+        
+        if isinstance(query_embedding, np.ndarray):
+            query_embedding = torch.from_numpy(query_embedding).float().to(self.device)
         
         from sentence_transformers import util
         doc_embeddings = self.doc_embeddings
+        
         if isinstance(doc_embeddings, np.ndarray):
             doc_embeddings = torch.from_numpy(doc_embeddings).float().to(query_embedding.device)
-        elif torch.is_tensor(doc_embeddings) and doc_embeddings.device != query_embedding.device:
-            doc_embeddings = doc_embeddings.to(query_embedding.device)
+        if torch.is_tensor(doc_embeddings):
+            if doc_embeddings.device != query_embedding.device:
+                doc_embeddings = doc_embeddings.to(query_embedding.device)
         
         scores = util.cos_sim(query_embedding, doc_embeddings)[0]
         
@@ -1204,14 +1225,23 @@ class STARRetriever:
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using STAR embeddings"""
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
         model = self._get_model()
-        query_embedding = model.encode([query])
+        
+        with _model_inference_lock:
+            query_embedding = model.encode([query])
+        
+        if isinstance(query_embedding, np.ndarray):
+            query_embedding = torch.from_numpy(query_embedding).float().to(self.device)
         
         doc_embeddings = self.doc_embeddings
         if isinstance(doc_embeddings, np.ndarray):
             doc_embeddings = torch.from_numpy(doc_embeddings).float().to(query_embedding.device)
-        elif torch.is_tensor(doc_embeddings) and doc_embeddings.device != query_embedding.device:
-            doc_embeddings = doc_embeddings.to(query_embedding.device)
+        if torch.is_tensor(doc_embeddings):
+            if doc_embeddings.device != query_embedding.device:
+                doc_embeddings = doc_embeddings.to(query_embedding.device)
         
         from sentence_transformers import util
         scores = util.cos_sim(query_embedding, doc_embeddings)[0]
@@ -1233,12 +1263,14 @@ class MiniLMRetriever:
         self.doc_embeddings = None
         self.doc_ids = []
         self.all_metadata = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     def _get_model(self):
         if self.model is None:
             log_with_timestamp(f"  Loading MiniLM model: {self.model_name}")
             from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(self.model_name)
+            self.model = SentenceTransformer(self.model_name, device=self.device)
+            log_with_timestamp(f"  Using device: {self.device}")
         return self.model
 
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
@@ -1255,11 +1287,26 @@ class MiniLMRetriever:
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using MiniLM embeddings"""
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
         model = self._get_model()
-        query_embedding = model.encode([query])
+        
+        with _model_inference_lock:
+            query_embedding = model.encode([query])
+        
+        if isinstance(query_embedding, np.ndarray):
+            query_embedding = torch.from_numpy(query_embedding).float().to(self.device)
+        
+        doc_embeddings = self.doc_embeddings
+        if isinstance(doc_embeddings, np.ndarray):
+            doc_embeddings = torch.from_numpy(doc_embeddings).float().to(query_embedding.device)
+        if torch.is_tensor(doc_embeddings):
+            if doc_embeddings.device != query_embedding.device:
+                doc_embeddings = doc_embeddings.to(query_embedding.device)
         
         from sentence_transformers import util
-        scores = util.cos_sim(query_embedding, self.doc_embeddings)[0]
+        scores = util.cos_sim(query_embedding, doc_embeddings)[0]
         
         results = [(self.doc_ids[i], scores[i].item()) for i in range(len(self.doc_ids))]
         results.sort(key=lambda x: -x[1])
@@ -1278,12 +1325,14 @@ class MPNetRetriever:
         self.doc_embeddings = None
         self.doc_ids = []
         self.all_metadata = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     def _get_model(self):
         if self.model is None:
             log_with_timestamp(f"  Loading MPNet model: {self.model_name}")
             from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(self.model_name)
+            self.model = SentenceTransformer(self.model_name, device=self.device)
+            log_with_timestamp(f"  Using device: {self.device}")
         return self.model
 
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
@@ -1300,11 +1349,26 @@ class MPNetRetriever:
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using MPNet embeddings"""
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
         model = self._get_model()
-        query_embedding = model.encode([query])
+        
+        with _model_inference_lock:
+            query_embedding = model.encode([query])
+        
+        if isinstance(query_embedding, np.ndarray):
+            query_embedding = torch.from_numpy(query_embedding).float().to(self.device)
+        
+        doc_embeddings = self.doc_embeddings
+        if isinstance(doc_embeddings, np.ndarray):
+            doc_embeddings = torch.from_numpy(doc_embeddings).float().to(query_embedding.device)
+        if torch.is_tensor(doc_embeddings):
+            if doc_embeddings.device != query_embedding.device:
+                doc_embeddings = doc_embeddings.to(query_embedding.device)
         
         from sentence_transformers import util
-        scores = util.cos_sim(query_embedding, self.doc_embeddings)[0]
+        scores = util.cos_sim(query_embedding, doc_embeddings)[0]
         
         results = [(self.doc_ids[i], scores[i].item()) for i in range(len(self.doc_ids))]
         results.sort(key=lambda x: -x[1])
