@@ -80,7 +80,7 @@ def find_running_jobs_by_name(script_name, current_user=None):
             job_name = ' '.join(parts[1:-1])
             
             if status in ['RUNNING', 'PENDING']:
-                if script_name in job_name:
+                if script_name in job_name or job_name.startswith(f"submit_{script_name}"):
                     running_jobs.append({
                         'job_id': job_id,
                         'name': job_name,
@@ -269,26 +269,14 @@ def read_input() -> Dict[str, Any]:
 
 def get_gpu_node_status():
     """
-    查询GPU分区的节点状态，返回每个节点的GPU和CPU资源信息。
-    
-    Returns:
-        list: 包含每个节点信息的字典列表，格式为：
-            [{
-                'node': 'm3g100',
-                'gpu_type': 'L40S',
-                'gpu_total': 4,
-                'cpu_allocated': 34,
-                'cpu_idle': 62,
-                'cpu_total': 96,
-                'idle_ratio': 0.646  # 空闲CPU比例
-            }, ...]
+    查询GPU分区的节点状态，返回每个节点的GPU空闲情况。
     """
     try:
         result = subprocess.run(
             ['sinfo', '-p', 'gpu', '-N', '-o', '%N %G %C', '--noheader'],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=20
         )
         
         if result.returncode != 0:
@@ -300,30 +288,26 @@ def get_gpu_node_status():
             if not line.strip():
                 continue
             
-            # 解析格式: m3g100 gpu:L40S:4(S:1,3,5,7) 34/62/0/96
             parts = line.split()
             if len(parts) < 3:
                 continue
             
             node_name = parts[0]
-            gpu_info = parts[1]  # gpu:L40S:4(S:1,3,5,7)
-            cpu_info = parts[2]  # 34/62/0/96
+            gpu_info = parts[1]
+            cpu_info = parts[2]
             
-            # 解析GPU信息
             gpu_type = 'Unknown'
             gpu_total = 0
             if gpu_info.startswith('gpu:'):
                 gpu_parts = gpu_info[4:].split(':')
                 if len(gpu_parts) >= 2:
                     gpu_type = gpu_parts[0]
-                    # 提取GPU数量（可能在括号前）
                     gpu_count_str = gpu_parts[1].split('(')[0]
                     try:
                         gpu_total = int(gpu_count_str)
                     except ValueError:
                         gpu_total = 1
             
-            # 解析CPU信息: Allocated/Idle/Other/Total
             cpu_parts = cpu_info.split('/')
             if len(cpu_parts) >= 4:
                 cpu_allocated = int(cpu_parts[0])
@@ -334,20 +318,21 @@ def get_gpu_node_status():
                 cpu_idle = 0
                 cpu_total = 0
             
-            # 计算空闲比例
             idle_ratio = cpu_idle / cpu_total if cpu_total > 0 else 0
             
             nodes.append({
                 'node': node_name,
                 'gpu_type': gpu_type,
                 'gpu_total': gpu_total,
+                'gpu_allocated': 0,
+                'gpu_idle': gpu_total,
                 'cpu_allocated': cpu_allocated,
                 'cpu_idle': cpu_idle,
                 'cpu_total': cpu_total,
                 'idle_ratio': idle_ratio
             })
         
-        return nodes
+        return _fill_gpu_allocation(nodes)
     
     except subprocess.TimeoutExpired:
         print("[sbatch_wrapper] ⚠️  查询GPU节点超时", file=sys.stderr)
@@ -357,21 +342,114 @@ def get_gpu_node_status():
         return []
 
 
+def _fill_gpu_allocation(nodes):
+    """
+    查询每个节点的实际GPU分配情况。
+    """
+    if not nodes:
+        return nodes
+    
+    node_dict = {n['node']: n for n in nodes}
+    
+    try:
+        result = subprocess.run(
+            ['squeue', '-t', 'RUNNING', '-o', '%N %b', '--noheader'],
+            capture_output=True,
+            text=True,
+            timeout=15
+        )
+        
+        if result.returncode != 0:
+            return nodes
+        
+        gpu_usage = {}
+        for line in result.stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            
+            node_name = parts[0]
+            gres_info = parts[1] if len(parts) > 1 else ''
+            
+            if 'gres/gpu' in gres_info:
+                match = re.search(r'gres/gpu:(\w*):?(\d+)', gres_info)
+                if match:
+                    gpu_count = int(match.group(2))
+                else:
+                    gpu_count = 1
+                
+                gpu_usage[node_name] = gpu_usage.get(node_name, 0) + gpu_count
+        
+        for node_name, allocated in gpu_usage.items():
+            if node_name in node_dict:
+                node_dict[node_name]['gpu_allocated'] = allocated
+                node_dict[node_name]['gpu_idle'] = max(0, node_dict[node_name]['gpu_total'] - allocated)
+        
+        return nodes
+    
+    except Exception:
+        return nodes
+
+
+def get_cpu_node_status():
+    """
+    查询CPU分区的节点状态（非GPU分区）。
+    """
+    try:
+        result = subprocess.run(
+            ['sinfo', '-p', 'comp', '-N', '-o', '%N %C', '--noheader'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            return []
+        
+        nodes = []
+        for line in result.stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            
+            node_name = parts[0]
+            cpu_info = parts[1]
+            
+            cpu_parts = cpu_info.split('/')
+            if len(cpu_parts) >= 4:
+                cpu_allocated = int(cpu_parts[0])
+                cpu_idle = int(cpu_parts[1])
+                cpu_total = int(cpu_parts[3])
+            else:
+                cpu_allocated = 0
+                cpu_idle = 0
+                cpu_total = 0
+            
+            idle_ratio = cpu_idle / cpu_total if cpu_total > 0 else 0
+            
+            nodes.append({
+                'node': node_name,
+                'cpu_allocated': cpu_allocated,
+                'cpu_idle': cpu_idle,
+                'cpu_total': cpu_total,
+                'idle_ratio': idle_ratio
+            })
+        
+        return nodes
+    
+    except Exception:
+        return []
+
+
 def select_best_gpu_node(nodes, prefer_gpu_type=None):
     """
-    从可用节点中选择最佳的GPU节点。
-    
-    选择策略:
-    1. 如果指定了prefer_gpu_type，只从该类型中选择空闲率最高的
-    2. 否则，按GPU类型优先级选择: A100 > L40S > A40 > 其他
-    3. 同类型GPU中，选择空闲资源最多的节点
-    
-    Args:
-        nodes: 节点列表，来自get_gpu_node_status()
-        prefer_gpu_type: 首选GPU类型，如 'A100', 'L40S', 'A40'
-    
-    Returns:
-        dict: 最佳节点信息，如果没有可用节点则返回None
+    从可用节点中选择最佳的GPU节点（优先选择有空闲GPU的节点）。
     """
     if not nodes:
         return None
@@ -380,10 +458,10 @@ def select_best_gpu_node(nodes, prefer_gpu_type=None):
         prefer_type = prefer_gpu_type.upper()
         filtered_nodes = [
             n for n in nodes 
-            if n['gpu_type'].upper().startswith(prefer_type)
+            if n['gpu_type'].upper().startswith(prefer_type) and n['gpu_idle'] > 0
         ]
         if filtered_nodes:
-            filtered_nodes.sort(key=lambda n: -n['idle_ratio'])
+            filtered_nodes.sort(key=lambda n: (-n['gpu_idle'], -n['idle_ratio']))
             return filtered_nodes[0]
     
     gpu_priority = {
@@ -394,7 +472,11 @@ def select_best_gpu_node(nodes, prefer_gpu_type=None):
         'T4': 20,
     }
     
-    available_nodes = [n for n in nodes if n['cpu_idle'] > 0]
+    available_nodes = [n for n in nodes if n['gpu_idle'] > 0]
+    
+    if not available_nodes:
+        available_nodes = [n for n in nodes if n['cpu_idle'] > 0]
+    
     if not available_nodes:
         available_nodes = nodes
     
@@ -402,9 +484,25 @@ def select_best_gpu_node(nodes, prefer_gpu_type=None):
         gpu_type = node['gpu_type'].upper()
         base_type = gpu_type.split('-')[0]
         priority = gpu_priority.get(base_type, 0)
-        return (-priority, -node['idle_ratio'])
+        return (-priority, -node.get('gpu_idle', 0), -node['idle_ratio'])
     
     available_nodes.sort(key=sort_key)
+    return available_nodes[0] if available_nodes else None
+
+
+def select_best_cpu_node(nodes):
+    """
+    从可用节点中选择最佳的CPU节点。
+    """
+    if not nodes:
+        return None
+    
+    available_nodes = [n for n in nodes if n['cpu_idle'] > 0]
+    
+    if not available_nodes:
+        available_nodes = nodes
+    
+    available_nodes.sort(key=lambda n: -n['idle_ratio'])
     return available_nodes[0] if available_nodes else None
 
 
@@ -415,23 +513,23 @@ def print_gpu_status(nodes, selected_node=None):
         return
     
     print("\n[sbatch_wrapper] 📊 GPU节点状态:", file=sys.stderr)
-    print("-" * 80, file=sys.stderr)
-    print(f"{'节点':<12} {'GPU类型':<10} {'GPU数':<6} {'CPU空闲/总数':<15} {'空闲率':<10}", file=sys.stderr)
-    print("-" * 80, file=sys.stderr)
+    print("-" * 90, file=sys.stderr)
+    print(f"{'节点':<12} {'GPU类型':<10} {'GPU空闲/总数':<14} {'CPU空闲/总数':<15} {'空闲率':<10}", file=sys.stderr)
+    print("-" * 90, file=sys.stderr)
     
-    # 按GPU类型和空闲率排序显示
-    sorted_nodes = sorted(nodes, key=lambda n: (n['gpu_type'], -n['idle_ratio']))
+    sorted_nodes = sorted(nodes, key=lambda n: (n['gpu_type'], -n.get('gpu_idle', 0), -n['idle_ratio']))
     
     for node in sorted_nodes:
         selected_marker = "✅ " if selected_node and node['node'] == selected_node['node'] else "   "
+        gpu_ratio = f"{node.get('gpu_idle', 0)}/{node['gpu_total']}"
         cpu_ratio = f"{node['cpu_idle']}/{node['cpu_total']}"
         idle_pct = f"{node['idle_ratio']*100:.1f}%"
-        print(f"{selected_marker}{node['node']:<10} {node['gpu_type']:<10} {node['gpu_total']:<6} {cpu_ratio:<15} {idle_pct:<10}", file=sys.stderr)
+        print(f"{selected_marker}{node['node']:<10} {node['gpu_type']:<10} {gpu_ratio:<14} {cpu_ratio:<15} {idle_pct:<10}", file=sys.stderr)
     
-    print("-" * 80, file=sys.stderr)
+    print("-" * 90, file=sys.stderr)
     
     if selected_node:
-        print(f"[sbatch_wrapper] 🎯 已选择节点: {selected_node['node']} (GPU: {selected_node['gpu_type']}, 空闲率: {selected_node['idle_ratio']*100:.1f}%)", file=sys.stderr)
+        print(f"[sbatch_wrapper] 🎯 已选择节点: {selected_node['node']} (GPU空闲: {selected_node.get('gpu_idle', 0)}, 类型: {selected_node['gpu_type']})", file=sys.stderr)
 
 
 def main():
@@ -556,9 +654,14 @@ def main():
         print(f"[sbatch_wrapper] ✅ 已全局清理 {sh_cleanup_count} 个 .sh 脚本", file=sys.stderr)
 
     # Extract script name for logging
-    # Try to find the .py filename in the command
     script_match = re.search(r'([\w-]+)\.py', original_command)
-    script_name = script_match.group(1) if script_match else "job"
+    if script_match:
+        full_script_name = script_match.group(1)
+        base_name = re.sub(r'_\d{8}_\d{6}$', '', full_script_name)
+        base_name = re.sub(r'_v\d+$', '', base_name)
+        script_name = base_name if base_name else full_script_name
+    else:
+        script_name = "job"
     
     # 检测并取消同名脚本的运行中任务
     print(f"[sbatch_wrapper] 🔍 检查是否有同名脚本 '{script_name}' 的运行中任务...", file=sys.stderr)
@@ -623,11 +726,13 @@ def main():
     # Get current directory
     current_dir = os.getcwd() or "/home/wlia0047/ar57/wenyu"
     
-    # GPU节点选择逻辑
+    # 节点选择逻辑
     selected_node = None
     nodelist_option = ""
+    partition_option = ""
+    
     if use_gpu:
-        print("[sbatch_wrapper] 🔍 正在查询GPU节点状态...", file=sys.stderr)
+        print("[sbatch_wrapper] 🔍 正在查询GPU节点状态（检查空闲GPU）...", file=sys.stderr)
         gpu_nodes = get_gpu_node_status()
         
         if gpu_nodes:
@@ -636,21 +741,53 @@ def main():
             
             if selected_node:
                 nodelist_option = f"#SBATCH --nodelist={selected_node['node']}"
-                print(f"[sbatch_wrapper] ✅ 已选择最佳GPU节点: {selected_node['node']}", file=sys.stderr)
+                print(f"[sbatch_wrapper] ✅ 已选择最佳GPU节点: {selected_node['node']} (空闲GPU: {selected_node.get('gpu_idle', 0)})", file=sys.stderr)
             else:
-                print("[sbatch_wrapper] ⚠️  未能选择到GPU节点，将由SLURM自动分配", file=sys.stderr)
+                print("[sbatch_wrapper] ⚠️  未能找到有空闲GPU的节点，将由SLURM自动分配", file=sys.stderr)
         else:
             print("[sbatch_wrapper] ⚠️  无法获取GPU节点状态，将由SLURM自动分配", file=sys.stderr)
+        
+        partition_option = "#SBATCH -p gpu"
+    else:
+        print("[sbatch_wrapper] 🔍 正在查询CPU节点状态...", file=sys.stderr)
+        cpu_nodes = get_cpu_node_status()
+        
+        if cpu_nodes:
+            selected_node = select_best_cpu_node(cpu_nodes)
+            
+            if cpu_nodes:
+                print("\n[sbatch_wrapper] 📊 CPU节点状态 (前10个):", file=sys.stderr)
+                print("-" * 60, file=sys.stderr)
+                print(f"{'节点':<15} {'CPU空闲/总数':<18} {'空闲率':<10}", file=sys.stderr)
+                print("-" * 60, file=sys.stderr)
+                
+                sorted_nodes = sorted(cpu_nodes, key=lambda n: -n['idle_ratio'])[:10]
+                for node in sorted_nodes:
+                    marker = "✅ " if selected_node and node['node'] == selected_node['node'] else "   "
+                    cpu_ratio = f"{node['cpu_idle']}/{node['cpu_total']}"
+                    idle_pct = f"{node['idle_ratio']*100:.1f}%"
+                    print(f"{marker}{node['node']:<13} {cpu_ratio:<18} {idle_pct:<10}", file=sys.stderr)
+                print("-" * 60, file=sys.stderr)
+            
+            if selected_node:
+                nodelist_option = f"#SBATCH --nodelist={selected_node['node']}"
+                print(f"[sbatch_wrapper] ✅ 已选择最佳CPU节点: {selected_node['node']} (空闲率: {selected_node['idle_ratio']*100:.1f}%)", file=sys.stderr)
+            else:
+                print("[sbatch_wrapper] ⚠️  未能选择到CPU节点，将由SLURM自动分配", file=sys.stderr)
+        else:
+            print("[sbatch_wrapper] ⚠️  无法获取CPU节点状态，将由SLURM自动分配", file=sys.stderr)
+        
+        partition_option = "#SBATCH -p comp"
     
     # Create sbatch script
-    # Allocate more memory for Python scripts (32GB for large data processing)
     memory_allocation = "#SBATCH --mem=32G" if is_python_script_command(original_command) else ""
-    gpu_allocation = "#SBATCH -p gpu\n#SBATCH --gres=gpu:1" if use_gpu else ""
+    gpu_allocation = "#SBATCH --gres=gpu:1" if use_gpu else ""
     time_allocation = f"#SBATCH --time={time_limit}" if time_limit else ""
     
     script_content = f"""#!/bin/bash
 #SBATCH --output={log_pattern}
 #SBATCH --error={err_pattern}
+{partition_option}
 {memory_allocation}
 {gpu_allocation}
 {time_allocation}

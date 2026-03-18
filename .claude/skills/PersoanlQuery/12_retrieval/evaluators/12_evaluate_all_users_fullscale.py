@@ -1952,6 +1952,40 @@ def print_comparison_report(comparison, has_both_modes=False):
             map10 = normalized_comparison[retriever]['clean'].get('map@10', 0)
             print(f"{idx:<6} {retriever:<12} {clean:<12.4f} {p1:<12.4f} {p10:<12.4f} {map10:<12.4f}")
     
+    if has_both_modes:
+        print("\n" + "="*100)
+        print("📊 多k值性能排序对比")
+        print("="*100)
+        
+        k_values_rank = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 100]
+        metric_keys = ['ndcg', 'p', 'map', 'r']
+        
+        for metric_key in metric_keys:
+            print(f"\n{metric_key.upper()}值排序 (Clean Mode)")
+            print("─" * 100)
+            
+            for k in k_values_rank:
+                metric = f'{metric_key}@{k}'
+                ranking_list = []
+                
+                for retriever, data in normalized_comparison.items():
+                    clean_val = data['clean'].get(metric, None)
+                    if clean_val is None:
+                        continue
+                    noisy_val = data['noisy'].get(metric, 0) if data['noisy'] else 0
+                    deg = (noisy_val - clean_val) / clean_val * 100 if clean_val > 0 else 0
+                    ranking_list.append((retriever, clean_val, noisy_val, deg))
+                
+                ranking_list.sort(key=lambda x: x[1], reverse=True)
+                
+                print(f"\n{metric}:")
+                for idx, (retriever, clean, noisy, deg) in enumerate(ranking_list, 1):
+                    if deg > 0:
+                        indicator = "↑"
+                    else:
+                        indicator = "↓"
+                    print(f"  {idx}. {retriever:<12} Clean: {clean:.4f} | Noisy: {noisy:.4f} | 变化: {indicator} {deg:+.2f}%")
+    
     print("\n" + "="*100)
     print("📈 全指标对比 (Clean Mode)")
     print("="*100)
