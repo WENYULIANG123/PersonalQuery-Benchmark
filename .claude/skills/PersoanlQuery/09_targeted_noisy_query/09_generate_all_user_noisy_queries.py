@@ -112,45 +112,10 @@ def run_noisy_query_generation(
     log_with_timestamp(f"[{user_id}]   Input: {query_file}")
     log_with_timestamp(f"[{user_id}]   Writing analysis: {writing_file}")
     
-    # Create a temporary script that runs with the specific user parameters
-    temp_script = os.path.join(os.path.dirname(__file__), f'temp_{user_id}.py')
-    
     try:
-        # Read the original script
+        # Run the main script with --user argument
         original_script_path = os.path.join(os.path.dirname(__file__), '09_generate_noisy_queries.py')
-        with open(original_script_path, 'r', encoding='utf-8') as f:
-            script_content = f.read()
-        
-        # Replace hardcoded values
-        script_content = script_content.replace(
-            'USER_ID = "A13OFOB1394G31"',
-            f'USER_ID = "{user_id}"'
-        )
-        script_content = script_content.replace(
-            'STAGE7_RESULTS_FILE = os.path.join(BASE_DIR, "result/personal_query/07_query/dual_queries_A13OFOB1394G31.json")',
-            f'STAGE7_RESULTS_FILE = "{query_file}"'
-        )
-        script_content = script_content.replace(
-            'WRITING_ANALYSIS_FILE = os.path.join(BASE_DIR, "result/personal_query/05_writing_analysis/writing_analysis_A13OFOB1394G31.json")',
-            f'WRITING_ANALYSIS_FILE = "{writing_file}"'
-        )
-        script_content = script_content.replace(
-            'OUTPUT_DIR = os.path.join(BASE_DIR, "result/personal_query/10_targeted_noisy_query")',
-            f'OUTPUT_DIR = "{output_dir}"'
-        )
-        
-        if seed is not None:
-            script_content = script_content.replace(
-                'RANDOM_SEED = 42',
-                f'RANDOM_SEED = {seed}'
-            )
-        
-        # Write temporary script
-        with open(temp_script, 'w', encoding='utf-8') as f:
-            f.write(script_content)
-        
-        # Run the temporary script
-        cmd = [sys.executable, temp_script]
+        cmd = [sys.executable, original_script_path, '--user', user_id]
         
         result = subprocess.run(
             cmd,
@@ -168,10 +133,6 @@ def run_noisy_query_generation(
     except Exception as e:
         log_with_timestamp(f"[{user_id}] ✗ ERROR: {str(e)}")
         return {'success': False, 'user_id': user_id, 'error': str(e)}
-    finally:
-        # Clean up temporary script
-        if os.path.exists(temp_script):
-            os.remove(temp_script)
 
 def generate_summary(output_dir: str, user_ids: List[str]) -> Dict:
     """Generate summary statistics for all processed users"""

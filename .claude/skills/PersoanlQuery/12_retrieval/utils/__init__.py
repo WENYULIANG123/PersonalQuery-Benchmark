@@ -9,7 +9,19 @@ from .utils import (
     load_product_metadata,
     load_reviews_for_products,
     build_document_text,
-    evaluate_retriever
+    evaluate_retriever,
+    compute_metrics,
+    compute_enhanced_metrics,
+    compute_noise_robustness,
+    compute_percentile_stats,
+    compute_aggregate_metrics,
+    compute_dcg,
+    compute_cg,
+    compute_err,
+    compute_rbp,
+    compute_r_precision,
+    compute_bpref,
+    compute_novelty
 )
 
 from .retrievers import (
@@ -31,6 +43,19 @@ __all__ = [
     'load_reviews_for_products',
     'build_document_text',
     'evaluate_retriever',
+    'compute_metrics',
+    'compute_enhanced_metrics',
+    'compute_noise_robustness',
+    'compute_percentile_stats',
+    'compute_aggregate_metrics',
+    # New comprehensive metrics
+    'compute_dcg',
+    'compute_cg',
+    'compute_err',
+    'compute_rbp',
+    'compute_r_precision',
+    'compute_bpref',
+    'compute_novelty',
 
     # Retriever classes
     'BM25',

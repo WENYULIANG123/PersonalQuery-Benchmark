@@ -256,6 +256,28 @@ class DenseRetriever:
         self.doc_embeddings = embeddings
         log_with_timestamp(f"  Dense index built with {len(self.doc_ids)} docs (device: {self.device})")
     
+    def encode_query(self, query: str) -> np.ndarray:
+        """Encode query using dense embeddings
+        
+        Args:
+            query: Query text
+            
+        Returns:
+            numpy array of shape (embedding_dim,)
+        """
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        model = self._get_model()
+        
+        with _model_inference_lock:
+            query_embedding = model.encode([query])
+        
+        if isinstance(query_embedding, torch.Tensor):
+            query_embedding = query_embedding.cpu().numpy()
+        
+        return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
+    
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using dense vectors with optimized top-k extraction"""
         if not hasattr(self, 'device'):
@@ -439,6 +461,29 @@ class E5Retriever:
         log_with_timestamp(f"    - Multi window: {window_stats['multi_window']} docs")
         log_with_timestamp(f"    - Max windows per doc: {window_stats['max_windows']}")
         log_with_timestamp(f"    - Device: {self.device}")
+
+    def encode_query(self, query: str) -> np.ndarray:
+        """Encode query using E5 embeddings
+        
+        Args:
+            query: Query text
+            
+        Returns:
+            numpy array of shape (embedding_dim,)
+        """
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        model = self._get_model()
+        
+        with _model_inference_lock:
+            query_with_prefix = self._add_instruction(query, is_query=True)
+            query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
+        
+        if isinstance(query_embedding, torch.Tensor):
+            query_embedding = query_embedding.cpu().numpy()
+        
+        return query_embedding
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using E5 with batch processing for single-window documents"""
@@ -625,6 +670,29 @@ class BGERetriever:
         log_with_timestamp(f"    - Multi-window docs: {window_stats['multi_window']} (pooled with mean)")
         log_with_timestamp(f"    - Max windows per doc: {window_stats['max_windows']}")
         log_with_timestamp(f"    - Embeddings shape: {self.doc_embeddings.shape} (device: {self.device})")
+
+    def encode_query(self, query: str) -> np.ndarray:
+        """Encode query using BGE embeddings
+        
+        Args:
+            query: Query text
+            
+        Returns:
+            numpy array of shape (embedding_dim,)
+        """
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        model = self._get_model()
+        
+        with _model_inference_lock:
+            query_with_prefix = self._add_instruction(query, is_query=True)
+            query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
+        
+        if isinstance(query_embedding, torch.Tensor):
+            query_embedding = query_embedding.cpu().numpy()
+        
+        return query_embedding
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using BGE with batched similarity computation (optimized with window pooling)"""
@@ -1116,6 +1184,15 @@ class GritLMRetriever:
         self.doc_embeddings = torch.cat(embeddings, dim=0)
         log_with_timestamp(f"  GritLM index built with {len(self.doc_ids)} docs")
 
+    def encode_query(self, query: str) -> np.ndarray:
+        """Encode query to embedding vector"""
+        embedding = self._encode_text(query)
+        
+        if isinstance(embedding, torch.Tensor):
+            embedding = embedding.cpu().numpy()
+        
+        return embedding
+
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using GritLM"""
         query_embedding = self._encode_text(query)
@@ -1170,6 +1247,28 @@ class ANCERetriever:
         self.doc_embeddings = model.encode(texts, show_progress_bar=True, batch_size=32)
         log_with_timestamp(f"  ANCE index built with {len(self.doc_ids)} docs")
 
+    def encode_query(self, query: str) -> np.ndarray:
+        """Encode query using ANCE embeddings
+        
+        Args:
+            query: Query text
+            
+        Returns:
+            numpy array of shape (embedding_dim,)
+        """
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        model = self._get_model()
+        
+        with _model_inference_lock:
+            query_embedding = model.encode(["query: " + query])
+        
+        if isinstance(query_embedding, torch.Tensor):
+            query_embedding = query_embedding.cpu().numpy()
+        
+        return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
+    
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using ANCE embeddings"""
         if not hasattr(self, 'device'):
@@ -1194,9 +1293,12 @@ class ANCERetriever:
         
         scores = util.cos_sim(query_embedding, doc_embeddings)[0]
         
-        results = [(self.doc_ids[i], scores[i].item()) for i in range(len(self.doc_ids))]
-        results.sort(key=lambda x: -x[1])
-        return results[:top_k]
+        # Optimized: Use torch.topk instead of full sort (O(n log k) vs O(n log n))
+        # This provides ~250ms speedup by avoiding sorting all 302k documents
+        topk_values, topk_indices = torch.topk(scores, k=min(top_k, len(self.doc_ids)))
+        results = [(self.doc_ids[idx.item()], topk_values[i].item()) 
+                   for i, idx in enumerate(topk_indices)]
+        return results
 
 
 class STARRetriever:
@@ -1234,6 +1336,28 @@ class STARRetriever:
         self.doc_embeddings = model.encode(texts, show_progress_bar=True, batch_size=32)
         log_with_timestamp(f"  STAR index built with {len(self.doc_ids)} docs")
 
+    def encode_query(self, query: str) -> np.ndarray:
+        """Encode query using STAR embeddings
+        
+        Args:
+            query: Query text
+            
+        Returns:
+            numpy array of shape (embedding_dim,)
+        """
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        model = self._get_model()
+        
+        with _model_inference_lock:
+            query_embedding = model.encode([query])
+        
+        if isinstance(query_embedding, torch.Tensor):
+            query_embedding = query_embedding.cpu().numpy()
+        
+        return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
+
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using STAR embeddings"""
         if not hasattr(self, 'device'):
@@ -1257,9 +1381,11 @@ class STARRetriever:
         from sentence_transformers import util
         scores = util.cos_sim(query_embedding, doc_embeddings)[0]
         
-        results = [(self.doc_ids[i], scores[i].item()) for i in range(len(self.doc_ids))]
-        results.sort(key=lambda x: -x[1])
-        return results[:top_k]
+        # Optimized: Use torch.topk instead of full sort (O(n log k) vs O(n log n))
+        topk_values, topk_indices = torch.topk(scores, k=min(top_k, len(self.doc_ids)))
+        results = [(self.doc_ids[idx.item()], topk_values[i].item()) 
+                   for i, idx in enumerate(topk_indices)]
+        return results
 
 
 class MiniLMRetriever:
@@ -1296,6 +1422,21 @@ class MiniLMRetriever:
         self.doc_embeddings = model.encode(texts, show_progress_bar=True, batch_size=32)
         log_with_timestamp(f"  MiniLM index built with {len(self.doc_ids)} docs")
 
+    def encode_query(self, query: str) -> np.ndarray:
+        """Encode query to embedding vector"""
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        model = self._get_model()
+        
+        with _model_inference_lock:
+            query_embedding = model.encode([query])
+        
+        if isinstance(query_embedding, torch.Tensor):
+            query_embedding = query_embedding.cpu().numpy()
+        
+        return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
+
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using MiniLM embeddings"""
         if not hasattr(self, 'device'):
@@ -1319,9 +1460,11 @@ class MiniLMRetriever:
         from sentence_transformers import util
         scores = util.cos_sim(query_embedding, doc_embeddings)[0]
         
-        results = [(self.doc_ids[i], scores[i].item()) for i in range(len(self.doc_ids))]
-        results.sort(key=lambda x: -x[1])
-        return results[:top_k]
+        # Optimized: Use torch.topk instead of full sort (O(n log k) vs O(n log n))
+        topk_values, topk_indices = torch.topk(scores, k=min(top_k, len(self.doc_ids)))
+        results = [(self.doc_ids[idx.item()], topk_values[i].item()) 
+                   for i, idx in enumerate(topk_indices)]
+        return results
 
 
 class MPNetRetriever:
@@ -1358,6 +1501,21 @@ class MPNetRetriever:
         self.doc_embeddings = model.encode(texts, show_progress_bar=True, batch_size=32)
         log_with_timestamp(f"  MPNet index built with {len(self.doc_ids)} docs")
 
+    def encode_query(self, query: str) -> np.ndarray:
+        """Encode query to embedding vector"""
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        model = self._get_model()
+        
+        with _model_inference_lock:
+            query_embedding = model.encode([query])
+        
+        if isinstance(query_embedding, torch.Tensor):
+            query_embedding = query_embedding.cpu().numpy()
+        
+        return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
+
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using MPNet embeddings"""
         if not hasattr(self, 'device'):
@@ -1381,6 +1539,153 @@ class MPNetRetriever:
         from sentence_transformers import util
         scores = util.cos_sim(query_embedding, doc_embeddings)[0]
         
-        results = [(self.doc_ids[i], scores[i].item()) for i in range(len(self.doc_ids))]
-        results.sort(key=lambda x: -x[1])
-        return results[:top_k]
+        # Optimized: Use torch.topk instead of full sort (O(n log k) vs O(n log n))
+        topk_values, topk_indices = torch.topk(scores, k=min(top_k, len(self.doc_ids)))
+        results = [(self.doc_ids[idx.item()], topk_values[i].item()) 
+                   for i, idx in enumerate(topk_indices)]
+        return results
+
+
+class FAISSRetriever:
+    """FAISS-accelerated dense retrieval with GPU support"""
+    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2", 
+                 use_gpu: bool = True, nlist: int = 100, nprobe: int = 10):
+        self.model_name = model_name
+        self.model = None
+        self.doc_ids = []
+        self.all_metadata = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.use_gpu = use_gpu and torch.cuda.is_available()
+        self.index = None
+        
+        self.nlist = nlist
+        self.nprobe = nprobe
+
+    def _get_model(self):
+        if self.model is None:
+            log_with_timestamp(f"  Loading model: {self.model_name}")
+            from sentence_transformers import SentenceTransformer
+            self.model = SentenceTransformer(self.model_name, device=self.device)
+            log_with_timestamp(f"  Using device: {self.device}")
+        return self.model
+
+    def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
+        """Build FAISS index with IVFFlat for fast retrieval"""
+        log_with_timestamp("  Building FAISS index...")
+        model = self._get_model()
+
+        self.doc_ids = [doc.get('asin', '') for doc in documents]
+        self.all_metadata = all_metadata
+        texts = [build_document_text(doc, all_metadata) for doc in documents]
+
+        embeddings = model.encode(texts, show_progress_bar=True, batch_size=32)
+        embeddings = embeddings.astype('float32')
+        
+        embedding_dim = embeddings.shape[1]
+        log_with_timestamp(f"  Embedding dimension: {embedding_dim}")
+        
+        try:
+            import faiss
+            
+            log_with_timestamp(f"  Creating FAISS index (nlist={self.nlist}, nprobe={self.nprobe})...")
+            
+            quantizer = faiss.IndexFlatIP(embedding_dim)
+            self.index = faiss.IndexIVFFlat(quantizer, embedding_dim, self.nlist, faiss.METRIC_INNER_PRODUCT)
+            
+            log_with_timestamp("  Training FAISS index...")
+            self.index.train(embeddings)
+            
+            log_with_timestamp("  Adding embeddings to FAISS index...")
+            self.index.add(embeddings)
+            self.index.nprobe = self.nprobe
+            
+            if self.use_gpu:
+                log_with_timestamp("  Moving FAISS index to GPU...")
+                res = faiss.StandardGpuResources()
+                self.index_gpu = faiss.index_cpu_to_gpu(res, 0, self.index)
+                log_with_timestamp("  ✓ FAISS GPU index ready")
+            
+            log_with_timestamp(f"  FAISS index built with {len(self.doc_ids)} docs")
+        except ImportError:
+            log_with_timestamp("  WARNING: FAISS not available, falling back to brute force")
+            self.index = None
+            self.doc_embeddings = embeddings
+
+    def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+        """Search using FAISS index"""
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        model = self._get_model()
+        
+        with _model_inference_lock:
+            query_embedding = model.encode([query])
+        
+        query_embedding = query_embedding.astype('float32')
+        query_embedding = query_embedding / (np.linalg.norm(query_embedding, axis=1, keepdims=True) + 1e-10)
+        
+        if self.index is None:
+            from sentence_transformers import util
+            query_tensor = torch.from_numpy(query_embedding).float().to(self.device)
+            doc_embeddings = torch.from_numpy(self.doc_embeddings).float().to(self.device)
+            scores = util.cos_sim(query_tensor, doc_embeddings)[0]
+            # Optimized: Use torch.topk instead of full sort (O(n log k) vs O(n log n))
+            topk_values, topk_indices = torch.topk(scores, k=min(top_k, len(self.doc_ids)))
+            results = [(self.doc_ids[idx.item()], topk_values[i].item()) 
+                       for i, idx in enumerate(topk_indices)]
+            return results
+        
+        try:
+            if self.use_gpu and hasattr(self, 'index_gpu'):
+                import faiss
+                query_gpu = faiss.array_to_numpy(query_embedding)
+                distances, indices = self.index_gpu.search(query_gpu, k=min(top_k + 10, len(self.doc_ids)))
+            else:
+                distances, indices = self.index.search(query_embedding, k=min(top_k + 10, len(self.doc_ids)))
+            
+            results = [(self.doc_ids[int(idx)], float(dist)) 
+                      for idx, dist in zip(indices[0], distances[0]) if idx != -1]
+            return results[:top_k]
+        except Exception as e:
+            log_with_timestamp(f"  FAISS search error: {e}, falling back to brute force")
+            from sentence_transformers import util
+            query_tensor = torch.from_numpy(query_embedding).float().to(self.device)
+            doc_embeddings = torch.from_numpy(self.doc_embeddings).float().to(self.device)
+            scores = util.cos_sim(query_tensor, doc_embeddings)[0]
+            # Optimized: Use torch.topk instead of full sort (O(n log k) vs O(n log n))
+            topk_values, topk_indices = torch.topk(scores, k=min(top_k, len(self.doc_ids)))
+            results = [(self.doc_ids[idx.item()], topk_values[i].item()) 
+                       for i, idx in enumerate(topk_indices)]
+            return results
+
+
+class CachedRetriever:
+    """Wrapper that uses pre-computed query embeddings from cache"""
+    def __init__(self, base_retriever, cache_file: str = None):
+        self.base_retriever = base_retriever
+        self.cache = {}
+        
+        if cache_file and os.path.exists(cache_file):
+            with open(cache_file, 'rb') as f:
+                self.cache = pickle.load(f)
+            log_with_timestamp(f"  Loaded cache: {len(self.cache)} queries")
+    
+    def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+        """Search using cached embedding or fallback to base retriever"""
+        if query in self.cache:
+            query_embedding = self.cache[query]
+            if isinstance(query_embedding, np.ndarray):
+                query_embedding = torch.from_numpy(query_embedding).float()
+            
+            from sentence_transformers import util
+            doc_embeddings = self.base_retriever.doc_embeddings
+            if isinstance(doc_embeddings, np.ndarray):
+                doc_embeddings = torch.from_numpy(doc_embeddings).float()
+            
+            scores = util.cos_sim(query_embedding.unsqueeze(0), doc_embeddings)[0]
+            topk_values, topk_indices = torch.topk(scores, k=min(top_k, len(self.base_retriever.doc_ids)))
+            
+            return [(self.base_retriever.doc_ids[idx.item()], topk_values[i].item()) 
+                    for i, idx in enumerate(topk_indices)]
+        else:
+            return self.base_retriever.search(query, top_k)

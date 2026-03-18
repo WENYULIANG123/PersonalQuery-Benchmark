@@ -32,15 +32,17 @@ from difflib import SequenceMatcher
 # Hardcoded Configuration
 # ============================================================================
 
-USER_ID = "A13OFOB1394G31"
 BASE_DIR = "/fs04/ar57/wenyu"
 
-# Input files
-STAGE7_RESULTS_FILE = os.path.join(BASE_DIR, "result/personal_query/07_query/dual_queries_A13OFOB1394G31.json")
-WRITING_ANALYSIS_FILE = os.path.join(BASE_DIR, "result/personal_query/05_writing_analysis/writing_analysis_A13OFOB1394G31.json")
+# User ID will be determined from sys.argv or environment
+USER_ID = None
+
+# Input files - will be set later once USER_ID is determined
+STAGE7_RESULTS_FILE = None
+WRITING_ANALYSIS_FILE = None
 
 # Output
-OUTPUT_DIR = os.path.join(BASE_DIR, "result/personal_query/10_targeted_noisy_query")
+OUTPUT_DIR = os.path.join(BASE_DIR, "result/personal_query/09_targeted_noisy_query")
 
 RANDOM_SEED = 42
 
@@ -80,7 +82,7 @@ def calculate_similarity(s1: str, s2: str) -> float:
     return matcher.ratio()
 
 
-FUZZY_MATCH_THRESHOLD = 0.75
+FUZZY_MATCH_THRESHOLD = 0.60
 
 
 # ============================================================================
@@ -504,7 +506,9 @@ class PersonalizedSpellingErrorExtractor:
     def _extract_user_errors(self):
         log_with_timestamp("Extracting user spelling errors...")
 
-        if 'detailed_character_errors' in self.data:
+        if 'detailed_errors' in self.data:
+            self._extract_from_p3_format()
+        elif 'detailed_character_errors' in self.data:
             self._extract_from_new_format()
         elif 'results' in self.data:
             self._extract_from_old_format()
@@ -513,6 +517,104 @@ class PersonalizedSpellingErrorExtractor:
 
         log_with_timestamp(f"  Extracted {len(self.user_error_dict)} unique error patterns")
         log_with_timestamp(f"  Total error instances: {sum(len(v) for v in self.user_error_dict.values())}")
+
+    def _extract_from_p3_format(self):
+        """Extract errors from P3 optimal template format (Stage 04 output)"""
+        detailed_errors = self.data.get('detailed_errors', [])
+        log_with_timestamp(f"  Reading P3 optimal template format: {len(detailed_errors)} detailed error reviews")
+        
+        total_errors_processed = 0
+        anomaly_filtered = 0
+        
+        for review_data in detailed_errors:
+            errors_list = review_data.get('errors', [])
+            
+            for error in errors_list:
+                error_type = error.get('type', 'unknown')
+                details = error.get('details', {})
+                
+                original = details.get('original', '').lower().strip()
+                corrected = details.get('corrected', '').lower().strip()
+                
+                if not original or not corrected:
+                    continue
+                if original == corrected:
+                    continue
+                
+                if self._is_anomalous_error_pair(original, corrected):
+                    anomaly_filtered += 1
+                    continue
+                
+                similarity = calculate_similarity(original, corrected)
+                
+                self.user_error_dict[corrected].add(original)
+                self.error_type_stats[error_type] += 1
+                total_errors_processed += 1
+                
+                self.error_examples.append({
+                    'original': original,
+                    'corrected': corrected,
+                    'error_type': error_type,
+                    'similarity': similarity,
+                    'asin': review_data.get('asin', ''),
+                    'review_idx': review_data.get('review_idx', -1)
+                })
+        
+        if len(original.split()) == 1 and len(corrected.split()) > 1:
+            return True
+
+        log_with_timestamp(f"  Processed {total_errors_processed} total errors, filtered {anomaly_filtered} anomalies")
+    
+    def _is_anomalous_error_pair(self, original: str, corrected: str) -> bool:
+        """检测异常的错误对"""
+        import re
+        
+        orig_len = len(original)
+        corr_len = len(corrected)
+        
+        if orig_len < 2 or corr_len < 2:
+            return True
+        
+        if corr_len > orig_len * 3:
+            return True
+        
+        if orig_len > corr_len * 3:
+            return True
+        
+        if '&nbsp;' in corrected or '&nbsp;' in original:
+            return True
+        
+        if '"' in corrected or '"' in original or "'" in corrected or "'" in original:
+            return True
+        
+        letter_only_orig = re.sub(r'[^a-z]', '', original.lower())
+        letter_only_corr = re.sub(r'[^a-z]', '', corrected.lower())
+        
+        if not letter_only_corr or not letter_only_orig:
+            return True
+        
+        if letter_only_orig == letter_only_corr:
+            return True
+        
+        special_count_orig = len(re.findall(r'[^a-z]', original))
+        special_count_corr = len(re.findall(r'[^a-z]', corrected))
+        
+        if special_count_corr > len(letter_only_corr):
+            return True
+        
+        if special_count_orig > len(letter_only_orig):
+            return True
+        
+        if re.match(r'^[\W_]+$', original) or re.match(r'^[\W_]+$', corrected):
+            return True
+        
+        if re.match(r'^\d+$', original) or re.match(r'^\d+$', corrected):
+            return True
+        
+        if len(original.split()) == 1 and len(corrected.split()) > 1:
+            return True
+        
+        return False
 
     def _extract_from_new_format(self):
         errors = self.data.get('detailed_character_errors', [])
@@ -609,7 +711,7 @@ class PersonalizedSpellingErrorExtractor:
 
     def find_fuzzy_matches(self, word: str, threshold: float = FUZZY_MATCH_THRESHOLD) -> List[Tuple[str, float]]:
         word_lower = word.lower()
-        if not word_lower or len(word_lower) < 3:
+        if not word_lower:
             return []
         
         matches = []
@@ -656,8 +758,15 @@ class PersonalizedSpellingErrorExtractor:
             if correct_word == word_lower:
                 continue
             
+            # 关键修复：避免与超短单词的模糊匹配导致误注入
+            # 例如：'making' 不应仅因为与 'ing' 相似就被注入 'ed' 错误
+            # 对于长度 < 4 的"正确修正"词，使用更高的阈值 (>= 0.85)
+            effective_threshold = threshold
+            if len(correct_word) < 4:
+                effective_threshold = max(threshold, 0.85)
+            
             similarity = calculate_similarity(word_lower, correct_word)
-            if similarity >= threshold and similarity > best_similarity:
+            if similarity >= effective_threshold and similarity > best_similarity:
                 best_similarity = similarity
                 best_match = correct_word
                 # 获取用户的错误拼写
@@ -681,6 +790,22 @@ class PersonalizedSpellingErrorExtractor:
             'error_types': dict(self.error_type_stats),
             'sample_errors': self.error_examples[:10] if self.error_examples else []
         }
+
+    def is_error_form(self, word: str) -> bool:
+        """检查一个词是否已经是某个错误形式"""
+        word_lower = word.lower()
+        for error_set in self.user_error_dict.values():
+            if word_lower in error_set:
+                return True
+        return False
+
+    def get_correct_for_error_form(self, word: str) -> Optional[str]:
+        """获取错误形式对应的正确词"""
+        word_lower = word.lower()
+        for correct_word, error_set in self.user_error_dict.items():
+            if word_lower in error_set:
+                return correct_word
+        return None
 
 
 class PersonalizedSpellingInjector:
@@ -716,19 +841,28 @@ class PersonalizedSpellingInjector:
             clean = self._clean_word(token)
             if not clean:
                 continue
-                
-            # 首先检查精确匹配
-            if self.error_extractor.has_error_for_word(clean):
-                user_error = self.error_extractor.get_user_error_for_word(clean)
-                if user_error and user_error.lower() != clean.lower():
-                    user_error_targets.append((i, token, clean, user_error, "exact"))
-                    continue  # 精确匹配优先，不做模糊匹配
             
-            # 模糊匹配：与"正确修正"词相似度 ≥ 0.75
-            fuzzy_result = self.error_extractor.get_fuzzy_error_for_correct_word(clean, threshold=0.75)
-            if fuzzy_result:
-                matched_correct, user_error, similarity = fuzzy_result
-                user_error_targets.append((i, token, clean, user_error, f"fuzzy_{similarity:.2f}"))
+            # 优先检查：词本身是否已经是用户的错误形式
+            if self.error_extractor.is_error_form(clean):
+                correct_word = self.error_extractor.get_correct_for_error_form(clean)
+                if correct_word and correct_word.lower() != clean.lower():
+                    if len(correct_word.split()) == 1 and not self._is_invalid_substitution(clean, correct_word):
+                        user_error_targets.append((i, token, clean, correct_word, "error_form"))
+            else:
+                # 其次检查精确匹配
+                if self.error_extractor.has_error_for_word(clean):
+                    user_error = self.error_extractor.get_user_error_for_word(clean)
+                    if user_error and user_error.lower() != clean.lower():
+                        if len(user_error.split()) == 1 and not self._is_invalid_substitution(clean, user_error):
+                            user_error_targets.append((i, token, clean, user_error, "exact"))
+                        continue
+                
+                # 最后进行模糊匹配：与"正确修正"词相似度 ≥ 0.66
+                fuzzy_result = self.error_extractor.get_fuzzy_error_for_correct_word(clean, threshold=0.66)
+                if fuzzy_result:
+                    matched_correct, user_error, similarity = fuzzy_result
+                    if len(user_error.split()) == 1 and not self._is_invalid_substitution(clean, user_error):
+                        user_error_targets.append((i, token, clean, user_error, f"fuzzy_{similarity:.2f}"))
 
         if not user_error_targets:
             return self._unchanged(query, "No matching user error patterns (exact or fuzzy)")
@@ -785,6 +919,26 @@ class PersonalizedSpellingInjector:
             processed = new_word.capitalize()
 
         return leading + processed + trailing
+
+    def _is_invalid_substitution(self, orig: str, noisy: str) -> bool:
+        """检查是否为无效替换（会被过滤掉）"""
+        # 1. 完全相同（仅标点/大小写差异）
+        if orig.lower() == noisy.lower():
+            return True
+        
+        # 2. HTML引号（异常格式）
+        if '"' in noisy or "'" in noisy:
+            return True
+        
+        # 3. 多词短语（已通过 len(user_error.split()) == 1 检查，此处冗余但保留）
+        if len(noisy.split()) > 1:
+            return True
+        
+        # 4. 包含非字母字符（特殊字符异常）
+        if not noisy.replace('-', '').isalpha():  # 允许连字符
+            return True
+        
+        return False
 
     def _unchanged(self, query: str, reason: str) -> Dict:
         return {
@@ -1219,6 +1373,24 @@ def process_user(user_id: str,
 
 
 def main():
+    global USER_ID, STAGE7_RESULTS_FILE, WRITING_ANALYSIS_FILE
+    
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Generate noisy queries with personalized error injection')
+    parser.add_argument('--user', type=str, help='User ID to process (if not set, will be loaded from batch script)')
+    args, unknown_args = parser.parse_known_args()
+    
+    # If user argument provided, use it
+    if args.user:
+        USER_ID = args.user
+    elif not USER_ID:
+        log_with_timestamp("❌ Error: No user ID provided via --user argument or configuration")
+        return 1
+    
+    # Set file paths based on USER_ID
+    STAGE7_RESULTS_FILE = os.path.join(BASE_DIR, f"result/personal_query/06_query/dual_queries_{USER_ID}.json")
+    WRITING_ANALYSIS_FILE = os.path.join(BASE_DIR, f"result/personal_query/04_writing_analysis/writing_analysis_{USER_ID}.json")
+    
     log_with_timestamp("=" * 60)
     log_with_timestamp("Stage 10: Personalized Noisy Query Generator")
     log_with_timestamp("=" * 60)

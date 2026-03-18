@@ -602,7 +602,288 @@ def load_qa_for_products(
 
 
 # ============================================================================
-# Evaluation Functions (unchanged)
+# Enhanced Evaluation Functions
+# ============================================================================
+
+def compute_enhanced_metrics(
+    retrieved: List[str], 
+    relevant: Set[str], 
+    k: int = 10
+) -> Dict:
+    """
+    Compute comprehensive retrieval metrics including diagnostic indicators
+    
+    Returns dict with:
+    - Base metrics: precision, recall, MAP, NDCG, MRR
+    - Diagnostic: Hit@k, F1-score, AvgRank
+    - Ranking metrics: DCG, CG, ERR, RBP
+    - Specialized: R-Precision, Bpref, Novelty
+    """
+    retrieved_k = retrieved[:k]
+    num_relevant = len([r for r in retrieved_k if r in relevant])
+    
+    precision = num_relevant / k if k > 0 else 0
+    recall = num_relevant / len(relevant) if len(relevant) > 0 else 0
+    
+    ap = 0
+    num_found = 0
+    for i, r in enumerate(retrieved_k):
+        if r in relevant:
+            num_found += 1
+            ap += num_found / (i + 1)
+    ap = ap / len(relevant) if len(relevant) > 0 else 0
+    
+    dcg = 0
+    for i, r in enumerate(retrieved_k):
+        if r in relevant:
+            dcg += 1 / np.log2(i + 2)
+    idcg = sum(1 / np.log2(i + 2) for i in range(min(len(relevant), k)))
+    ndcg = dcg / idcg if idcg > 0 else 0
+    
+    mrr = 0
+    for i, r in enumerate(retrieved_k):
+        if r in relevant:
+            mrr = 1 / (i + 1)
+            break
+    
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+    hit = 1 if num_relevant > 0 else 0
+    
+    relevant_ranks = []
+    for i, r in enumerate(retrieved_k):
+        if r in relevant:
+            relevant_ranks.append(i + 1)
+    avg_rank = np.mean(relevant_ranks) if relevant_ranks else k + 1
+    
+    cg = float(num_relevant)
+    err = compute_err(retrieved, relevant, k)
+    rbp = compute_rbp(retrieved, relevant, k)
+    r_precision = compute_r_precision(retrieved, relevant)
+    bpref = compute_bpref(retrieved, relevant, k)
+    novelty = compute_novelty(retrieved, relevant, k)
+    
+    return {
+        'precision_at_k': precision,
+        'recall_at_k': recall,
+        'ap': ap,
+        'ndcg': ndcg,
+        'mrr': mrr,
+        'f1_at_k': f1,
+        'hit_at_k': hit,
+        'avg_rank': avg_rank,
+        'dcg': dcg,
+        'cg': cg,
+        'err': err,
+        'rbp': rbp,
+        'r_precision': r_precision,
+        'bpref': bpref,
+        'novelty': novelty,
+    }
+
+
+def compute_noise_robustness(
+    clean_metrics: Dict,
+    noisy_metrics: Dict,
+    key: str = 'ndcg'
+) -> Dict:
+    """
+    Compute noise robustness metrics comparing clean vs noisy performance
+    
+    Args:
+        clean_metrics: Metrics from clean queries
+        noisy_metrics: Metrics from noisy queries
+        key: Which metric to analyze (default: 'ndcg')
+    
+    Returns dict with:
+    - Absolute difference
+    - Relative change (%)
+    - Robustness score [0-1]
+    """
+    clean_val = clean_metrics.get(key, 0)
+    noisy_val = noisy_metrics.get(key, 0)
+    
+    delta = noisy_val - clean_val  # Can be positive or negative
+    
+    if clean_val > 0:
+        rel_change = (delta / clean_val) * 100  # Percentage change
+        # Robustness: how well it resists noise (penalize large negative changes)
+        robustness = max(0, 1 - abs(delta) / clean_val) if clean_val > 0 else 0
+    else:
+        rel_change = 0
+        robustness = 1 if delta >= 0 else 0
+    
+    return {
+        'delta': round(delta, 4),
+        'rel_change_pct': round(rel_change, 2),
+        'robustness': round(robustness, 4),
+    }
+
+
+def compute_dcg(retrieved: List[str], relevant: Set[str], k: int = 10) -> float:
+    """Compute Discounted Cumulative Gain"""
+    retrieved_k = retrieved[:k]
+    dcg = 0.0
+    for i, r in enumerate(retrieved_k):
+        if r in relevant:
+            dcg += 1.0 / np.log2(i + 2)
+    return dcg
+
+
+def compute_cg(retrieved: List[str], relevant: Set[str], k: int = 10) -> float:
+    """Compute Cumulative Gain (without discount)"""
+    retrieved_k = retrieved[:k]
+    cg = sum(1 for r in retrieved_k if r in relevant)
+    return float(cg)
+
+
+def compute_err(retrieved: List[str], relevant: Set[str], k: int = 10) -> float:
+    """Compute Expected Reciprocal Rank - probability-based metric"""
+    retrieved_k = retrieved[:k]
+    err = 0.0
+    rel_so_far = 1.0
+    
+    for i, r in enumerate(retrieved_k):
+        is_relevant = 1.0 if r in relevant else 0.0
+        err += rel_so_far * is_relevant / (i + 1)
+        rel_so_far *= (1.0 - is_relevant)
+        
+        if rel_so_far == 0:
+            break
+    
+    return err
+
+
+def compute_rbp(retrieved: List[str], relevant: Set[str], k: int = 10, p: float = 0.5) -> float:
+    """Compute Rank-Biased Precision with persistence parameter p"""
+    retrieved_k = retrieved[:k]
+    rbp = 0.0
+    
+    for i, r in enumerate(retrieved_k):
+        is_relevant = 1.0 if r in relevant else 0.0
+        rbp += ((1.0 - p) * (p ** i)) * is_relevant
+    
+    return rbp
+
+
+def compute_r_precision(retrieved: List[str], relevant: Set[str]) -> float:
+    """Compute R-Precision: precision at R (total relevant count)"""
+    if not relevant:
+        return 0.0
+    
+    r = len(relevant)
+    retrieved_r = retrieved[:r]
+    num_relevant = sum(1 for r_item in retrieved_r if r_item in relevant)
+    
+    return num_relevant / r if r > 0 else 0.0
+
+
+def compute_bpref(retrieved: List[str], relevant: Set[str], k: int = 10) -> float:
+    """Compute Binary Preference metric"""
+    if not relevant:
+        return 0.0
+    
+    retrieved_k = retrieved[:k]
+    bpref = 0.0
+    
+    for i, r in enumerate(retrieved_k):
+        if r in relevant:
+            non_rel_ranked_higher = sum(1 for j in range(i) if retrieved_k[j] not in relevant)
+            bpref += 1.0 - (non_rel_ranked_higher / len(relevant))
+    
+    return bpref / len(relevant) if relevant else 0.0
+
+
+def compute_novelty(retrieved: List[str], relevant: Set[str], k: int = 10) -> float:
+    """Compute Novelty: avoid duplicate/repeated relevant results"""
+    retrieved_k = retrieved[:k]
+    novelty = 0.0
+    seen_relevant = {}
+    
+    for r in retrieved_k:
+        if r in relevant:
+            count = seen_relevant.get(r, 0)
+            seen_relevant[r] = count + 1
+            novelty += 1.0 / (1.0 + count)
+    
+    return novelty / k if k > 0 else 0.0
+
+
+def compute_percentile_stats(
+    metric_values: List[float]
+) -> Dict:
+    """
+    Compute percentile statistics for a set of metric values
+    """
+    if not metric_values:
+        return {}
+    
+    return {
+        'mean': round(np.mean(metric_values), 4),
+        'std': round(np.std(metric_values), 4),
+        'min': round(np.min(metric_values), 4),
+        'p25': round(np.percentile(metric_values, 25), 4),
+        'median': round(np.percentile(metric_values, 50), 4),
+        'p75': round(np.percentile(metric_values, 75), 4),
+        'p90': round(np.percentile(metric_values, 90), 4),
+        'p95': round(np.percentile(metric_values, 95), 4),
+        'max': round(np.max(metric_values), 4),
+    }
+
+
+def compute_aggregate_metrics(
+    all_metrics: Dict[int, List[Dict]],
+    k_values: List[int] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100]
+) -> Dict:
+    """
+    Compute aggregated metrics over all queries for each k value
+    """
+    aggregated = {}
+    
+    for k in k_values:
+        if not all_metrics.get(k):
+            continue
+        
+        metrics_list = all_metrics[k]
+        
+        aggregated[f'P@{k}'] = round(np.mean([m['precision_at_k'] for m in metrics_list]), 4)
+        aggregated[f'R@{k}'] = round(np.mean([m['recall_at_k'] for m in metrics_list]), 4)
+        aggregated[f'MAP@{k}'] = round(np.mean([m['ap'] for m in metrics_list]), 4)
+        aggregated[f'NDCG@{k}'] = round(np.mean([m['ndcg'] for m in metrics_list]), 4)
+        aggregated[f'MRR@{k}'] = round(np.mean([m['mrr'] for m in metrics_list]), 4)
+        
+        aggregated[f'F1@{k}'] = round(np.mean([m['f1_at_k'] for m in metrics_list]), 4)
+        aggregated[f'Hit@{k}'] = round(np.mean([m['hit_at_k'] for m in metrics_list]), 4)
+        aggregated[f'AvgRank@{k}'] = round(np.mean([m['avg_rank'] for m in metrics_list]), 2)
+        
+        aggregated[f'DCG@{k}'] = round(np.mean([m['dcg'] for m in metrics_list]), 4)
+        aggregated[f'CG@{k}'] = round(np.mean([m['cg'] for m in metrics_list]), 4)
+        aggregated[f'ERR@{k}'] = round(np.mean([m['err'] for m in metrics_list]), 4)
+        aggregated[f'RBP@{k}'] = round(np.mean([m['rbp'] for m in metrics_list]), 4)
+        
+        if k == 10:
+            aggregated['R-Precision'] = round(np.mean([m['r_precision'] for m in metrics_list]), 4)
+            aggregated['Bpref@10'] = round(np.mean([m['bpref'] for m in metrics_list]), 4)
+            aggregated['Novelty@10'] = round(np.mean([m['novelty'] for m in metrics_list]), 4)
+        
+        ndcg_values = [m['ndcg'] for m in metrics_list]
+        ndcg_stats = compute_percentile_stats(ndcg_values)
+        aggregated[f'NDCG@{k}_stats'] = ndcg_stats
+        
+        high_perf = sum(1 for m in metrics_list if m['ndcg'] >= 0.30) / len(metrics_list)
+        med_perf = sum(1 for m in metrics_list if 0.15 <= m['ndcg'] < 0.30) / len(metrics_list)
+        low_perf = sum(1 for m in metrics_list if m['ndcg'] < 0.15) / len(metrics_list)
+        
+        aggregated[f'Performance_Distribution@{k}'] = {
+            'high': round(high_perf * 100, 1),
+            'medium': round(med_perf * 100, 1),
+            'low': round(low_perf * 100, 1),
+        }
+    
+    return aggregated
+
+
+# ============================================================================
+# Original Evaluation Functions
 # ============================================================================
 
 def compute_metrics(retrieved: List[str], relevant: Set[str], k: int = 10) -> Dict:
@@ -655,7 +936,7 @@ def evaluate_retriever(
     retriever, 
     queries: List[Dict], 
     all_asins: List[str], 
-    k_values: List[int] = [1, 3, 5, 10], 
+    k_values: List[int] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100], 
     save_candidates_path: str = None,
     mode: str = None
 ) -> Dict:
@@ -700,7 +981,7 @@ def evaluate_retriever(
         
         relevant = {asin}
         for k in k_values:
-            metrics = compute_metrics(retrieved_asins, relevant, k)
+            metrics = compute_enhanced_metrics(retrieved_asins, relevant, k)
             all_metrics[k].append(metrics)
     
     if save_candidates_path and all_candidates:
@@ -708,20 +989,7 @@ def evaluate_retriever(
             json.dump({'candidates': all_candidates, 'retriever': 'bm25'}, f)
         log_with_timestamp(f"  Saved candidates to: {save_candidates_path}")
     
-    aggregated = {}
-    for k in k_values:
-        if all_metrics[k]:
-            avg_precision = np.mean([m['precision_at_k'] for m in all_metrics[k]])
-            avg_recall = np.mean([m['recall_at_k'] for m in all_metrics[k]])
-            avg_ap = np.mean([m['ap'] for m in all_metrics[k]])
-            avg_ndcg = np.mean([m['ndcg'] for m in all_metrics[k]])
-            avg_mrr = np.mean([m['mrr'] for m in all_metrics[k]])
-            
-            aggregated[f'P@{k}'] = round(avg_precision, 4)
-            aggregated[f'R@{k}'] = round(avg_recall, 4)
-            aggregated[f'MAP@{k}'] = round(avg_ap, 4)
-            aggregated[f'NDCG@{k}'] = round(avg_ndcg, 4)
-            aggregated[f'MRR@{k}'] = round(avg_mrr, 4)
+    aggregated = compute_aggregate_metrics(all_metrics, k_values)
     
     if search_times:
         avg_search_time = np.mean(search_times)

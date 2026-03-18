@@ -1012,6 +1012,19 @@ class RetrieverManager:
         """Get cache file path for a retriever"""
         return os.path.join(self.cache_dir, f"{retriever_name}_{doc_hash}.pkl")
     
+    def cache_exists(self, retriever_name: str, doc_hash: str) -> bool:
+        """Check if cache files exist for a retriever"""
+        if retriever_name in DENSE_RETRIEVERS:
+            # Dense retrievers use separated storage format
+            base_path = os.path.join(self.cache_dir, f"{retriever_name}_{doc_hash}")
+            config_path = f"{base_path}_config.pkl"
+            embeddings_path = f"{base_path}_embeddings.npy"
+            return os.path.exists(config_path) and os.path.exists(embeddings_path)
+        else:
+            # Sparse retrievers use single file format
+            cache_path = self._get_cache_path(retriever_name, doc_hash)
+            return os.path.exists(cache_path)
+    
     def _load_from_cache(self, retriever_name: str, doc_hash: str) -> Optional[Any]:
         """Load retriever from disk cache if available"""
         log_with_timestamp(f"[LOAD_CACHE_ATTEMPT] Attempting to load {retriever_name} cache (hash={doc_hash[:8]}...)")
@@ -1218,14 +1231,50 @@ log_with_timestamp = utils.log_with_timestamp
 evaluate_retriever = utils.evaluate_retriever
 
 
-def _print_metrics_summary(retriever_name: str, user_id: str, mode: str, metrics: Dict, num_queries: int):
-    """Print detailed metrics for completed evaluation"""
+def _print_metrics_summary(retriever_name: str, user_id: str, mode: str, metrics: Dict, num_queries: int, clean_metrics: Dict = None):
+    """Print detailed metrics for completed evaluation with optional noise robustness comparison"""
     log_with_timestamp(f"  ✓ {retriever_name.upper()} ({user_id}, {mode}) - {num_queries} queries")
     log_with_timestamp(f"    Precision:  P@1={metrics.get('P@1', 0):.4f}  P@3={metrics.get('P@3', 0):.4f}  P@5={metrics.get('P@5', 0):.4f}  P@10={metrics.get('P@10', 0):.4f}")
     log_with_timestamp(f"    Recall:     R@1={metrics.get('R@1', 0):.4f}  R@3={metrics.get('R@3', 0):.4f}  R@5={metrics.get('R@5', 0):.4f}  R@10={metrics.get('R@10', 0):.4f}")
     log_with_timestamp(f"    MAP:        M@1={metrics.get('MAP@1', 0):.4f}  M@3={metrics.get('MAP@3', 0):.4f}  M@5={metrics.get('MAP@5', 0):.4f}  M@10={metrics.get('MAP@10', 0):.4f}")
     log_with_timestamp(f"    NDCG:      ND@1={metrics.get('NDCG@1', 0):.4f} ND@3={metrics.get('NDCG@3', 0):.4f} ND@5={metrics.get('NDCG@5', 0):.4f} ND@10={metrics.get('NDCG@10', 0):.4f}")
     log_with_timestamp(f"    MRR:       MR@1={metrics.get('MRR@1', 0):.4f} MR@3={metrics.get('MRR@3', 0):.4f} MR@5={metrics.get('MRR@5', 0):.4f} MR@10={metrics.get('MRR@10', 0):.4f}")
+    
+    if 'F1@1' in metrics:
+        log_with_timestamp(f"    F1-Score:   F@1={metrics.get('F1@1', 0):.4f}  F@3={metrics.get('F1@3', 0):.4f}  F@5={metrics.get('F1@5', 0):.4f}  F@10={metrics.get('F1@10', 0):.4f}")
+        log_with_timestamp(f"    Hit Rate:   H@1={metrics.get('Hit@1', 0):.4f}  H@3={metrics.get('Hit@3', 0):.4f}  H@5={metrics.get('Hit@5', 0):.4f}  H@10={metrics.get('Hit@10', 0):.4f}")
+        log_with_timestamp(f"    Avg Rank:   AR@1={metrics.get('AvgRank@1', 0):.1f}  AR@3={metrics.get('AvgRank@3', 0):.1f}  AR@5={metrics.get('AvgRank@5', 0):.1f}  AR@10={metrics.get('AvgRank@10', 0):.1f}")
+    
+    if 'DCG@1' in metrics:
+        log_with_timestamp(f"    DCG:       DCG@1={metrics.get('DCG@1', 0):.4f} DCG@3={metrics.get('DCG@3', 0):.4f} DCG@5={metrics.get('DCG@5', 0):.4f} DCG@10={metrics.get('DCG@10', 0):.4f}")
+        log_with_timestamp(f"    CG:        CG@1={metrics.get('CG@1', 0):.4f}  CG@3={metrics.get('CG@3', 0):.4f}  CG@5={metrics.get('CG@5', 0):.4f}  CG@10={metrics.get('CG@10', 0):.4f}")
+        log_with_timestamp(f"    ERR:       ERR@1={metrics.get('ERR@1', 0):.4f} ERR@3={metrics.get('ERR@3', 0):.4f} ERR@5={metrics.get('ERR@5', 0):.4f} ERR@10={metrics.get('ERR@10', 0):.4f}")
+        log_with_timestamp(f"    RBP:       RBP@1={metrics.get('RBP@1', 0):.4f} RBP@3={metrics.get('RBP@3', 0):.4f} RBP@5={metrics.get('RBP@5', 0):.4f} RBP@10={metrics.get('RBP@10', 0):.4f}")
+    
+    if 'NDCG@10_stats' in metrics:
+        stats = metrics['NDCG@10_stats']
+        log_with_timestamp(f"    NDCG@10 Distribution: median={stats.get('median', 0):.4f} p90={stats.get('p90', 0):.4f} p95={stats.get('p95', 0):.4f} std={stats.get('std', 0):.4f}")
+    
+    if 'Performance_Distribution@10' in metrics:
+        dist = metrics['Performance_Distribution@10']
+        log_with_timestamp(f"    Query Classification: High{dist.get('high', 0):.1f}% Medium{dist.get('medium', 0):.1f}% Low{dist.get('low', 0):.1f}%")
+    
+    if clean_metrics and mode == 'noisy':
+        ndcg_clean = clean_metrics.get('NDCG@10', 0)
+        ndcg_noisy = metrics.get('NDCG@10', 0)
+        ndcg_delta = ndcg_noisy - ndcg_clean
+        ndcg_rel = (ndcg_delta / ndcg_clean * 100) if ndcg_clean > 0 else 0
+        
+        hit_clean = clean_metrics.get('Hit@10', 0)
+        hit_noisy = metrics.get('Hit@10', 0)
+        hit_delta = hit_noisy - hit_clean
+        
+        robustness = 1 - abs(ndcg_delta) / ndcg_clean if ndcg_clean > 0 else 0
+        
+        log_with_timestamp(f"    Noise Robustness (vs Clean):")
+        log_with_timestamp(f"      NDCG@10: {ndcg_clean:.4f} → {ndcg_noisy:.4f} ({ndcg_delta:+.4f}, {ndcg_rel:+.1f}%)")
+        log_with_timestamp(f"      Hit@10:  {hit_clean:.4f} → {hit_noisy:.4f} ({hit_delta:+.4f})")
+        log_with_timestamp(f"      Robustness: {robustness:.1%}")
 
 
 def _clean_user_old_results(user_id: str, output_dir: str):
@@ -1250,7 +1299,7 @@ RETRIEVER_NAMES = [
     'colbert'
 ]
 
-DEFAULT_K_VALUES = [1, 3, 5, 10]
+DEFAULT_K_VALUES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100]
 
 RETRIEVER_TYPES = {
     'sparse': [],
@@ -1362,7 +1411,6 @@ def _evaluate_single_mode(retriever, retriever_name: str, user_id: str, mode: st
     try:
         log_with_timestamp(f"[EVAL_MODE_START] {retriever_name}/{user_id} ({mode}): {len(queries)} queries, {len(all_asins)} products")
         
-        # Log system resources before evaluation
         try:
             cpu_percent = psutil.cpu_percent(interval=0.1)
             mem_info = psutil.virtual_memory()
@@ -1501,6 +1549,12 @@ def evaluate_user_with_retriever(
         
         log_with_timestamp(f"[RETRIEVER_EVAL_DONE] {retriever_name}/{user_id}: Completed with {len(results)} mode(s)")
         
+        if 'clean' in results and 'noisy' in results:
+            clean_metrics = results.get('clean')
+            noisy_metrics = results.get('noisy')
+            if clean_metrics and noisy_metrics:
+                _print_metrics_summary(retriever_name, user_id, 'noisy', noisy_metrics, len(user_queries.get('noisy', [])), clean_metrics=clean_metrics)
+        
     except Exception as e:
         log_with_timestamp(f"[RETRIEVER_EVAL_CRITICAL_ERROR] {retriever_name}/{user_id}: CRITICAL ERROR in thread pool management")
         log_with_timestamp(f"  Exception Type: {type(e).__name__}")
@@ -1580,9 +1634,19 @@ def evaluate_batch_fullscale(
     for retriever_type in RETRIEVER_ORDER:
         enabled_retrievers.extend(RETRIEVER_TYPES[retriever_type])
     
+    # Compute document hash to check cache existence
+    doc_hash = dm._compute_document_hash(documents) if hasattr(dm, '_compute_document_hash') else hashlib.md5('|'.join(sorted([doc.get('asin', '') for doc in documents])).encode()).hexdigest()
+    
     logger.info(f"[LAZY_INIT_START] Creating lazy proxies for {len(enabled_retrievers)} retrievers...")
+    logger.info(f"[CACHE_CHECK] Document hash: {doc_hash[:16]}...")
+    
     for retriever_name in enabled_retrievers:
         try:
+            # Check if cache exists before creating proxy
+            if not rm.cache_exists(retriever_name, doc_hash):
+                logger.warning(f"[SKIP_RETRIEVER] {retriever_name} - cache not found, will skip evaluation")
+                continue
+            
             logger.info(f"[LAZY_PROXY_CREATE] {retriever_name}")
             retrievers[retriever_name] = rm.create_lazy_proxy(
                 retriever_name, 
