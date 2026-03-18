@@ -497,16 +497,21 @@ class BGERetriever:
         else:
             return text
 
-    def _encode_text_with_sliding_window(self, text: str):
+    def _encode_text_with_sliding_window(self, text: str, pool_windows: str = 'mean'):
         """
         使用滑动窗口编码文本，保证不截断
 
         Args:
             text: 输入文本（BGE 文档不需要前缀）
+            pool_windows: 多窗口池化策略
+              - 'mean': 对所有窗口 embeddings 求平均（默认，用于快速检索）
+              - 'max': 对所有窗口 embeddings 求最大值
+              - 'first': 仅使用第一个窗口
+              - None: 返回所有窗口 embeddings（用于精确排名）
 
         Returns:
-            如果文本 <= max_seq_length: 单个 embedding [dim]
-            如果文本 > max_seq_length: 多个窗口的 embeddings [num_windows, dim]
+            总是返回单个 embedding [dim]
+            （当 pool_windows 不为 None 时）
         """
         model = self._get_model()
 
@@ -559,14 +564,23 @@ class BGERetriever:
 
                 window_embeddings.append(window_embedding)
 
-            # 返回所有窗口的 embeddings（堆叠成 tensor）
-            return torch.stack(window_embeddings)
+            # 池化多个窗口的 embeddings
+            stacked = torch.stack(window_embeddings)
+            
+            if pool_windows is None:
+                return stacked
+            elif pool_windows == 'mean':
+                return torch.mean(stacked, dim=0)
+            elif pool_windows == 'max':
+                return torch.max(stacked, dim=0)[0]
+            elif pool_windows == 'first':
+                return stacked[0]
+            else:
+                return torch.mean(stacked, dim=0)
 
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
-        """
-        构建 BGE 索引（使用滑动窗口，保证不截断）
-        """
-        log_with_timestamp("  Building BGE-large-en index with sliding window (no truncation)...")
+        """Build BGE index with window pooling for fast retrieval (mean pooling by default)"""
+        log_with_timestamp("  Building BGE-large-en index with sliding window + pooling...")
         model = self._get_model()
 
         self.doc_ids = [doc.get('asin', '') for doc in documents]
@@ -575,7 +589,7 @@ class BGERetriever:
         # 使用增强的文档文本构建
         texts = [build_document_text(doc, all_metadata) for doc in documents]
 
-        # 使用滑动窗口编码每个文档
+        # 使用滑动窗口编码每个文档（带池化）
         doc_embeddings_list = []
         window_stats = {'single_window': 0, 'multi_window': 0, 'max_windows': 0}
 
@@ -583,31 +597,31 @@ class BGERetriever:
             if (i + 1) % 10 == 0:
                 log_with_timestamp(f"    Encoding document {i+1}/{len(texts)}...")
 
-            # 使用滑动窗口编码
-            doc_emb = self._encode_text_with_sliding_window(text)
+            # 使用滑动窗口编码 + mean pooling
+            doc_emb = self._encode_text_with_sliding_window(text, pool_windows='mean')
 
-            # 统计窗口使用情况
-            if doc_emb.dim() == 1:
-                # 单窗口
+            # 统计窗口使用情况（记录有多少文档有多个窗口）
+            num_tokens = len(model.tokenizer(text, truncation=False, return_tensors='pt')['input_ids'][0])
+            if num_tokens <= self.max_seq_length:
                 window_stats['single_window'] += 1
             else:
-                # 多窗口
                 window_stats['multi_window'] += 1
-                num_windows = doc_emb.shape[0]
+                num_windows = (num_tokens - self.max_seq_length) // self.window_stride + 1
                 window_stats['max_windows'] = max(window_stats['max_windows'], num_windows)
 
             doc_embeddings_list.append(doc_emb)
 
-        # 将列表保持为 list 格式
-        self.doc_embeddings = doc_embeddings_list
+        # 堆叠所有 embeddings 为统一的 2D 张量（优化：支持批量操作）
+        self.doc_embeddings = torch.stack(doc_embeddings_list)
 
         log_with_timestamp(f"  BGE index built with {len(self.doc_ids)} docs:")
-        log_with_timestamp(f"    - Single window: {window_stats['single_window']} docs")
-        log_with_timestamp(f"    - Multi window: {window_stats['multi_window']} docs")
+        log_with_timestamp(f"    - Single window docs: {window_stats['single_window']}")
+        log_with_timestamp(f"    - Multi-window docs: {window_stats['multi_window']} (pooled with mean)")
         log_with_timestamp(f"    - Max windows per doc: {window_stats['max_windows']}")
+        log_with_timestamp(f"    - Embeddings shape: {self.doc_embeddings.shape}")
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """Search using BGE (supports multi-window documents)"""
+        """Search using BGE with batched similarity computation (optimized with window pooling)"""
         if not hasattr(self, 'device'):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
@@ -617,26 +631,22 @@ class BGERetriever:
             query_with_prefix = self._add_instruction(query, is_query=True)
             query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
 
+        # Ensure doc_embeddings is on the same device as query
+        doc_embeddings = self.doc_embeddings
+        if isinstance(doc_embeddings, np.ndarray):
+            doc_embeddings = torch.from_numpy(doc_embeddings).float().to(query_embedding.device)
+        elif torch.is_tensor(doc_embeddings):
+            if doc_embeddings.device != query_embedding.device:
+                doc_embeddings = doc_embeddings.to(query_embedding.device)
+
+        # Batched cosine similarity (all 302K docs at once)
         from sentence_transformers import util
-        scores = []
+        scores = util.cos_sim(query_embedding, doc_embeddings)[0]
 
-        for i, doc_emb in enumerate(self.doc_embeddings):
-            if isinstance(doc_emb, np.ndarray):
-                doc_emb = torch.from_numpy(doc_emb).float().to(query_embedding.device)
-            if torch.is_tensor(doc_emb):
-                if doc_emb.device != query_embedding.device:
-                    doc_emb = doc_emb.to(query_embedding.device)
-            
-            if doc_emb.dim() == 1:
-                score = util.cos_sim(query_embedding, doc_emb.unsqueeze(0))[0][0].item()
-            else:
-                window_scores = util.cos_sim(query_embedding, doc_emb)[0]
-                score = window_scores.max().item()
-
-            scores.append((self.doc_ids[i], score))
-
-        scores.sort(key=lambda x: -x[1])
-        return scores[:top_k]
+        # Convert to (document_id, score) pairs
+        results = [(self.doc_ids[i], scores[i].item()) for i in range(len(self.doc_ids))]
+        results.sort(key=lambda x: -x[1])
+        return results[:top_k]
 
 
 class ColBERTRetriever:
