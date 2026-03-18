@@ -38,14 +38,105 @@ def is_job_running(job_id):
             timeout=5,
             text=True
         )
-        # If squeue returns empty output (no header), job is not in queue
-        # If it has output, job is running
         return bool(result.stdout.strip())
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-        # If squeue fails or times out, assume job might still be running
         return True
     except Exception:
         return True
+
+
+def find_running_jobs_by_name(script_name, current_user=None):
+    """
+    查找当前用户正在运行的同名脚本任务。
+    """
+    if current_user is None:
+        current_user = os.environ.get('USER', os.environ.get('LOGNAME', ''))
+    
+    if not script_name or script_name == 'job':
+        return []
+    
+    try:
+        result = subprocess.run(
+            ['squeue', '-u', current_user, '-o', '%.18i %.100j %.8T', '--noheader'],
+            capture_output=True,
+            timeout=10,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            return []
+        
+        running_jobs = []
+        for line in result.stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            
+            job_id = parts[0]
+            status = parts[-1]
+            job_name = ' '.join(parts[1:-1])
+            
+            if status in ['RUNNING', 'PENDING']:
+                if script_name in job_name:
+                    running_jobs.append({
+                        'job_id': job_id,
+                        'name': job_name,
+                        'status': status
+                    })
+        
+        return running_jobs
+    
+    except subprocess.TimeoutExpired:
+        print("[sbatch_wrapper] ⚠️  查询运行中任务超时", file=sys.stderr)
+        return []
+    except Exception as e:
+        print(f"[sbatch_wrapper] ⚠️  查询运行中任务时出错: {e}", file=sys.stderr)
+        return []
+
+
+def cancel_jobs(job_ids):
+    """
+    取消指定的SLURM任务。
+    
+    Args:
+        job_ids: 任务ID列表
+    
+    Returns:
+        tuple: (成功取消的数量, 失败的数量)
+    """
+    if not job_ids:
+        return (0, 0)
+    
+    success_count = 0
+    fail_count = 0
+    
+    for job_id in job_ids:
+        try:
+            result = subprocess.run(
+                ['scancel', str(job_id)],
+                capture_output=True,
+                timeout=5,
+                text=True
+            )
+            
+            if result.returncode == 0:
+                print(f"[sbatch_wrapper] ✅ 已取消任务 {job_id}", file=sys.stderr)
+                success_count += 1
+            else:
+                print(f"[sbatch_wrapper] ⚠️  取消任务 {job_id} 失败: {result.stderr}", file=sys.stderr)
+                fail_count += 1
+        
+        except subprocess.TimeoutExpired:
+            print(f"[sbatch_wrapper] ⚠️  取消任务 {job_id} 超时", file=sys.stderr)
+            fail_count += 1
+        except Exception as e:
+            print(f"[sbatch_wrapper] ⚠️  取消任务 {job_id} 时出错: {e}", file=sys.stderr)
+            fail_count += 1
+    
+    return (success_count, fail_count)
 
 
 def monitor_logs(log_file, err_file, job_id, max_wait=30):
@@ -60,7 +151,7 @@ def monitor_logs(log_file, err_file, job_id, max_wait=30):
             break
         # Check job status while waiting
         if not is_job_running(job_id):
-            print("[sbatch_wrapper] ⚠️  作业已完成但日志文件尚未创建", flush=True)
+            print("[sbatch_wrapper] ⚠️  作业已完成但日志文件尚未创建")
             return
         time.sleep(1)
         wait_count += 1
@@ -79,7 +170,7 @@ def monitor_logs(log_file, err_file, job_id, max_wait=30):
                     f.seek(last_log_size)
                     new_content = f.read()
                     if new_content:
-                        print(new_content, end='', flush=True)
+                        print(new_content, end='')
                 last_log_size = log_path.stat().st_size
 
             # Output new error content
@@ -88,7 +179,7 @@ def monitor_logs(log_file, err_file, job_id, max_wait=30):
                     f.seek(last_err_size)
                     new_content = f.read()
                     if new_content:
-                        print(new_content, end='', flush=True)
+                        print(new_content, end='')
                 last_err_size = err_path.stat().st_size
 
             # Check if job is still running
@@ -100,7 +191,7 @@ def monitor_logs(log_file, err_file, job_id, max_wait=30):
             # Print status message periodically
             current_time = time.time()
             if current_time - last_status_time >= status_interval:
-                print(f"[sbatch_wrapper] 作业正在运行中 (Job ID: {job_id})...", flush=True)
+                print(f"[sbatch_wrapper] 作业正在运行中 (Job ID: {job_id})...")
                 last_status_time = current_time
 
             time.sleep(1)  # Check every second
@@ -109,7 +200,7 @@ def monitor_logs(log_file, err_file, job_id, max_wait=30):
         # User interrupted, but job continues running
         raise
     except Exception as e:
-        print(f"[sbatch_wrapper] ⚠️  监控作业状态时出错: {e}", flush=True)
+        print(f"[sbatch_wrapper] ⚠️  监控作业状态时出错: {e}")
         # Continue monitoring even if there's an error
         while True:
             if not is_job_running(job_id):
@@ -176,13 +267,180 @@ def read_input() -> Dict[str, Any]:
     return {}
 
 
+def get_gpu_node_status():
+    """
+    查询GPU分区的节点状态，返回每个节点的GPU和CPU资源信息。
+    
+    Returns:
+        list: 包含每个节点信息的字典列表，格式为：
+            [{
+                'node': 'm3g100',
+                'gpu_type': 'L40S',
+                'gpu_total': 4,
+                'cpu_allocated': 34,
+                'cpu_idle': 62,
+                'cpu_total': 96,
+                'idle_ratio': 0.646  # 空闲CPU比例
+            }, ...]
+    """
+    try:
+        result = subprocess.run(
+            ['sinfo', '-p', 'gpu', '-N', '-o', '%N %G %C', '--noheader'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            print(f"[sbatch_wrapper] ⚠️  无法获取GPU节点状态: {result.stderr}", file=sys.stderr)
+            return []
+        
+        nodes = []
+        for line in result.stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            
+            # 解析格式: m3g100 gpu:L40S:4(S:1,3,5,7) 34/62/0/96
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            
+            node_name = parts[0]
+            gpu_info = parts[1]  # gpu:L40S:4(S:1,3,5,7)
+            cpu_info = parts[2]  # 34/62/0/96
+            
+            # 解析GPU信息
+            gpu_type = 'Unknown'
+            gpu_total = 0
+            if gpu_info.startswith('gpu:'):
+                gpu_parts = gpu_info[4:].split(':')
+                if len(gpu_parts) >= 2:
+                    gpu_type = gpu_parts[0]
+                    # 提取GPU数量（可能在括号前）
+                    gpu_count_str = gpu_parts[1].split('(')[0]
+                    try:
+                        gpu_total = int(gpu_count_str)
+                    except ValueError:
+                        gpu_total = 1
+            
+            # 解析CPU信息: Allocated/Idle/Other/Total
+            cpu_parts = cpu_info.split('/')
+            if len(cpu_parts) >= 4:
+                cpu_allocated = int(cpu_parts[0])
+                cpu_idle = int(cpu_parts[1])
+                cpu_total = int(cpu_parts[3])
+            else:
+                cpu_allocated = 0
+                cpu_idle = 0
+                cpu_total = 0
+            
+            # 计算空闲比例
+            idle_ratio = cpu_idle / cpu_total if cpu_total > 0 else 0
+            
+            nodes.append({
+                'node': node_name,
+                'gpu_type': gpu_type,
+                'gpu_total': gpu_total,
+                'cpu_allocated': cpu_allocated,
+                'cpu_idle': cpu_idle,
+                'cpu_total': cpu_total,
+                'idle_ratio': idle_ratio
+            })
+        
+        return nodes
+    
+    except subprocess.TimeoutExpired:
+        print("[sbatch_wrapper] ⚠️  查询GPU节点超时", file=sys.stderr)
+        return []
+    except Exception as e:
+        print(f"[sbatch_wrapper] ⚠️  查询GPU节点时出错: {e}", file=sys.stderr)
+        return []
+
+
+def select_best_gpu_node(nodes, prefer_gpu_type=None):
+    """
+    从可用节点中选择最佳的GPU节点。
+    
+    选择策略:
+    1. 如果指定了prefer_gpu_type，只从该类型中选择空闲率最高的
+    2. 否则，按GPU类型优先级选择: A100 > L40S > A40 > 其他
+    3. 同类型GPU中，选择空闲资源最多的节点
+    
+    Args:
+        nodes: 节点列表，来自get_gpu_node_status()
+        prefer_gpu_type: 首选GPU类型，如 'A100', 'L40S', 'A40'
+    
+    Returns:
+        dict: 最佳节点信息，如果没有可用节点则返回None
+    """
+    if not nodes:
+        return None
+    
+    if prefer_gpu_type:
+        prefer_type = prefer_gpu_type.upper()
+        filtered_nodes = [
+            n for n in nodes 
+            if n['gpu_type'].upper().startswith(prefer_type)
+        ]
+        if filtered_nodes:
+            filtered_nodes.sort(key=lambda n: -n['idle_ratio'])
+            return filtered_nodes[0]
+    
+    gpu_priority = {
+        'A100': 100,
+        'L40S': 80,
+        'A40': 60,
+        'A10': 40,
+        'T4': 20,
+    }
+    
+    available_nodes = [n for n in nodes if n['cpu_idle'] > 0]
+    if not available_nodes:
+        available_nodes = nodes
+    
+    def sort_key(node):
+        gpu_type = node['gpu_type'].upper()
+        base_type = gpu_type.split('-')[0]
+        priority = gpu_priority.get(base_type, 0)
+        return (-priority, -node['idle_ratio'])
+    
+    available_nodes.sort(key=sort_key)
+    return available_nodes[0] if available_nodes else None
+
+
+def print_gpu_status(nodes, selected_node=None):
+    """打印GPU节点状态信息。"""
+    if not nodes:
+        print("[sbatch_wrapper] ⚠️  未获取到GPU节点信息", file=sys.stderr)
+        return
+    
+    print("\n[sbatch_wrapper] 📊 GPU节点状态:", file=sys.stderr)
+    print("-" * 80, file=sys.stderr)
+    print(f"{'节点':<12} {'GPU类型':<10} {'GPU数':<6} {'CPU空闲/总数':<15} {'空闲率':<10}", file=sys.stderr)
+    print("-" * 80, file=sys.stderr)
+    
+    # 按GPU类型和空闲率排序显示
+    sorted_nodes = sorted(nodes, key=lambda n: (n['gpu_type'], -n['idle_ratio']))
+    
+    for node in sorted_nodes:
+        selected_marker = "✅ " if selected_node and node['node'] == selected_node['node'] else "   "
+        cpu_ratio = f"{node['cpu_idle']}/{node['cpu_total']}"
+        idle_pct = f"{node['idle_ratio']*100:.1f}%"
+        print(f"{selected_marker}{node['node']:<10} {node['gpu_type']:<10} {node['gpu_total']:<6} {cpu_ratio:<15} {idle_pct:<10}", file=sys.stderr)
+    
+    print("-" * 80, file=sys.stderr)
+    
+    if selected_node:
+        print(f"[sbatch_wrapper] 🎯 已选择节点: {selected_node['node']} (GPU: {selected_node['gpu_type']}, 空闲率: {selected_node['idle_ratio']*100:.1f}%)", file=sys.stderr)
+
+
 def main():
     # Check if running as a hook (has JSON input from stdin)
     input_data = read_input()
     is_hook_mode = bool(input_data)
     
     # Always log when hook is called (even if no input)
-    print(f"[sbatch_wrapper] Hook被调用 - is_hook_mode: {is_hook_mode}, stdin_isatty: {sys.stdin.isatty()}", file=sys.stderr, flush=True)
+    print(f"[sbatch_wrapper] Hook被调用 - is_hook_mode: {is_hook_mode}, stdin_isatty: {sys.stdin.isatty()}", file=sys.stderr)
     
     if is_hook_mode:
         # Hook mode: intercept command and wrap with sbatch
@@ -195,20 +453,20 @@ def main():
         )
         
         # Debug output
-        print(f"[sbatch_wrapper] 命令: {command[:200]}", file=sys.stderr, flush=True)
-        print(f"[sbatch_wrapper] 工作目录: {working_dir}", file=sys.stderr, flush=True)
+        print(f"[sbatch_wrapper] 命令: {command[:200]}", file=sys.stderr)
+        print(f"[sbatch_wrapper] 工作目录: {working_dir}", file=sys.stderr)
         
         # Check if this is a Python script command
         is_python_script = is_python_script_command(command)
         has_sbatch = has_sbatch_in_command(command)
         
-        print(f"[sbatch_wrapper] 是 Python 脚本命令: {is_python_script}", file=sys.stderr, flush=True)
-        print(f"[sbatch_wrapper] 包含 sbatch: {has_sbatch}", file=sys.stderr, flush=True)
+        print(f"[sbatch_wrapper] 是 Python 脚本命令: {is_python_script}", file=sys.stderr)
+        print(f"[sbatch_wrapper] 包含 sbatch: {has_sbatch}", file=sys.stderr)
         
         # If Python script but no sbatch, block execution
         if is_python_script and not has_sbatch:
             script_path = "/home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py"
-            print("[sbatch_wrapper] ⚠️  检测到 Python 脚本执行但未使用 sbatch", file=sys.stderr, flush=True)
+            print("[sbatch_wrapper] ⚠️  检测到 Python 脚本执行但未使用 sbatch", file=sys.stderr)
             
             output = {
                 "continue": True,
@@ -236,7 +494,7 @@ def main():
             }
         
         # Output JSON response for hook mode
-        print(json.dumps(output, ensure_ascii=False), flush=True)
+        print(json.dumps(output, ensure_ascii=False))
         return
     
     # Direct mode: execute command via sbatch
@@ -244,6 +502,8 @@ def main():
     args = sys.argv[1:]
     use_gpu = False
     time_limit = None
+    prefer_gpu_type = None  # 首选GPU类型
+    list_gpu_only = False   # 仅列出GPU状态
     
     # Simple argument parser for wrapper options
     remaining_args = []
@@ -252,6 +512,13 @@ def main():
         if args[i] == "--gpu":
             use_gpu = True
             i += 1
+        elif args[i] == "--gpu-type" and i + 1 < len(args):
+            prefer_gpu_type = args[i+1]
+            use_gpu = True  # 指定GPU类型自动启用GPU
+            i += 2
+        elif args[i] == "--list-gpu":
+            list_gpu_only = True
+            i += 1
         elif args[i] == "--time" and i + 1 < len(args):
             time_limit = args[i+1]
             i += 2
@@ -259,10 +526,16 @@ def main():
             remaining_args.append(args[i])
             i += 1
     
+    # 如果只是列出GPU状态
+    if list_gpu_only:
+        nodes = get_gpu_node_status()
+        print_gpu_status(nodes)
+        return
+    
     original_command = parse_command(remaining_args)
     
     if not original_command:
-        print("[sbatch_wrapper] ❌ 错误: 未提供要执行的命令", file=sys.stderr, flush=True)
+        print("[sbatch_wrapper] ❌ 错误: 未提供要执行的命令", file=sys.stderr)
         sys.exit(1)
     
     # Setup paths
@@ -270,7 +543,7 @@ def main():
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # Clean up ALL .sh files in log directory before starting as requested
-    print(f"[sbatch_wrapper] 🗑️  清理日志目录中的所有残留 .sh 脚本...", file=sys.stderr, flush=True)
+    print(f"[sbatch_wrapper] 🗑️  清理日志目录中的所有残留 .sh 脚本...", file=sys.stderr)
     sh_cleanup_count = 0
     for sh_file in log_dir.glob("*.sh"):
         try:
@@ -280,27 +553,65 @@ def main():
             pass
     
     if sh_cleanup_count > 0:
-        print(f"[sbatch_wrapper] ✅ 已全局清理 {sh_cleanup_count} 个 .sh 脚本", file=sys.stderr, flush=True)
+        print(f"[sbatch_wrapper] ✅ 已全局清理 {sh_cleanup_count} 个 .sh 脚本", file=sys.stderr)
 
     # Extract script name for logging
     # Try to find the .py filename in the command
     script_match = re.search(r'([\w-]+)\.py', original_command)
     script_name = script_match.group(1) if script_match else "job"
     
-    # Clean up old log files for THIS script name only
-    # Skip cleaning up old log files to allow parallel execution
-    print(f"[sbatch_wrapper] 🗑️  清理与 '{script_name}' 相关的旧日志文件...", file=sys.stderr, flush=True)
+    # 检测并取消同名脚本的运行中任务
+    print(f"[sbatch_wrapper] 🔍 检查是否有同名脚本 '{script_name}' 的运行中任务...", file=sys.stderr)
+    running_jobs = find_running_jobs_by_name(script_name)
+    
+    if running_jobs:
+        print(f"[sbatch_wrapper] ⚠️  发现 {len(running_jobs)} 个同名脚本的运行中任务:", file=sys.stderr)
+        for job in running_jobs:
+            print(f"[sbatch_wrapper]    - Job ID: {job['job_id']}, 名称: {job['name']}, 状态: {job['status']}", file=sys.stderr)
+        
+        job_ids_to_cancel = [job['job_id'] for job in running_jobs]
+        print(f"[sbatch_wrapper] 🔄 正在取消这些任务...", file=sys.stderr)
+        success, fail = cancel_jobs(job_ids_to_cancel)
+        
+        if success > 0:
+            print(f"[sbatch_wrapper] ✅ 已取消 {success} 个任务", file=sys.stderr)
+        if fail > 0:
+            print(f"[sbatch_wrapper] ⚠️  {fail} 个任务取消失败", file=sys.stderr)
+        
+        # 等待任务完全取消
+        time.sleep(2)
+    else:
+        print(f"[sbatch_wrapper] ✅ 未发现同名脚本的运行中任务", file=sys.stderr)
+    
+    # Clean up old log files for THIS script name
+    print(f"[sbatch_wrapper] 🗑️  清理与 '{script_name}' 相关的旧日志文件...", file=sys.stderr)
     cleanup_count = 0
+
+    # Pattern 1: Clean up files matching current script name (e.g., 09_generate_noisy_queries_v31_*)
     for old_file in log_dir.glob(f"{script_name}_*"):
         if old_file.suffix in ['.log', '.err']:
             try:
                 old_file.unlink()
                 cleanup_count += 1
             except Exception as e:
-                print(f"[sbatch_wrapper] ⚠️  删除文件失败 {old_file.name}: {e}", file=sys.stderr, flush=True)
-    
+                print(f"[sbatch_wrapper] ⚠️  删除文件失败 {old_file.name}: {e}", file=sys.stderr)
+
+    # Pattern 2: For stage 9 scripts, also clean up old pattern files (without version suffix)
+    # This handles the legacy pattern from SLURM scripts: 09_generate_noisy_queries_<job_id>.log
+    if script_name.startswith('09_generate_noisy_queries'):
+        base_pattern = script_name.split('_v')[0] if '_v' in script_name else '09_generate_noisy_queries'
+        for old_file in log_dir.glob(f"{base_pattern}_*"):
+            # Only clean if it doesn't match current script name (avoid duplicate work)
+            if not old_file.name.startswith(script_name):
+                if old_file.suffix in ['.log', '.err']:
+                    try:
+                        old_file.unlink()
+                        cleanup_count += 1
+                    except Exception as e:
+                        print(f"[sbatch_wrapper] ⚠️  删除文件失败 {old_file.name}: {e}", file=sys.stderr)
+
     if cleanup_count > 0:
-        print(f"[sbatch_wrapper] ✅ 已清理 {cleanup_count} 个旧日志文件", file=sys.stderr, flush=True)
+        print(f"[sbatch_wrapper] ✅ 已清理 {cleanup_count} 个旧日志文件", file=sys.stderr)
 
     timestamp_suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
     # Using %j for SLURM job ID in the output/error filenames
@@ -311,6 +622,25 @@ def main():
 
     # Get current directory
     current_dir = os.getcwd() or "/home/wlia0047/ar57/wenyu"
+    
+    # GPU节点选择逻辑
+    selected_node = None
+    nodelist_option = ""
+    if use_gpu:
+        print("[sbatch_wrapper] 🔍 正在查询GPU节点状态...", file=sys.stderr)
+        gpu_nodes = get_gpu_node_status()
+        
+        if gpu_nodes:
+            selected_node = select_best_gpu_node(gpu_nodes, prefer_gpu_type)
+            print_gpu_status(gpu_nodes, selected_node)
+            
+            if selected_node:
+                nodelist_option = f"#SBATCH --nodelist={selected_node['node']}"
+                print(f"[sbatch_wrapper] ✅ 已选择最佳GPU节点: {selected_node['node']}", file=sys.stderr)
+            else:
+                print("[sbatch_wrapper] ⚠️  未能选择到GPU节点，将由SLURM自动分配", file=sys.stderr)
+        else:
+            print("[sbatch_wrapper] ⚠️  无法获取GPU节点状态，将由SLURM自动分配", file=sys.stderr)
     
     # Create sbatch script
     # Allocate more memory for Python scripts (32GB for large data processing)
@@ -324,11 +654,11 @@ def main():
 {memory_allocation}
 {gpu_allocation}
 {time_allocation}
+{nodelist_option}
 set -e
 source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh
 conda activate /home/wlia0047/ar57_scratch/wenyu/stark
 cd "{current_dir}"
-# Execute the original command
 {original_command}
 """
     
@@ -336,7 +666,7 @@ cd "{current_dir}"
     script_file.chmod(0o755)
     
     # Submit the job
-    print("[sbatch_wrapper] 提交作业到 SLURM...", flush=True)
+    print("[sbatch_wrapper] 提交作业到 SLURM...")
 
     try:
         result = subprocess.run(
@@ -349,7 +679,7 @@ cd "{current_dir}"
         # Extract job ID from output
         match = re.search(r'Submitted batch job (\d+)', result.stdout)
         if not match:
-            print("[sbatch_wrapper] ❌ 提交 sbatch 作业失败: 无法解析作业 ID", flush=True)
+            print("[sbatch_wrapper] ❌ 提交 sbatch 作业失败: 无法解析作业 ID")
             sys.exit(1)
 
         job_id = match.group(1)
@@ -358,15 +688,15 @@ cd "{current_dir}"
         err_file = log_dir / f"{script_name}_{job_id}.err"
 
     except subprocess.CalledProcessError as e:
-        print(f"[sbatch_wrapper] ❌ 提交 sbatch 作业失败: {e}", flush=True)
+        print(f"[sbatch_wrapper] ❌ 提交 sbatch 作业失败: {e}")
         if e.stderr:
-            print(e.stderr, flush=True)
+            print(e.stderr)
         sys.exit(1)
 
-    print(f"[sbatch_wrapper] ✅ 作业已提交，Job ID: {job_id}", flush=True)
-    print(f"[sbatch_wrapper] 日志文件: {log_file}", flush=True)
-    print(f"[sbatch_wrapper] 错误文件: {err_file}", flush=True)
-    print("[sbatch_wrapper] 开始监控作业状态 (Ctrl+C 停止监控，作业将继续运行)...", flush=True)
+    print(f"[sbatch_wrapper] ✅ 作业已提交，Job ID: {job_id}")
+    print(f"[sbatch_wrapper] 日志文件: {log_file}")
+    print(f"[sbatch_wrapper] 错误文件: {err_file}")
+    print("[sbatch_wrapper] 开始监控作业状态 (Ctrl+C 停止监控，作业将继续运行)...")
 
     # Monitor logs
     job_completed = False
@@ -374,11 +704,11 @@ cd "{current_dir}"
         monitor_logs(str(log_file), str(err_file), job_id)
         job_completed = True
     except KeyboardInterrupt:
-        print("\n[sbatch_wrapper] 监控已停止，作业将继续在后台运行...", flush=True)
+        print("\n[sbatch_wrapper] 监控已停止，作业将继续在后台运行...")
 
-    print(f"[sbatch_wrapper] ✅ 作业已完成 (Job ID: {job_id})", flush=True)
+    print(f"[sbatch_wrapper] ✅ 作业已完成 (Job ID: {job_id})")
     if log_file.exists() or err_file.exists():
-        print(f"[sbatch_wrapper] 查看完整日志: tail -f {log_file} {err_file}", flush=True)
+        print(f"[sbatch_wrapper] 查看完整日志: tail -f {log_file} {err_file}")
     
     # Clean up temporary script file after job completion (keep log files for inspection)
     if job_completed:
@@ -395,9 +725,9 @@ cd "{current_dir}"
 
         # Print cleanup results
         if cleaned_files:
-            print(f"[sbatch_wrapper] 🗑️  已清理临时文件: {', '.join(cleaned_files)}", file=sys.stderr, flush=True)
+            print(f"[sbatch_wrapper] 🗑️  已清理临时文件: {', '.join(cleaned_files)}", file=sys.stderr)
         if failed_files:
-            print(f"[sbatch_wrapper] ⚠️  清理文件失败: {', '.join(failed_files)}", file=sys.stderr, flush=True)
+            print(f"[sbatch_wrapper] ⚠️  清理文件失败: {', '.join(failed_files)}", file=sys.stderr)
 
 
 if __name__ == "__main__":

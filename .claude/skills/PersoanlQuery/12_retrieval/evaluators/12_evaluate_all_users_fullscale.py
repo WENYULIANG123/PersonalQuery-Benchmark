@@ -1961,17 +1961,24 @@ def print_comparison_report(comparison, has_both_modes=False):
         print(f"\n{retriever.upper()}")
         print("─" * 80)
         
-        metrics_to_show = ['p@1', 'p@10', 'ndcg@10', 'map@10', 'r@10']
-        for metric in metrics_to_show:
-            clean = data['clean'].get(metric, 0)
-            noisy = data['noisy'].get(metric, 0) if data['noisy'] else 0
-            
-            if has_both_modes and noisy > 0:
-                deg = (noisy - clean) / clean * 100 if clean > 0 else 0
-                indicator = "↑" if deg > 0 else "↓"
-                print(f"  {metric:<10} Clean: {clean:.4f}  Noisy: {noisy:.4f}  变化: {indicator} {deg:+.2f}%")
-            else:
-                print(f"  {metric:<10} {clean:.4f}")
+        k_values_to_show = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 100]
+        metric_types = ['p', 'ndcg', 'map', 'r']
+        
+        for metric_type in metric_types:
+            print(f"  {metric_type.upper()}:")
+            for k in k_values_to_show:
+                metric = f'{metric_type}@{k}'
+                clean = data['clean'].get(metric, None)
+                if clean is None:
+                    continue
+                noisy = data['noisy'].get(metric, 0) if data['noisy'] else 0
+                
+                if has_both_modes and noisy > 0:
+                    deg = (noisy - clean) / clean * 100 if clean > 0 else 0
+                    indicator = "↑" if deg > 0 else "↓"
+                    print(f"    {metric:<10} Clean: {clean:.4f}  Noisy: {noisy:.4f}  变化: {indicator} {deg:+.2f}%")
+                elif clean > 0:
+                    print(f"    {metric:<10} {clean:.4f}")
     
     if has_both_modes:
         print("\n" + "="*100)

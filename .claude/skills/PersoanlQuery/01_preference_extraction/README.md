@@ -1,53 +1,49 @@
-# Stage 1: Preference & Aspect Extraction
+# Stage 1: Preference & Aspect Extraction (v2.1)
 
-**完整的多方案提取实现** - 从基础维度提取到论文模板严格实现
+**生产级偏好提取系统** - 支持fail-fast错误处理和NaN缺失维度统计
 
 ---
 
-## 📚 可选方案一览
+## 📌 当前实现
 
+仅保留最新逻辑脚本：
+
+- **`01_extract_preferences_v2_with_aspects.py`** (v2.1) ⭐
+  - ✅ Fail-fast错误处理（不允许fallback）
+  - ✅ NaN值记录与统计（缺失维度追踪）
+  - ✅ 维度+方面双视角提取
+  - ✅ 置信度评分和隐式方面检测
+  - ✅ 完整的质量检查和验证
+
+---
+
+## 🚀 快速开始
+
+```bash
+# 单用户提取 (225个产品 × 5并发)
+python -u 01_extract_preferences_v2_with_aspects.py \
+  --input-file /path/to/reviews_<USER_ID>.json \
+  --output-dir ./output
 ```
-方案 A        方案 B (推荐)     方案 C (学术)
-     ↓              ↓                 ↓
-维度提取        维度+方面双视角   论文模板严格实现
-    v1              v2           Template 1+2
-```
 
 ---
 
-## 🎯 快速导航
-
-### 你是谁？ → 选择合适的方案
-
-| 场景 | 选择 | 文件 | 文档 |
-|------|------|------|------|
-| **学术研究、论文复现** | 方案C | `01_aspect_extraction.py` `01_aspect_consolidation.py` | `PAPER_TEMPLATES_IMPLEMENTATION.md` |
-| **生产系统、实际应用** | 方案B ⭐ | `01_extract_preferences_v2_with_aspects.py` | `PHASE_1_V2_IMPLEMENTATION.md` |
-| **快速原型、最小成本** | 方案A | `01_extract_preferences.py` | (无) |
-| **不确定** | 方案B | - | 先读 `QUICK_START.md` |
-
----
-
-## 📂 文件导图
+## 📂 目录结构
 
 ```
 01_preference_extraction/
 │
+├─ 01_extract_preferences_v2_with_aspects.py ⭐ (主脚本)
 ├─ README.md (本文件)
 │
-├─ 【方案 A - 基础版】
-│  └─ 01_extract_preferences.py
-│     ↳ 原始的21维度提取，最小化实现
-│
-├─ 【方案 B - 推荐版】⭐
-│  ├─ 01_extract_preferences_v2_with_aspects.py
-│  │  ↳ 维度+方面双视角，置信度评分，隐式检测
-│  ├─ test_v2_extraction.py
-│  │  ↳ 单元测试（4/4通过）
-│  └─ PHASE_1_V2_IMPLEMENTATION.md
-│     ↳ v2详细文档
-│
-├─ 【方案 C - 学术版】⭐
+└─ _archived/
+   ├─ 01_extract_preferences.py (v1 - 基础)
+   ├─ 01_extract_preferences_fixed.py
+   ├─ 01_aspect_extraction.py (论文Template 1)
+   ├─ 01_aspect_consolidation.py (论文Template 2)
+   ├─ test_v2_extraction.py
+   └─ ... (其他历史版本)
+```
 │  ├─ 01_aspect_extraction.py
 │  │  ↳ 论文Template 1: 方面抽取
 │  ├─ 01_aspect_consolidation.py
