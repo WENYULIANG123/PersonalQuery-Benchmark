@@ -320,6 +320,19 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
      python -u 12_build_retriever_indices.py"
 ```
 
+**阶段描述**：构建查询语句索引文件。
+
+**运行命令**：
+
+```bash
+# 批量处理所有用户（自动发现完成Stage 6的用户）
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
+    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+     cd /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/12_retrieval/evaluators && \
+     python -u 12_generate_query_cache.py"
+```
+
 
 **阶段描述**：使用优化的批量评估系统，高效评估所有用户的查询在多种检索模型下的表现。该系统通过共享文档加载和检索器索引，大幅提升评估效率。
 

@@ -1683,6 +1683,9 @@ class CachedRetriever:
             if isinstance(doc_embeddings, np.ndarray):
                 doc_embeddings = torch.from_numpy(doc_embeddings).float()
             
+            device = doc_embeddings.device
+            query_embedding = query_embedding.to(device)
+            
             scores = util.cos_sim(query_embedding.unsqueeze(0), doc_embeddings)[0]
             topk_values, topk_indices = torch.topk(scores, k=min(top_k, len(self.base_retriever.doc_ids)))
             

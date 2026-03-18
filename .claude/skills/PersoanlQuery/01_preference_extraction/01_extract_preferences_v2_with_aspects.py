@@ -32,25 +32,10 @@ from llm_client import LLMClient
 # 防御性数据处理工具函数 - 100% 容错
 # ============================================================================
 
-def safe_str_len(value: Any, default: int = 0, context: str = "") -> int:
-    """安全地计算字符串长度，处理None, float, NaN等异常值"""
-    try:
-        if value is None:
-            return default
-        if isinstance(value, float):
-            if math.isnan(value) or math.isinf(value):
-                return default
-            return default  # 浮点数不应该用len()
-        if isinstance(value, str):
-            return len(value)
-        return len(str(value))
-    except Exception as e:
-        return default
-
 def safe_list_len(value: Any, context: str = "") -> int:
     """
-    计算列表长度 - Fail-fast设计
-    立即抛出类型错误，不返回默认值
+    计算列表长度 - 允许NaN（表示该维度无数据）
+    NaN会被记录但不会抛异常，返回0
     """
     if value is None:
         raise TypeError(f"[{context}] Cannot get length of None value")
@@ -60,9 +45,12 @@ def safe_list_len(value: Any, context: str = "") -> int:
     
     if isinstance(value, float):
         if math.isnan(value):
-            raise ValueError(f"[{context}] Cannot get length of NaN (float('nan'))")
+            # NaN是有效数据，表示该维度无法提取
+            log_with_timestamp(f"[{context}] ⚠️  检测到NaN - 该维度无法从review中提取")
+            return 0
         if math.isinf(value):
-            raise ValueError(f"[{context}] Cannot get length of Infinity (float('inf'))")
+            log_with_timestamp(f"[{context}] ⚠️  检测到Infinity")
+            return 0
         raise TypeError(f"[{context}] Expected list, got float: {value}")
     
     if isinstance(value, dict):
@@ -72,8 +60,7 @@ def safe_list_len(value: Any, context: str = "") -> int:
 
 def safe_dict_get(obj: Dict, key: str, context: str = "") -> Any:
     """
-    从字典获取值 - Fail-fast设计
-    类型错误立即抛出，便于诊断数据问题
+    从字典获取值 - 允许NaN通过（表示数据缺失）
     """
     if not isinstance(obj, dict):
         raise TypeError(f"[{context}] Expected dict, got {type(obj).__name__}")
@@ -85,9 +72,11 @@ def safe_dict_get(obj: Dict, key: str, context: str = "") -> Any:
     
     if isinstance(value, float):
         if math.isnan(value):
-            raise ValueError(f"[{context}] Dictionary value for key '{key}' is NaN (float('nan'))")
+            log_with_timestamp(f"[{context}] ⚠️  字典值为NaN")
+            return value
         if math.isinf(value):
-            raise ValueError(f"[{context}] Dictionary value for key '{key}' is Infinity (float('inf'))")
+            log_with_timestamp(f"[{context}] ⚠️  字典值为Infinity")
+            return value
     
     return value
 
@@ -597,15 +586,25 @@ def extract_preferences_from_review_v2(review, product_title: str, user_type: st
         reviewer_id = ''
         review_text = review
         rating = 0
-        log_with_timestamp(f"[{asin}] 📝 评论来自字符串，长度: {len(review_text)} 字符")
+        review_len = safe_str_len(review_text, f'string_review_{asin}')
+        log_with_timestamp(f"[{asin}] 📝 评论来自字符串，长度: {review_len} 字符")
     else:
+        if not isinstance(review, dict):
+            raise TypeError(f"[{asin}] Expected review to be str or dict, got {type(review).__name__}")
         reviewer_id = review.get('reviewerID', '')
         review_text = review.get('reviewText', '')
         rating = review.get('overall', 0)
-        log_with_timestamp(f"[{asin}] 📝 评论来自字典，长度: {len(review_text)} 字符，评分: {rating}")
+        review_len = safe_str_len(review_text, f'dict_review_text_{asin}')
+        log_with_timestamp(f"[{asin}] 📝 评论来自字典，长度: {review_len} 字符，评分: {rating}")
     
-    if not review_text or len(review_text.strip()) < 10:
-        log_with_timestamp(f"[{asin}] ⚠️  评论过短或为空: {len(review_text)} 字符")
+    review_len = safe_str_len(review_text, f'review_for_validation_{asin}')
+    if review_len == 0:
+        log_with_timestamp(f"[{asin}] ⚠️  评论为空")
+        return {'dimensions': {}, 'aspects': []}
+    
+    review_text_strip_len = safe_str_len(review_text.strip(), f'review_text_strip_{asin}')
+    if review_text_strip_len < 10:
+        log_with_timestamp(f"[{asin}] ⚠️  评论过短: {review_text_strip_len} 字符")
         return {'dimensions': {}, 'aspects': []}
     
     dimensions_schema, output_format = get_fixed_dimension_prompt()
@@ -672,11 +671,12 @@ Extract now. Output ONLY valid JSON, no explanation."""
                     result['aspects'].append(implicit_aspect)
             
             # 添加提取元数据
+            review_length = safe_str_len(review_text, f'metadata_review_length_{asin}')
             result['metadata'] = {
                 'extraction_version': '2.0',
                 'reviewer_id': reviewer_id,
                 'user_type': user_type,
-                'review_length': len(review_text),
+                'review_length': review_length,
                 'rating': rating,
                 'explicit_aspects_count': len([a for a in result.get('aspects', []) if not a.get('is_implicit', False)]),
                 'implicit_aspects_count': len([a for a in result.get('aspects', []) if a.get('is_implicit', False)]),
@@ -690,22 +690,29 @@ Extract now. Output ONLY valid JSON, no explanation."""
             log_with_timestamp(f"[{asin}] ❌ LLM 响应解析失败，启用备选提取...")
             fallback_result = rule_based_extraction(review_text, product_title)
             fallback_result['metadata']['error'] = 'Failed to parse LLM response, using fallback'
-            log_with_timestamp(f"[{asin}] ✅ 备选提取完成: {len(fallback_result['aspects'])} 个方面")
+            aspects_len = safe_list_len(fallback_result.get('aspects', []), f'fallback_aspects_{asin}')
+            log_with_timestamp(f"[{asin}] ✅ 备选提取完成: {aspects_len} 个方面")
             return fallback_result
     
     except Exception as e:
-        log_with_timestamp(f"[{asin}] ❌ 提取异常: {type(e).__name__}: {str(e)}")
-        import traceback
-        log_with_timestamp(f"[{asin}] 堆栈跟踪:")
-        for line in traceback.format_exc().split('\n')[:5]:
-            if line.strip():
-                log_with_timestamp(f"[{asin}] {line}")
-        
-        log_with_timestamp(f"[{asin}] 🔧 启动备选提取...")
-        fallback_result = rule_based_extraction(review_text, product_title)
-        fallback_result['metadata']['error'] = f'Exception: {str(e)}'
-        log_with_timestamp(f"[{asin}] ✅ 备选提取完成: {len(fallback_result['aspects'])} 个方面")
-        return fallback_result
+        log_with_timestamp(f"[{asin}] ❌ LLM 提取异常: {type(e).__name__}: {str(e)[:100]}")
+        log_with_timestamp(f"[{asin}] 🔄 启用备选规则基础提取...")
+        try:
+            fallback_result = rule_based_extraction(review_text, product_title)
+            aspects_len = safe_list_len(fallback_result.get('aspects', []), f'fallback_aspects_exception_{asin}')
+            log_with_timestamp(f"[{asin}] ✅ 备选提取完成: {aspects_len} 个方面")
+            fallback_result['metadata']['error'] = f'LLM extraction failed ({type(e).__name__}), using fallback'
+            return fallback_result
+        except Exception as fallback_error:
+            log_with_timestamp(f"[{asin}] ❌ 备选提取也失败: {type(fallback_error).__name__}")
+            return {
+                'dimensions': {},
+                'aspects': [],
+                'metadata': {
+                    'error': f'Both LLM and fallback failed: {type(e).__name__}, {type(fallback_error).__name__}',
+                    'extraction_version': '2.0'
+                }
+            }
 
 
 # ============================================================================
@@ -730,11 +737,14 @@ def validate_extraction_quality(extraction_result: Dict) -> Dict:
     
     # 检查维度数据
     dimensions = extraction_result.get("dimensions", {})
-    aspect_count = sum(
-        len(entities) 
-        for category in dimensions.values() 
-        for entities in (category.values() if isinstance(category, dict) else [])
-    )
+    aspect_count = 0
+    for category in dimensions.values():
+        if isinstance(category, dict):
+            for entities in category.values():
+                if isinstance(entities, float) and math.isnan(entities):
+                    continue
+                if isinstance(entities, (list, tuple)):
+                    aspect_count += len(entities)
     
     if aspect_count == 0:
         warnings.append("No entities extracted from dimensions")
@@ -759,21 +769,24 @@ def validate_extraction_quality(extraction_result: Dict) -> Dict:
         if sentiment and sentiment not in valid_sentiments:
             issues.append(f"Invalid sentiment value: {sentiment}")
     
-    # 计算质量评分
+    issues_len = safe_list_len(issues, f'validate_issues')
+    warnings_len = safe_list_len(warnings, f'validate_warnings')
+    aspects_len = safe_list_len(aspects, f'validate_aspects')
+    
     quality_score = 1.0
-    if issues:
-        quality_score -= 0.3 * len(issues)
-    if warnings:
-        quality_score -= 0.1 * len(warnings)
+    if issues_len > 0:
+        quality_score -= 0.3 * issues_len
+    if warnings_len > 0:
+        quality_score -= 0.1 * warnings_len
     quality_score = max(0, min(1, quality_score))
     
     return {
-        "is_valid": len(issues) == 0,
+        "is_valid": issues_len == 0,
         "quality_score": quality_score,
         "issues": issues,
         "warnings": warnings,
         "entity_count": aspect_count,
-        "aspect_count": len(aspects)
+        "aspect_count": aspects_len
     }
 
 
@@ -787,11 +800,10 @@ def process_product(product_data: Dict) -> Dict:
     asin = product_data['asin']
     title = product_data['product_title']
     
-    # 支持旧新格式
     target_review = product_data.get('target_review')
     if not target_review:
         target_reviews = product_data.get('target_reviews', [])
-        if target_reviews and len(target_reviews) > 0:
+        if isinstance(target_reviews, list) and len(target_reviews) > 0:
             target_review = target_reviews[0]
         else:
             target_review = None
@@ -847,11 +859,12 @@ def process_product(product_data: Dict) -> Dict:
     result['target_user_aspects'] = extraction.get('aspects', [])
     result['extraction_method'] = extraction.get('metadata', {}).get('extraction_method', 'llm_based')
     
-    log_with_timestamp(f"[{asin}] ✅ 提取完成: {len(result['target_user_aspects'])} 个方面")
+    aspects_len = safe_list_len(result.get('target_user_aspects', []), f'target_aspects_count_{asin}')
+    log_with_timestamp(f"[{asin}] ✅ 提取完成: {aspects_len} 个方面")
     
     result['quality_check'] = validate_extraction_quality(extraction)
     
-    # 计算统计信息 - Fail-fast设计，任何类型错误立即抛出
+    # 计算统计信息 - 允许NaN并统计缺失维度
     def count_entities(prefs_dict):
         if not isinstance(prefs_dict, dict):
             raise TypeError(f"[{asin}] Expected dict for preferences, got {type(prefs_dict).__name__}")
@@ -860,6 +873,9 @@ def process_product(product_data: Dict) -> Dict:
         for category, category_data in prefs_dict.items():
             if isinstance(category_data, dict):
                 for dimension, entities in category_data.items():
+                    if isinstance(entities, float) and math.isnan(entities):
+                        log_with_timestamp(f"[{asin}] 📌 缺失维度: {category} → {dimension}")
+                        continue
                     if not isinstance(entities, list):
                         raise TypeError(f"[{asin}] Category '{category}', dimension '{dimension}': "
                                       f"expected list of entities, got {type(entities).__name__}. "
@@ -872,6 +888,22 @@ def process_product(product_data: Dict) -> Dict:
                               f"got {type(category_data).__name__}")
         return total
     
+    def count_missing_dimensions(prefs_dict):
+        """统计缺失维度（值为NaN的维度）"""
+        missing = []
+        if not isinstance(prefs_dict, dict):
+            return missing
+        
+        for category, category_data in prefs_dict.items():
+            if isinstance(category_data, dict):
+                for dimension, entities in category_data.items():
+                    if isinstance(entities, float) and math.isnan(entities):
+                        missing.append({
+                            'category': category,
+                            'dimension': dimension
+                        })
+        return missing
+    
     def count_categories(prefs_dict):
         if not isinstance(prefs_dict, dict):
             raise TypeError(f"[{asin}] Expected dict for preferences, got {type(prefs_dict).__name__}")
@@ -880,6 +912,8 @@ def process_product(product_data: Dict) -> Dict:
         for category, category_data in prefs_dict.items():
             if isinstance(category_data, dict):
                 for v in category_data.values():
+                    if isinstance(v, float) and math.isnan(v):
+                        continue
                     if not isinstance(v, list):
                         raise TypeError(f"[{asin}] Category '{category}' value: "
                                       f"expected list, got {type(v).__name__}. "
@@ -896,18 +930,22 @@ def process_product(product_data: Dict) -> Dict:
     
     target_count = count_entities(result['target_user_preferences'])
     categories_count = count_categories(result['target_user_preferences'])
+    missing_dimensions = count_missing_dimensions(result['target_user_preferences'])
     
     result['preference_breakdown'] = {
         'target_user': {
             'categories': int(categories_count) if isinstance(categories_count, (int, float)) else 0,
             'entities': int(target_count) if isinstance(target_count, (int, float)) else 0
         },
-        'target_user_aspects': len(result.get('target_user_aspects', [])),
+        'target_user_aspects': aspects_len,
         'other_users': {
             'categories': 0,
             'entities': 0
         }
     }
+    
+    result['missing_dimensions'] = missing_dimensions
+    result['missing_dimensions_count'] = len(missing_dimensions)
     
     return result
 
@@ -1021,6 +1059,20 @@ def main():
                 completed_count[0] += 1
     
     success_count = sum(1 for r in results if r.get('target_user_aspects') and r.get('quality_check', {}).get('is_valid', False))
+    
+    # 统计缺失维度
+    products_with_missing = 0
+    total_missing_dimensions = 0
+    missing_by_category = defaultdict(int)
+    
+    for r in results:
+        missing_dims = r.get('missing_dimensions', [])
+        if missing_dims:
+            products_with_missing += 1
+            total_missing_dimensions += len(missing_dims)
+            for miss in missing_dims:
+                missing_by_category[miss.get('category', 'unknown')] += 1
+    
     log_with_timestamp("")
     log_with_timestamp("=" * 80)
     log_with_timestamp("🎯 最终统计")
@@ -1037,17 +1089,34 @@ def main():
         log_with_timestamp(f"平均方面数/产品: {avg_aspects:.1f}")
     
     log_with_timestamp("")
+    log_with_timestamp("📌 缺失维度统计（NaN值）")
+    log_with_timestamp(f"含有缺失维度的产品: {products_with_missing}/{safe_list_len(results, 'final_missing_products')} ({100*products_with_missing/max(1, safe_list_len(results, 'final_missing_rate')):.1f}%)")
+    log_with_timestamp(f"总缺失维度数: {total_missing_dimensions}")
+    if missing_by_category:
+        log_with_timestamp(f"按Category统计缺失维度:")
+        for category in sorted(missing_by_category.keys()):
+            count = missing_by_category[category]
+            log_with_timestamp(f"  {category}: {count}")
+    
+    log_with_timestamp("")
     
     output_data = {
         'user_id': user_id,
         'timestamp': datetime.now().isoformat(),
         'total_products': len(results),
-        'version': '2.0',
+        'version': '2.1',
         'improvements': [
             'aspect-level extraction with confidence scores',
             'implicit aspect detection',
-            'quality validation'
+            'quality validation',
+            'missing dimensions tracking (NaN values)'
         ],
+        'statistics': {
+            'products_with_missing_dimensions': products_with_missing,
+            'total_missing_dimensions': total_missing_dimensions,
+            'missing_rate_by_product': f"{100*products_with_missing/max(1, len(results)):.1f}%",
+            'missing_by_category': dict(missing_by_category)
+        },
         'results': results
     }
     
