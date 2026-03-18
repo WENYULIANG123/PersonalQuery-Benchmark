@@ -118,57 +118,42 @@ def run_p3_analysis(
     max_reviews: Optional[int] = None,
     max_workers: int = 20
 ) -> Dict:
-    """运行P3最优prompt模板分析"""
-    script_path = os.path.join(os.path.dirname(__file__), "04_p3_error_extraction.py")
+    """Run P3 optimal template comprehensive analysis"""
+    script_path = os.path.join(os.path.dirname(__file__), "04_p3_comprehensive_analysis.py")
     
     if not os.path.exists(script_path):
         raise FileNotFoundError(f"P3 analysis script not found: {script_path}")
     
     log_with_timestamp("="*80)
-    log_with_timestamp("Running P3 optimal template error analysis...")
+    log_with_timestamp("Running P3 optimal template comprehensive error analysis...")
     log_with_timestamp("(Method: MTSummit 2025 - arXiv:2505.06004)")
     log_with_timestamp("="*80)
     
-    failed_users = []
+    cmd = [
+        sys.executable, 
+        script_path,
+        "--reviews-dir", reviews_dir,
+        "--analysis-dir", output_dir,
+        "--user-ids"] + user_ids + [
+        "--max-workers", str(max_workers)
+    ]
     
-    for user_id in user_ids:
-        reviews_file = os.path.join(reviews_dir, f"reviews_{user_id}.json")
-        
-        log_with_timestamp(f"\n[{user_id}] Processing user with P3 template...")
-        log_with_timestamp(f"[{user_id}] Reviews file: {reviews_file}")
-        
-        cmd = [
-            sys.executable, 
-            script_path,
-            "--reviews-file", reviews_file,
-            "--user-ids", user_id,
-            "--output-dir", output_dir,
-            "--max-workers", str(max_workers)
-        ]
-        
-        if max_reviews:
-            cmd.extend(["--max-reviews", str(max_reviews)])
-        
-        try:
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=False,
-                text=True
-            )
-            log_with_timestamp(f"[{user_id}] ✓ P3 analysis completed successfully")
-            
-        except subprocess.CalledProcessError as e:
-            log_with_timestamp(f"[{user_id}] ✗ P3 analysis FAILED with return code {e.returncode}")
-            failed_users.append(user_id)
+    if max_reviews:
+        cmd.extend(["--max-reviews", str(max_reviews)])
     
-    log_with_timestamp("="*80)
-    if failed_users:
-        log_with_timestamp(f"WARNING: {len(failed_users)} users failed: {', '.join(failed_users)}")
-        return {"success": False, "failed_users": failed_users}
-    else:
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=False,
+            text=True
+        )
         log_with_timestamp("All users completed P3 analysis successfully!")
         return {"success": True, "failed_users": []}
+        
+    except subprocess.CalledProcessError as e:
+        log_with_timestamp(f"P3 analysis FAILED with return code {e.returncode}")
+        return {"success": False, "failed_users": user_ids}
 
 def run_character_level_analysis(
     user_ids: List[str],

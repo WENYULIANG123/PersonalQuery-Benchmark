@@ -243,14 +243,21 @@ class DenseRetriever:
 
         self.doc_ids = [doc.get('asin', '') for doc in documents]
         self.all_metadata = all_metadata  # 保存元数据引用
-        # 使用增强的文档文本构建
         texts = [build_document_text(doc, all_metadata) for doc in documents]
 
-        self.doc_embeddings = model.encode(texts, show_progress_bar=True, batch_size=32)
-        log_with_timestamp(f"  Dense index built with {len(self.doc_ids)} docs")
+        embeddings = model.encode(texts, show_progress_bar=True, batch_size=32)
+        
+        if isinstance(embeddings, np.ndarray):
+            embeddings = torch.from_numpy(embeddings).float()
+        
+        if self.device.type == 'cuda':
+            embeddings = embeddings.to(self.device)
+        
+        self.doc_embeddings = embeddings
+        log_with_timestamp(f"  Dense index built with {len(self.doc_ids)} docs (device: {self.device})")
     
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """Search using dense vectors"""
+        """Search using dense vectors with optimized top-k extraction"""
         if not hasattr(self, 'device'):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
@@ -261,20 +268,20 @@ class DenseRetriever:
         
         if isinstance(query_embedding, np.ndarray):
             query_embedding = torch.from_numpy(query_embedding).float().to(self.device)
+        else:
+            query_embedding = query_embedding.to(self.device)
         
         doc_embeddings = self.doc_embeddings
-        if isinstance(doc_embeddings, np.ndarray):
-            doc_embeddings = torch.from_numpy(doc_embeddings).float().to(query_embedding.device)
-        if torch.is_tensor(doc_embeddings):
-            if doc_embeddings.device != query_embedding.device:
-                doc_embeddings = doc_embeddings.to(query_embedding.device)
         
         from sentence_transformers import util
         scores = util.cos_sim(query_embedding, doc_embeddings)[0]
         
-        results = [(self.doc_ids[i], scores[i].item()) for i in range(len(self.doc_ids))]
-        results.sort(key=lambda x: -x[1])
-        return results[:top_k]
+        topk_values, topk_indices = torch.topk(scores, k=min(top_k, len(self.doc_ids)))
+        
+        results = [(self.doc_ids[idx], topk_values[i].item()) 
+                   for i, idx in enumerate(topk_indices.cpu())]
+        
+        return results
 
 
 class E5Retriever:
@@ -390,55 +397,51 @@ class E5Retriever:
         self.doc_ids = [doc.get('asin', '') for doc in documents]
         self.all_metadata = all_metadata
 
-        # 使用增强的文档文本构建
         texts = [build_document_text(doc, all_metadata) for doc in documents]
 
-        # 使用滑动窗口编码每个文档
         doc_embeddings_list = []
+        single_window_indices = []
+        multi_window_indices = []
         window_stats = {'single_window': 0, 'multi_window': 0, 'max_windows': 0}
 
         for i, text in enumerate(texts):
             if (i + 1) % 10 == 0:
                 log_with_timestamp(f"    Encoding document {i+1}/{len(texts)}...")
 
-            # 使用滑动窗口编码
             doc_emb = self._encode_text_with_sliding_window(text, add_prefix=True)
 
-            # 统计窗口使用情况
             if doc_emb.dim() == 1:
-                # 单窗口
                 window_stats['single_window'] += 1
+                single_window_indices.append(i)
             else:
-                # 多窗口
                 window_stats['multi_window'] += 1
+                multi_window_indices.append(i)
                 num_windows = doc_emb.shape[0]
                 window_stats['max_windows'] = max(window_stats['max_windows'], num_windows)
 
             doc_embeddings_list.append(doc_emb)
-            
-            # [DEBUG] Check if embeddings are all the same (only for single-window docs)
-            if i == 0:
-                first_emb_norm = doc_emb.norm().item() if doc_emb.dim() == 1 else doc_emb[0].norm().item()
-                log_with_timestamp(f"    [E5_FIT_DEBUG] First doc embedding norm: {first_emb_norm:.6f}")
-            elif i < 5 and doc_emb.dim() == 1:  # Only compare single-window embeddings
-                curr_emb_norm = doc_emb.norm().item()
-                log_with_timestamp(f"    [E5_FIT_DEBUG] Doc {i} embedding norm: {curr_emb_norm:.6f}")
-                if i == 1 and len(doc_embeddings_list) >= 2 and doc_embeddings_list[0].dim() == 1:
-                    # Check if first two embeddings are identical
-                    if torch.allclose(doc_embeddings_list[0], doc_embeddings_list[1], atol=1e-7):
-                        log_with_timestamp(f"    [E5_FIT_DEBUG] ⚠️ WARNING: First two embeddings are IDENTICAL!")
 
-        # 将列表转换为 tensor（对于单窗口的文档）
-        # 注意：我们保持 list 格式，因为不同文档可能有不同数量的窗口
+        self.single_window_indices = single_window_indices
+        self.multi_window_indices = multi_window_indices
+
+        if single_window_indices:
+            single_embeddings = torch.stack([doc_embeddings_list[i] for i in single_window_indices])
+            if self.device.type == 'cuda':
+                single_embeddings = single_embeddings.to(self.device)
+            self.single_window_embeddings = single_embeddings
+        else:
+            self.single_window_embeddings = None
+        
         self.doc_embeddings = doc_embeddings_list
 
         log_with_timestamp(f"  E5 index built with {len(self.doc_ids)} docs:")
         log_with_timestamp(f"    - Single window: {window_stats['single_window']} docs")
         log_with_timestamp(f"    - Multi window: {window_stats['multi_window']} docs")
         log_with_timestamp(f"    - Max windows per doc: {window_stats['max_windows']}")
+        log_with_timestamp(f"    - Device: {self.device}")
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """Search using E5 (supports both multi-window and pooled embeddings)"""
+        """Search using E5 with batch processing for single-window documents"""
         if not hasattr(self, 'device'):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
@@ -448,25 +451,24 @@ class E5Retriever:
             query_with_prefix = self._add_instruction(query, is_query=True)
             query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
 
+        query_embedding = query_embedding.to(self.device)
+        
         from sentence_transformers import util
-        scores = []
+        all_scores = [0.0] * len(self.doc_ids)
+        
+        if hasattr(self, 'single_window_embeddings') and self.single_window_embeddings is not None:
+            batch_scores = util.cos_sim(query_embedding, self.single_window_embeddings)[0]
+            for idx, doc_idx in enumerate(self.single_window_indices):
+                all_scores[doc_idx] = batch_scores[idx].item()
+        
+        for i in self.multi_window_indices:
+            doc_emb = self.doc_embeddings[i].to(self.device)
+            window_scores = util.cos_sim(query_embedding, doc_emb)[0]
+            all_scores[i] = window_scores.max().item()
 
-        for i, doc_emb in enumerate(self.doc_embeddings):
-            if isinstance(doc_emb, np.ndarray):
-                doc_emb = torch.from_numpy(doc_emb).to(query_embedding.device)
-            else:
-                doc_emb = doc_emb.to(query_embedding.device)
-            
-            if doc_emb.dim() == 1:
-                score = util.cos_sim(query_embedding, doc_emb.unsqueeze(0))[0][0].item()
-            else:
-                window_scores = util.cos_sim(query_embedding, doc_emb)[0]
-                score = window_scores.max().item()
-
-            scores.append((self.doc_ids[i], score))
-
-        scores.sort(key=lambda x: -x[1])
-        return scores[:top_k]
+        results = [(self.doc_ids[i], all_scores[i]) for i in range(len(self.doc_ids))]
+        results.sort(key=lambda x: -x[1])
+        return results[:top_k]
 
 
 class BGERetriever:
@@ -611,14 +613,18 @@ class BGERetriever:
 
             doc_embeddings_list.append(doc_emb)
 
-        # 堆叠所有 embeddings 为统一的 2D 张量（优化：支持批量操作）
-        self.doc_embeddings = torch.stack(doc_embeddings_list)
+        embeddings = torch.stack(doc_embeddings_list)
+        
+        if self.device.type == 'cuda':
+            embeddings = embeddings.to(self.device)
+        
+        self.doc_embeddings = embeddings
 
         log_with_timestamp(f"  BGE index built with {len(self.doc_ids)} docs:")
         log_with_timestamp(f"    - Single window docs: {window_stats['single_window']}")
         log_with_timestamp(f"    - Multi-window docs: {window_stats['multi_window']} (pooled with mean)")
         log_with_timestamp(f"    - Max windows per doc: {window_stats['max_windows']}")
-        log_with_timestamp(f"    - Embeddings shape: {self.doc_embeddings.shape}")
+        log_with_timestamp(f"    - Embeddings shape: {self.doc_embeddings.shape} (device: {self.device})")
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using BGE with batched similarity computation (optimized with window pooling)"""
@@ -631,22 +637,17 @@ class BGERetriever:
             query_with_prefix = self._add_instruction(query, is_query=True)
             query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
 
-        # Ensure doc_embeddings is on the same device as query
-        doc_embeddings = self.doc_embeddings
-        if isinstance(doc_embeddings, np.ndarray):
-            doc_embeddings = torch.from_numpy(doc_embeddings).float().to(query_embedding.device)
-        elif torch.is_tensor(doc_embeddings):
-            if doc_embeddings.device != query_embedding.device:
-                doc_embeddings = doc_embeddings.to(query_embedding.device)
-
-        # Batched cosine similarity (all 302K docs at once)
+        query_embedding = query_embedding.to(self.device)
+        
         from sentence_transformers import util
-        scores = util.cos_sim(query_embedding, doc_embeddings)[0]
+        scores = util.cos_sim(query_embedding, self.doc_embeddings)[0]
 
-        # Convert to (document_id, score) pairs
-        results = [(self.doc_ids[i], scores[i].item()) for i in range(len(self.doc_ids))]
-        results.sort(key=lambda x: -x[1])
-        return results[:top_k]
+        topk_values, topk_indices = torch.topk(scores, k=min(top_k, len(self.doc_ids)))
+        
+        results = [(self.doc_ids[idx], topk_values[i].item()) 
+                   for i, idx in enumerate(topk_indices.cpu())]
+        
+        return results
 
 
 class ColBERTRetriever:
