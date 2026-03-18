@@ -1411,6 +1411,18 @@ def _evaluate_single_mode(retriever, retriever_name: str, user_id: str, mode: st
     try:
         log_with_timestamp(f"[EVAL_MODE_START] {retriever_name}/{user_id} ({mode}): {len(queries)} queries, {len(all_asins)} products")
         
+        # Load query cache if available (禁止编码，直接使用预生成缓存)
+        query_cache_dir = "/home/wlia0047/ar57/wenyu/result/personal_query/12_retrieval/query_cache"
+        query_cache_file = os.path.join(query_cache_dir, f"{retriever_name.lower()}_{user_id}_{mode}_cache.pkl")
+        
+        if os.path.exists(query_cache_file):
+            log_with_timestamp(f"  ✓ 加载查询缓存: {query_cache_file}")
+            retriever = retrievers.CachedRetriever(retriever, query_cache_file)
+            log_with_timestamp(f"  ✓ 已用 CachedRetriever 包装检索器 (禁止编码)")
+        else:
+            log_with_timestamp(f"  ⚠️  查询缓存不存在: {query_cache_file}")
+            log_with_timestamp(f"  ⚠️  将使用原始检索器 (可能涉及编码)")
+        
         try:
             cpu_percent = psutil.cpu_percent(interval=0.1)
             mem_info = psutil.virtual_memory()
