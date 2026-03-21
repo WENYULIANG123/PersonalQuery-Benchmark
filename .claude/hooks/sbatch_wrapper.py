@@ -159,42 +159,45 @@ def monitor_logs(log_file, err_file, job_id, max_wait=30):
     # Monitor job status and output log content in real-time
     last_log_size = 0
     last_err_size = 0
-    last_status_time = 0
-    status_interval = 5  # Print status every 5 seconds
+    last_status_time = time.time()
+    status_interval = 5
 
     try:
         while True:
-            # Output new log content
+            current_time = time.time()
+            is_running = is_job_running(job_id)
+            
+            output_log_content = False
             if log_path.exists() and log_path.stat().st_size > last_log_size:
                 with open(log_path, 'r') as f:
                     f.seek(last_log_size)
                     new_content = f.read()
                     if new_content:
                         print(new_content, end='')
+                        output_log_content = True
                 last_log_size = log_path.stat().st_size
 
-            # Output new error content
+            output_err_content = False
             if err_path.exists() and err_path.stat().st_size > last_err_size:
                 with open(err_path, 'r') as f:
                     f.seek(last_err_size)
                     new_content = f.read()
                     if new_content:
                         print(new_content, end='')
+                        output_err_content = True
                 last_err_size = err_path.stat().st_size
-
-            # Check if job is still running
-            if not is_job_running(job_id):
-                # Job is no longer in queue, wait a bit more to ensure it's fully done
+            
+            if not is_running:
+                if output_log_content or output_err_content:
+                    print(f"[sbatch_wrapper] 作业已完成 (Job ID: {job_id})")
                 time.sleep(0.5)
                 break
-
-            # Print status message periodically
-            current_time = time.time()
+            
             if current_time - last_status_time >= status_interval:
                 print(f"[sbatch_wrapper] 作业正在运行中 (Job ID: {job_id})...")
                 last_status_time = current_time
 
-            time.sleep(1)  # Check every second
+            time.sleep(1)
 
     except KeyboardInterrupt:
         # User interrupted, but job continues running

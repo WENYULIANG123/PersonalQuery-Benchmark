@@ -40,25 +40,25 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py  \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/01_preference_extraction/01_batch_extract_preferences.py \
+     python -u .claude/skills/PersoanlQuery/01_preference_extraction/01_batch_extract_preferences_all.py \
      --output-dir result/personal_query/01_preference_extraction \
      --max-workers 10"
 ```
 
-### Stage 2: 数据处理与画像生成
+### Stage 2: 数据处理与过滤
 
-**阶段描述**：将 Stage 1 的偏好提取结果处理成结构化的用户画像和查询数据。完整流程包括：
-1. **Stage 2a**: 分割画像集和查询集 (02_split_train_holdout.py)
-2. **Stage 2b**: 生成个人画像 (02_generate_persona.py)  
-3. **Stage 2c**: 生成大众画像 (02_generate_mass_market_data.py)
+**阶段描述**：将 Stage 1 的偏好提取结果进行数据过滤，只保留满足属性阈值的商品作为查询集。该阶段将复杂的3阶段管道简化为单一的数据过滤阶段，移除所有画像生成逻辑。
+
+1. **Stage 2a**: 过滤用户偏好数据 (02_split_train_holdout.py)
+   - 只保留 min_attrs >= 5 的商品
+   - 删除所有 min_cat_size 限制
+   - 生成结构化的查询集
 
 **输出结构**：
 ```
 02_processing/
 ├── {user_id}/
-│   ├── query.json                          # 画像集和查询集
-│   ├── persona/{category}.json             # 个人画像（按类目）
-│   └── mass_market/{category}.json         # 大众画像（按类目）
+│   └── query.json                          # 过滤后的查询集（min_attrs >= 5）
 ```
 
 **运行命令**：
@@ -70,39 +70,31 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
      cd /home/wlia0047/ar57/wenyu && \
      python -u .claude/skills/PersoanlQuery/02_processing/run_stage2_pipeline.py"
 
+# 或只处理特定用户
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
+    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+     cd /home/wlia0047/ar57/wenyu && \
+     python -u .claude/skills/PersoanlQuery/02_processing/run_stage2_pipeline.py \
+     --user-id A13OFOB1394G31"
 ```
+
+**参数说明**：
+- `--min-attrs`: 查询集商品最少属性数 (默认: 5)
+- `--user-id`: 只处理指定用户 (默认: 处理所有用户)
+- `--seed`: 随机种子 (默认: 42)
 
 ---
 
 ### Stage 3: 画像描述生成
 
-**阶段描述**：读取 Stage 2 的画像数据，为每个维度生成自然语言描述。
+**阶段描述**：注：该阶段需要更新以适配新的Stage 2输出结构。原有的Stage 3依赖于Stage 2b和Stage 2c生成的个人画像和大众画像。由于Stage 2已简化为仅输出查询集，Stage 3的功能需要重新设计或重新实现。
 
-**输入文件**：
-- `02_processing/{user_id}/persona/{category}.json` - 个人画像（来自 Stage 2b）
-- `02_processing/{user_id}/mass_market/{category}.json` - 大众画像（来自 Stage 2c）
+**当前状态**：该阶段的脚本尚未适配新的数据流。
 
-**运行命令**：
-```bash
-# 目标用户画像描述
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/03_persona/03_generate_target_persona.py \
-     --user-id A13OFOB1394G31 \
-     --input-dir result/personal_query/02_processing \
-     --output-dir result/personal_query/03_persona"
-
-# 大众画像描述
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/03_persona/03_generate_mass_market_persona.py \
-     --input-dir result/personal_query/02_processing \
-     --output-dir result/personal_query/03_persona"
-```
+**历史说明**：
+- 原 Stage 3 读取 Stage 2 的画像数据（persona 和 mass_market），为每个维度生成自然语言描述
+- 原输入文件：`02_processing/{user_id}/persona/{category}.json` 和 `02_processing/{user_id}/mass_market/{category}.json`
 
 ---
 
@@ -159,7 +151,7 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 
 **运行命令**：
 ```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/07_iterative_refinement/07_iterative_refinement.py \
@@ -343,7 +335,55 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/12_retrieval/evaluators && \
+     cd /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/12_retrieval&& \
      python -u 12_evaluate_all_users_fullscale.py"
 ```
 
+---
+
+### Stage 13: 三路LLM评估 + 属性值选择评估
+
+**阶段描述**：该阶段包含两个核心功能的组合评估系统：
+
+
+**运行命令**：
+```bash
+# 批量处理所有查询（包含属性选择评估和商品验证）
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
+    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+     cd /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/13_rerank && \
+     python3 13_batch_llm_rerank_all.py --config 15_config.json \
+     --meta-file /fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz"
+
+# 单独运行属性选择脚本（单条查询 JSON 示例）
+# query-file 需要是单条查询 JSON，不能直接传 dual_queries_*.json
+python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
+    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+     cd /fs04/ar57/wenyu && \
+     python3 /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/13_rerank/13_select_attributes_from_history.py \
+     --user-id A2U6VP21H9UVV3 \
+     --category Yarn \
+     --query-file /fs04/ar57/wenyu/result/personal_query/13_rerank/results/tmp_attr_query_A2U6_yarn.json \
+     --meta-file /fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz \
+     --output-file /fs04/ar57/wenyu/result/personal_query/13_rerank/results/attr_select_A2U6_yarn_thr0.7_rerun.json"
+```
+
+其中 `tmp_attr_query_A2U6_yarn.json` 的内容示例：
+
+```json
+{
+  "user_id": "A2U6VP21H9UVV3",
+  "category": "Yarn",
+  "target_asin": "B00HMXK5DK",
+  "query_text": "I am looking for reflective yarn to make a reflective scarf. I need a product in the yarn category that offers high reflective performance for safety and style.",
+  "selected_attributes": [
+    {"dimension": "Functionality", "value": "reflective"},
+    {"dimension": "Product_Category", "value": "reflective yarn"},
+    {"dimension": "Product_Category", "value": "yarn"},
+    {"dimension": "Performance", "value": "reflective performance"},
+    {"dimension": "Style_Design", "value": "reflective scarf"}
+  ]
+}
+```
