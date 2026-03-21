@@ -28,13 +28,12 @@ STYLE_ONLY_16_FEATURES = {
     "upos_dist_ADP", "n_tokens"
 }
 
-# Load SentenceLevelFeatureExtractor from Stage 8
 # (Python doesn't allow imports starting with numbers, so we use importlib)
 import importlib.util
 import os
 
-stage8_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "08_iterative_refinement")
-module_path = os.path.join(stage8_dir, "08_extract_sentence_level_features.py")
+stage7_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "07_iterative_refinement")
+module_path = os.path.join(stage7_dir, "07_extract_sentence_level_features.py")
 
 spec = importlib.util.spec_from_file_location("extract_features", module_path)
 if spec and spec.loader:

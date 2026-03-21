@@ -40,6 +40,7 @@ USER_ID = None
 # Input files - will be set later once USER_ID is determined
 STAGE7_RESULTS_FILE = None
 WRITING_ANALYSIS_FILE = None
+QUERY_SOURCE = "stage6"
 
 # Output
 OUTPUT_DIR = os.path.join(BASE_DIR, "result/personal_query/09_targeted_noisy_query")
@@ -1244,7 +1245,8 @@ class HybridErrorInjector:
 def process_user(user_id: str,
                  aligned_queries_file: str,
                  injector: HybridErrorInjector,
-                 output_dir: str):
+                 output_dir: str,
+                 query_source: str):
     """处理单个用户的查询"""
 
     log_with_timestamp(f"Processing user {user_id}...")
@@ -1358,7 +1360,10 @@ def process_user(user_id: str,
         "queries": results
     }
 
-    output_file = os.path.join(output_dir, f"noisy_queries_{user_id}.json")
+    if query_source == 'stage7':
+        output_file = os.path.join(output_dir, f"iterative_noisy_query_{user_id}.json")
+    else:
+        output_file = os.path.join(output_dir, f"noisy_queries_{user_id}.json")
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(output_data, f, indent=2, ensure_ascii=False)
 
@@ -1373,11 +1378,13 @@ def process_user(user_id: str,
 
 
 def main():
-    global USER_ID, STAGE7_RESULTS_FILE, WRITING_ANALYSIS_FILE
+    global USER_ID, STAGE7_RESULTS_FILE, WRITING_ANALYSIS_FILE, OUTPUT_DIR, QUERY_SOURCE
     
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Generate noisy queries with personalized error injection')
     parser.add_argument('--user', type=str, help='User ID to process (if not set, will be loaded from batch script)')
+    parser.add_argument('--source', type=str, default='stage6', choices=['stage6', 'stage7'])
+    parser.add_argument('--output-dir', type=str, default=None)
     args, unknown_args = parser.parse_known_args()
     
     # If user argument provided, use it
@@ -1387,15 +1394,26 @@ def main():
         log_with_timestamp("❌ Error: No user ID provided via --user argument or configuration")
         return 1
     
+    QUERY_SOURCE = args.source
+
+    if args.output_dir:
+        OUTPUT_DIR = args.output_dir
+    else:
+        OUTPUT_DIR = os.path.join(BASE_DIR, "result/personal_query/09_targeted_noisy_query")
+
     # Set file paths based on USER_ID
-    STAGE7_RESULTS_FILE = os.path.join(BASE_DIR, f"result/personal_query/06_query/dual_queries_{USER_ID}.json")
+    if QUERY_SOURCE == 'stage7':
+        STAGE7_RESULTS_FILE = os.path.join(BASE_DIR, f"result/personal_query/07_iterative_refinement/{USER_ID}_interative_query.json")
+    else:
+        STAGE7_RESULTS_FILE = os.path.join(BASE_DIR, f"result/personal_query/06_query/dual_queries_{USER_ID}.json")
     WRITING_ANALYSIS_FILE = os.path.join(BASE_DIR, f"result/personal_query/04_writing_analysis/writing_analysis_{USER_ID}.json")
     
     log_with_timestamp("=" * 60)
     log_with_timestamp("Stage 10: Personalized Noisy Query Generator")
     log_with_timestamp("=" * 60)
     log_with_timestamp(f"User ID: {USER_ID}")
-    log_with_timestamp(f"Stage 7 results: {STAGE7_RESULTS_FILE}")
+    log_with_timestamp(f"Query source: {QUERY_SOURCE}")
+    log_with_timestamp(f"Input query file: {STAGE7_RESULTS_FILE}")
     log_with_timestamp(f"Writing analysis: {WRITING_ANALYSIS_FILE}")
     log_with_timestamp(f"Output directory: {OUTPUT_DIR}")
     
@@ -1438,7 +1456,8 @@ def main():
             user_id=user_id,
             aligned_queries_file=temp_file,
             injector=injector,
-            output_dir=OUTPUT_DIR
+            output_dir=OUTPUT_DIR,
+            query_source=QUERY_SOURCE
         )
 
         summary.append({
@@ -1452,7 +1471,10 @@ def main():
 
         os.remove(temp_file)
 
-    summary_file = os.path.join(OUTPUT_DIR, "noisy_queries_summary.json")
+    if QUERY_SOURCE == 'stage7':
+        summary_file = os.path.join(OUTPUT_DIR, "iterative_noisy_query_summary.json")
+    else:
+        summary_file = os.path.join(OUTPUT_DIR, "noisy_queries_summary.json")
     with open(summary_file, 'w', encoding='utf-8') as f:
         json.dump({
             "timestamp": datetime.now().isoformat(),

@@ -96,9 +96,14 @@ def validate_user_review_files(reviews_dir: str, user_ids: List[str]) -> Set[str
             try:
                 with open(review_file, 'r', encoding='utf-8') as f:
                     user_data = json.load(f)
-                review_count = len(user_data.get('results', user_data.get('reviews', [])))
+                
+                results = user_data.get('results', user_data.get('reviews', []))
+                target_count = 0
+                for product in results:
+                    target_count += len(product.get('target_reviews', []))
+                
                 existing_users.add(user_id)
-                log_with_timestamp(f"  ✓ User {user_id}: {review_count} reviews (file: reviews_{user_id}.json)")
+                log_with_timestamp(f"  ✓ User {user_id}: {target_count} reviews (file: reviews_{user_id}.json)")
             except Exception as e:
                 missing_users.append(user_id)
                 log_with_timestamp(f"  ✗ User {user_id}: ERROR reading file - {e}")

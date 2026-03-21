@@ -39,19 +39,21 @@ def log_with_timestamp(message: str):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}", flush=True)
 
-def find_users_with_query_files(query_dir: str) -> List[str]:
-    """Find all users with dual_queries_{USER_ID}.json files"""
+def find_users_with_query_files(query_dir: str, source: str) -> List[str]:
     log_with_timestamp(f"Scanning for users in {query_dir}...")
     
     users_found = []
     
     try:
         for filename in os.listdir(query_dir):
-            if not filename.startswith('dual_queries_') or not filename.endswith('.json'):
-                continue
-            
-            # Extract user ID from filename
-            user_id = filename.replace('dual_queries_', '').replace('.json', '')
+            if source == 'stage7':
+                if not filename.endswith('_interative_query.json'):
+                    continue
+                user_id = filename.replace('_interative_query.json', '')
+            else:
+                if not filename.startswith('dual_queries_') or not filename.endswith('.json'):
+                    continue
+                user_id = filename.replace('dual_queries_', '').replace('.json', '')
             
             if user_id and user_id != 'summary':
                 users_found.append(user_id)
@@ -67,7 +69,8 @@ def find_users_with_query_files(query_dir: str) -> List[str]:
 def validate_user_files(
     user_ids: List[str],
     query_dir: str,
-    writing_analysis_dir: str
+    writing_analysis_dir: str,
+    source: str
 ) -> Dict[str, Dict[str, str]]:
     """Validate that all required files exist for each user"""
     log_with_timestamp("Validating required files for each user...")
@@ -75,11 +78,14 @@ def validate_user_files(
     validated_users = {}
     
     for user_id in user_ids:
-        query_file = os.path.join(query_dir, f'dual_queries_{user_id}.json')
+        if source == 'stage7':
+            query_file = os.path.join(query_dir, f'{user_id}_interative_query.json')
+        else:
+            query_file = os.path.join(query_dir, f'dual_queries_{user_id}.json')
         writing_file = os.path.join(writing_analysis_dir, f'writing_analysis_{user_id}.json')
         
         if not os.path.exists(query_file):
-            log_with_timestamp(f"  ✗ User {user_id}: dual_queries_{user_id}.json NOT FOUND")
+            log_with_timestamp(f"  ✗ User {user_id}: query file NOT FOUND ({query_file})")
             continue
         
         if not os.path.exists(writing_file):
@@ -100,6 +106,7 @@ def run_noisy_query_generation(
     query_file: str,
     writing_file: str,
     output_dir: str,
+    source: str,
     seed: Optional[int] = None
 ) -> Dict:
     """Run the noisy query generation for a single user using a modified script"""
@@ -115,7 +122,13 @@ def run_noisy_query_generation(
     try:
         # Run the main script with --user argument
         original_script_path = os.path.join(os.path.dirname(__file__), '09_generate_noisy_queries.py')
-        cmd = [sys.executable, original_script_path, '--user', user_id]
+        cmd = [
+            sys.executable,
+            original_script_path,
+            '--user', user_id,
+            '--source', source,
+            '--output-dir', output_dir
+        ]
         
         result = subprocess.run(
             cmd,
@@ -134,7 +147,7 @@ def run_noisy_query_generation(
         log_with_timestamp(f"[{user_id}] ✗ ERROR: {str(e)}")
         return {'success': False, 'user_id': user_id, 'error': str(e)}
 
-def generate_summary(output_dir: str, user_ids: List[str]) -> Dict:
+def generate_summary(output_dir: str, user_ids: List[str], source: str) -> Dict:
     """Generate summary statistics for all processed users"""
     log_with_timestamp("Generating summary statistics...")
     
@@ -149,7 +162,10 @@ def generate_summary(output_dir: str, user_ids: List[str]) -> Dict:
     total_personalized = 0
     
     for user_id in user_ids:
-        user_file = os.path.join(output_dir, f'noisy_queries_{user_id}.json')
+        if source == 'stage7':
+            user_file = os.path.join(output_dir, f'iterative_noisy_query_{user_id}.json')
+        else:
+            user_file = os.path.join(output_dir, f'noisy_queries_{user_id}.json')
         
         if not os.path.exists(user_file):
             log_with_timestamp(f"  ✗ User {user_id}: output file not found")
@@ -188,7 +204,10 @@ def generate_summary(output_dir: str, user_ids: List[str]) -> Dict:
         'overall_modification_rate': total_modified / total_queries if total_queries > 0 else 0.0
     }
     
-    summary_file = os.path.join(output_dir, 'all_users_summary.json')
+    if source == 'stage7':
+        summary_file = os.path.join(output_dir, 'iterative_noisy_query_all_users_summary.json')
+    else:
+        summary_file = os.path.join(output_dir, 'all_users_summary.json')
     with open(summary_file, 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
     
@@ -205,8 +224,8 @@ def main():
     parser.add_argument(
         '--query-dir',
         type=str,
-        default='/home/wlia0047/ar57/wenyu/result/personal_query/06_query',
-        help='Directory containing dual_queries_{USER_ID}.json files'
+        default=None,
+        help='Directory containing input query files'
     )
     
     parser.add_argument(
@@ -219,8 +238,16 @@ def main():
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='/home/wlia0047/ar57/wenyu/result/personal_query/09_targeted_noisy_query',
+        default=None,
         help='Output directory for noisy queries'
+    )
+
+    parser.add_argument(
+        '--source',
+        type=str,
+        default='stage6',
+        choices=['stage6', 'stage7'],
+        help='Query source: stage6 dual queries or stage7 iterative queries'
     )
     
     parser.add_argument(
@@ -244,6 +271,15 @@ def main():
     )
     
     args = parser.parse_args()
+
+    if args.query_dir is None:
+        if args.source == 'stage7':
+            args.query_dir = '/home/wlia0047/ar57/wenyu/result/personal_query/07_iterative_refinement'
+        else:
+            args.query_dir = '/home/wlia0047/ar57/wenyu/result/personal_query/06_query'
+
+    if args.output_dir is None:
+        args.output_dir = '/home/wlia0047/ar57/wenyu/result/personal_query/09_targeted_noisy_query'
     
     log_with_timestamp("=" * 80)
     log_with_timestamp("Stage 9: Generate Noisy Queries for All Users")
@@ -257,7 +293,7 @@ def main():
         log_with_timestamp(f"Processing {len(args.user_ids)} user(s) specified by --user-ids")
         user_ids = args.user_ids
     else:
-        user_ids = find_users_with_query_files(args.query_dir)
+        user_ids = find_users_with_query_files(args.query_dir, args.source)
         if not user_ids:
             log_with_timestamp("No users found with query files!")
             return 1
@@ -266,7 +302,8 @@ def main():
     validated_users = validate_user_files(
         user_ids,
         args.query_dir,
-        args.writing_analysis_dir
+        args.writing_analysis_dir,
+        args.source
     )
     
     if not validated_users:
@@ -285,6 +322,7 @@ def main():
             query_file=files['query_file'],
             writing_file=files['writing_file'],
             output_dir=args.output_dir,
+            source=args.source,
             seed=args.seed
         )
         results.append(result)
@@ -298,7 +336,7 @@ def main():
     log_with_timestamp("=" * 80)
     
     if not args.skip_summary and successful_users:
-        summary = generate_summary(args.output_dir, successful_users)
+        summary = generate_summary(args.output_dir, successful_users, args.source)
         
         log_with_timestamp("=" * 80)
         log_with_timestamp("AGGREGATE STATISTICS")

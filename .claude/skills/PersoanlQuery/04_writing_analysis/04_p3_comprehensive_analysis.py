@@ -35,9 +35,13 @@ from llm_client import LLMClient
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt='%Y-%m-%d %H:%M:%S',
+    stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
+
+logging.getLogger('anthropic').setLevel(logging.WARNING)
+logging.getLogger('httpx').setLevel(logging.WARNING)
 
 
 # ============================================================================
@@ -65,13 +69,9 @@ Please return ONLY the corrected text. If no corrections are needed, return the 
         
         for attempt in range(max_retries):
             try:
-                response = self.llm_client.generate(
+                response = self.llm_client.call(
                     prompt=prompt,
-                    do_sample=True,
-                    max_new_tokens=256,
-                    repetition_penalty=1.18,
-                    top_k=40,
-                    top_p=0.1
+                    max_tokens=256
                 )
                 
                 corrected_text = response.strip()
@@ -260,7 +260,7 @@ class DetailedErrorExtractor:
             context_end_corr = min(len(corrected), j2 + self.window_size)
             corr_context = corrected[context_start_corr:context_end_corr]
             
-            error_type_info = ErrorTypeClassifier.classify(orig_text, corr_text, orig_context, corr_context)
+            error_type_info = ErrorTypeClassifier.classify(orig_text, corr_text)
             
             error = {
                 "error_id": error_id,
@@ -336,20 +336,37 @@ class P3ComprehensiveAnalyzer:
             with open(reviews_file, 'r', encoding='utf-8') as f:
                 reviews_data = json.load(f)
             
-            reviews = reviews_data.get('results', reviews_data.get('reviews', []))
+            # 获取产品列表，并从target_reviews中扁平化为单个review文本列表
+            products = reviews_data.get('results', reviews_data.get('reviews', []))
+            
+            # 构建扁平化的reviews列表：(review_text, asin)元组
+            # 仅提取target_reviews（用户自己写的评论），不包含other_reviews（其他用户的评论）
+            flattened_reviews = []
+            for product in products:
+                asin = product.get('asin', '')
+                
+                # 获取该产品的所有target_reviews（该用户写的评论）
+                target_reviews = product.get('target_reviews', [])
+                for review_text in target_reviews:
+                    if isinstance(review_text, str):
+                        flattened_reviews.append((review_text, asin))
+            
+            # 应用max_reviews限制
             if max_reviews:
-                reviews = reviews[:max_reviews]
+                flattened_reviews = flattened_reviews[:max_reviews]
             
             detailed_results = []
             total_errors = 0
             error_type_counts = defaultdict(int)
             
-            for review_idx, review in enumerate(reviews):
-                original = review.get('review_text', '') or review.get('text', '')
+            # 遍历扁平化后的reviews
+            for review_idx, (review_text, asin) in enumerate(flattened_reviews):
+                original = review_text  # 直接使用字符串，无需.get()
                 
                 p3_result = self.p3_extractor.extract_errors(original)
                 
                 if p3_result["status"] != "success":
+                    logger.warning(f"[{user_id}] Review {review_idx}: {p3_result.get('error', 'Unknown error')}")
                     continue
                 
                 corrected = p3_result["corrected"]
@@ -361,7 +378,7 @@ class P3ComprehensiveAnalyzer:
                 
                 detailed_results.append({
                     "review_idx": review_idx,
-                    "asin": review.get('asin', ''),
+                    "asin": asin,
                     "has_errors": len(errors) > 0,
                     "total_errors": len(errors),
                     "original_length": len(original),
@@ -370,6 +387,9 @@ class P3ComprehensiveAnalyzer:
                 })
                 
                 total_errors += len(errors)
+                
+                if (review_idx + 1) % 10 == 0:
+                    logger.info(f"[{user_id}] Progress: {review_idx + 1}/{len(flattened_reviews)} reviews, {total_errors} errors found so far")
             
             error_type_percentages = {}
             for etype, count in error_type_counts.items():
@@ -380,7 +400,7 @@ class P3ComprehensiveAnalyzer:
                 "timestamp": datetime.now().isoformat(),
                 "analysis_type": "p3_optimal_template_comprehensive",
                 "paper_reference": "MTSummit 2025 - arXiv:2505.06004",
-                "total_reviews": len(reviews),
+                "total_reviews": len(flattened_reviews),
                 "reviews_with_errors": sum(1 for r in detailed_results if r["has_errors"]),
                 "reviews_without_errors": sum(1 for r in detailed_results if not r["has_errors"]),
                 "total_errors": total_errors,
@@ -393,12 +413,12 @@ class P3ComprehensiveAnalyzer:
             with open(output_file, 'w', encoding='utf-8') as f:
                 json.dump(output_data, f, ensure_ascii=False, indent=2)
             
-            logger.info(f"✅ [{user_id}] P3 comprehensive analysis completed: {len(reviews)} reviews, {total_errors} errors")
+            logger.info(f"✅ [{user_id}] P3 comprehensive analysis completed: {len(flattened_reviews)} reviews, {total_errors} errors")
             
             return {
                 "user_id": user_id,
                 "status": "success",
-                "reviews_processed": len(reviews),
+                "reviews_processed": len(flattened_reviews),
                 "total_errors": total_errors,
                 "error_types": dict(error_type_counts),
                 "output_file": str(output_file)
@@ -450,27 +470,22 @@ Examples:
     logger.info("=" * 80)
     logger.info("Stage 4: P3 Optimal Template Comprehensive Error Analysis")
     logger.info("=" * 80)
-    logger.info(f"Processing users: {len(user_ids)}")
-    logger.info(f"Concurrent workers: {args.max_workers}")
+    logger.info(f"Processing {len(user_ids)} users (sequential)")
+    logger.info(f"Concurrent workers per user: {args.max_workers}")
     logger.info("=" * 80)
     
     analyzer = P3ComprehensiveAnalyzer(args.analysis_dir, args.reviews_dir)
     
     results = []
-    with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
-        futures = {
-            executor.submit(analyzer.process_user, uid, args.reviews_file, args.max_reviews): uid 
-            for uid in user_ids
-        }
+    for user_idx, user_id in enumerate(user_ids, 1):
+        logger.info(f"[{user_idx}/{len(user_ids)}] Processing user: {user_id}")
+        result = analyzer.process_user(user_id, args.reviews_file, args.max_reviews)
+        results.append(result)
         
-        for future in executor._futures:
-            result = future.result()
-            results.append(result)
-            
-            if result["status"] == "success":
-                logger.info(f"  ✓ {result['user_id']}: {result['reviews_processed']} reviews, {result['total_errors']} errors")
-            else:
-                logger.warning(f"  ✗ {result['user_id']}: {result.get('reason', 'Unknown error')}")
+        if result["status"] == "success":
+            logger.info(f"  ✓ {result['user_id']}: {result['reviews_processed']} reviews, {result['total_errors']} errors")
+        else:
+            logger.warning(f"  ✗ {result['user_id']}: {result.get('reason', 'Unknown error')}")
     
     successful = [r for r in results if r["status"] == "success"]
     failed = [r for r in results if r["status"] == "failed"]
