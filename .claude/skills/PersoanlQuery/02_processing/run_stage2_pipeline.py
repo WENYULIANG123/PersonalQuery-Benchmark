@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-Stage 2 Pipeline - 数据处理和画像生成主脚本
+Stage 2 Pipeline - 数据处理主脚本
 
-自动运行完整的 Stage 2 流程：
-1. 02_split_train_holdout.py - 分割画像集和查询集
-2. 02_generate_persona.py - 生成个人画像
-3. 02_generate_mass_market_data.py - 生成大众画像
+自动运行 Stage 2 流程：
+1. 02_split_train_holdout.py - 过滤用户偏好数据
 
 默认自动检测 Stage 1 的所有用户偏好文件并批量处理。
 """
@@ -53,7 +51,7 @@ def run_command(cmd, description):
 
 
 def run_split_train_holdout(preferences_dir, metadata_file, output_dir, user_id=None, 
-                            min_attrs=3, min_cat_size=4, min_other_users=3, seed=42):
+                            min_attrs=3, min_other_users=3, seed=42):
     script = os.path.join(os.path.dirname(__file__), "02_split_train_holdout.py")
     
     cmd = [
@@ -62,7 +60,6 @@ def run_split_train_holdout(preferences_dir, metadata_file, output_dir, user_id=
         "--metadata-file", metadata_file,
         "--output-dir", output_dir,
         "--min-attrs", str(min_attrs),
-        "--min-cat-size", str(min_cat_size),
         # "--min-other-users", str(min_other_users),  # 已注释：不再检查其他用户属性数
         "--seed", str(seed)
     ]
@@ -73,31 +70,10 @@ def run_split_train_holdout(preferences_dir, metadata_file, output_dir, user_id=
     return run_command(cmd, f"Stage 2a: Split train/holdout (user: {user_id or 'all'})")
 
 
-def run_generate_persona(query_file, output_dir, user_id):
-    script = os.path.join(os.path.dirname(__file__), "02_generate_persona.py")
-    
-    cmd = [
-        "python3", script,
-        "--query-file", query_file,
-        "--output-dir", output_dir,
-        "--user-id", user_id
-    ]
-    
-    return run_command(cmd, f"Stage 2b: Generate persona (user: {user_id})")
 
 
-def run_generate_mass_market(preferences_file, metadata_file, output_dir):
-    script = os.path.join(os.path.dirname(__file__), "02_generate_mass_market_data.py")
-    
-    cmd = [
-        "python3", script,
-        "--preferences-file", preferences_file,
-        "--metadata-file", metadata_file,
-        "--output-dir", output_dir
-    ]
-    
-    user_id = Path(preferences_file).stem.replace("preferences_", "")
-    return run_command(cmd, f"Stage 2c: Generate mass market (user: {user_id})")
+
+
 
 
 def main():
@@ -108,16 +84,16 @@ def main():
 示例用法:
 
 1. 处理所有用户（默认）:
-   python run_stage2_pipeline.py
+    python run_stage2_pipeline.py
 
 2. 只处理特定用户:
-   python run_stage2_pipeline.py --user-id A13OFOB1394G31
+    python run_stage2_pipeline.py --user-id A13OFOB1394G31
 
-3. 跳过某些步骤:
-   python run_stage2_pipeline.py --skip-mass-market
+3. 跳过数据过滤步骤:
+    python run_stage2_pipeline.py --skip-split
 
 4. 自定义参数:
-   python run_stage2_pipeline.py --min-attrs 5 --min-cat-size 6
+    python run_stage2_pipeline.py --min-attrs 8
         """
     )
     
@@ -147,16 +123,10 @@ def main():
     parser.add_argument(
         "--min-attrs",
         type=int,
-        default=3,
-        help="查询集商品最少属性数 (默认: 3)"
+        default=5,
+        help="查询集商品最少属性数 (默认: 5)"
     )
     
-    parser.add_argument(
-        "--min-cat-size",
-        type=int,
-        default=4,
-        help="画像集每个类目最少商品数 (默认: 4)"
-    )
     
     parser.add_argument(
         "--min-other-users",
@@ -178,17 +148,7 @@ def main():
         help="跳过 Stage 2a (split train/holdout)"
     )
     
-    parser.add_argument(
-        "--skip-persona",
-        action="store_true",
-        help="跳过 Stage 2b (generate persona)"
-    )
-    
-    parser.add_argument(
-        "--skip-mass-market",
-        action="store_true",
-        help="跳过 Stage 2c (generate mass market)"
-    )
+
     
     args = parser.parse_args()
     
@@ -225,15 +185,12 @@ def main():
     log_with_timestamp("")
     log_with_timestamp("配置参数:")
     log_with_timestamp(f"  - min_attrs: {args.min_attrs}")
-    log_with_timestamp(f"  - min_cat_size: {args.min_cat_size}")
     log_with_timestamp(f"  - min_other_users: {args.min_other_users}")
     log_with_timestamp(f"  - seed: {args.seed}")
     log_with_timestamp("")
     
     total_steps = len(user_files) * (
-        (0 if args.skip_split else 1) +
-        (0 if args.skip_persona else 1) +
-        (0 if args.skip_mass_market else 1)
+        (0 if args.skip_split else 1)
     )
     current_step = 0
     
@@ -258,39 +215,13 @@ def main():
                 args.output_dir,
                 user_id=user_id,
                 min_attrs=args.min_attrs,
-                min_cat_size=args.min_cat_size,
                 min_other_users=args.min_other_users,
                 seed=args.seed
             ):
                 user_success = False
                 failed_users.append((user_id, "split"))
         
-        if user_success and not args.skip_persona:
-            current_step += 1
-            log_with_timestamp(f"[{current_step}/{total_steps}] Stage 2b: Generate persona")
-            
-            query_file = os.path.join(args.output_dir, user_id, "query.json")
-            
-            if not os.path.exists(query_file):
-                log_with_timestamp(f"❌ 错误: query 文件不存在: {query_file}")
-                user_success = False
-                failed_users.append((user_id, "persona - missing query file"))
-            else:
-                if not run_generate_persona(query_file, args.output_dir, user_id):
-                    user_success = False
-                    failed_users.append((user_id, "persona"))
-        
-        if user_success and not args.skip_mass_market:
-            current_step += 1
-            log_with_timestamp(f"[{current_step}/{total_steps}] Stage 2c: Generate mass market")
-            
-            if not run_generate_mass_market(
-                preferences_file,
-                args.metadata_file,
-                args.output_dir
-            ):
-                user_success = False
-                failed_users.append((user_id, "mass_market"))
+
         
         if user_success:
             success_count += 1
@@ -315,8 +246,6 @@ def main():
     log_with_timestamp("")
     log_with_timestamp("输出文件位置:")
     log_with_timestamp(f"  - {args.output_dir}/{{user_id}}/query.json")
-    log_with_timestamp(f"  - {args.output_dir}/{{user_id}}/persona/{{category}}.json")
-    log_with_timestamp(f"  - {args.output_dir}/{{user_id}}/mass_market/{{category}}.json")
     
     if success_count == len(user_files):
         log_with_timestamp("")

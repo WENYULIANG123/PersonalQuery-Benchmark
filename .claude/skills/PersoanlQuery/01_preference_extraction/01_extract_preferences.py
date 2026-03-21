@@ -10,7 +10,7 @@ Stage 1 升级版 v2: Preference Extraction + Aspect-Level Analysis
 4. 质量检查和数据验证
 
 Input: reviews_{USER_ID}.json from Stage 0
-Output: preferences_{USER_ID}_v2.json with dimensions + aspects + confidence scores
+Output: preferences_{USER_ID}.json with dimensions + aspects + confidence scores
 """
 
 import os
@@ -187,7 +187,7 @@ def parse_response(response: str, asin: str = "UNKNOWN") -> Optional[Dict]:
         fixed_str = re.sub(r'\bNEUTRAL\b', '"neutral"', fixed_str)
         fixed_str = re.sub(r'\bPOSITIVE\b', '"positive"', fixed_str)
         fixed_str = re.sub(r'\bNEGATIVE\b', '"negative"', fixed_str)
-        fixed_str = fixed_str.replace("'", '"')
+        fixed_str = re.sub(r"(?<=[{,:\[])\s*'|'\s*(?=[}\],:])", '"', fixed_str)
         
         try:
             parsed = json.loads(fixed_str)
@@ -213,23 +213,35 @@ def parse_response(response: str, asin: str = "UNKNOWN") -> Optional[Dict]:
             except json.JSONDecodeError:
                 pass
         
-        # 尝试6: 提取最外层对象（方案A第4步）
+        # 尝试6: 提取最外层对象（栈式解析，替代PCRE递归正则）
         log_with_timestamp(f"[{asin}] 🔧 尝试提取最外层 JSON 对象...")
-        matches = re.findall(r'\{(?:[^{}]++|(?R))*+\}', fixed_str)
-        if matches:
+        depth = 0
+        start = None
+        outermost_objects = []
+        for i, c in enumerate(fixed_str):
+            if c == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0 and start is not None:
+                    outermost_objects.append(fixed_str[start:i+1])
+                    start = None
+        for obj_str in outermost_objects:
             try:
-                parsed = json.loads(matches[0])
+                parsed = json.loads(obj_str)
                 log_with_timestamp(f"[{asin}] ✅ 提取最外层对象成功")
                 return parsed
             except:
                 pass
         
-        log_with_timestamp(f"[{asin}] ⚠️  所有JSON解析尝试都失败了，返回空对象")
-        return {'dimensions': {}, 'aspects': []}
+        log_with_timestamp(f"[{asin}] ⚠️  所有JSON解析尝试都失败了")
+        return None
     
     except Exception as e:
         log_with_timestamp(f"[{asin}] ❌ 异常: {type(e).__name__}: {str(e)}")
-        return {'dimensions': {}, 'aspects': []}
+        return None
 
 
 # ============================================================================
@@ -297,36 +309,153 @@ You MUST extract preferences into these FIXED dimensions ONLY. Do NOT create new
 """
     
     output_format = """
-## Output Format
+## Output Format - CRITICAL JSON STRUCTURE
 
-You MUST output JSON with this exact structure:
+You MUST output JSON with this EXACT nested structure. Pay very close attention to where each key belongs!
 
 {
-  "Product_Attributes": {
-    "Product_Category": [{"entity": "...", "sentiment": "positive/negative/neutral", "original_text": "...", "confidence": 0.95}],
-    "Functionality": [...],
-    "Material_Composition": [...]
+  "dimensions": {
+    "Product_Attributes": {
+      "Product_Category": [{"entity": "...", "sentiment": "positive/negative/neutral", "original_text": "...", "confidence": 0.95}],
+      "Functionality": [...],
+      "Material_Composition": [...]
+    },
+    "Quality_Attributes": {
+      "Quality_Craftsmanship": [...],
+      "Performance": [...],
+      "Safety": [...]
+    },
+    "Appearance_Design": {
+      "Appearance_Color": [...],
+      "Size_Dimensions": [...],
+      "Style_Design": [...]
+    },
+    "User_Experience": {
+      "Comfort": [...],
+      "Ease_of_Use": [...],
+      "Portability": [...]
+    },
+    "Usage_Scenarios": {
+      "Target_User": [...],
+      "Usage_Scenario": [...],
+      "Special_Purpose": [...]
+    },
+    "Price_Value": {
+      "Price": [...],
+      "Value": [...],
+      "Packaging_Quantity": [...]
+    },
+    "Special_Requirements": {
+      "Compatibility": [...],
+      "Special_User_Needs": [...],
+      "Brand_Preference": [...]
+    }
   },
-  "Quality_Attributes": {...},
-  "Appearance_Design": {...},
-  "User_Experience": {...},
-  "Usage_Scenarios": {...},
-  "Price_Value": {...},
-  "Special_Requirements": {...},
   
-  "extraction_metadata": {
-    "overall_confidence": 0.92,
-    "entity_count": 15,
-    "dimensions_found": 8
+  "metadata": {
+    "extraction_metadata": {
+      "overall_confidence": 0.92,
+      "entity_count": 15,
+      "dimensions_found": 8
+    }
   }
 }
 
-IMPORTANT:
-- Use EXACT dimension names as shown above (use underscore "_")
-- If no information for a dimension, use empty array []
-- sentiment must be one of: positive, negative, neutral
-- confidence for each entity should be 0-1 (e.g., 0.95 for high confidence)
-- Extract specific evidence from the review text
+## CRITICAL INSTRUCTIONS FOR JSON NESTING (READ CAREFULLY!)
+
+1. TOP-LEVEL KEYS ONLY: "dimensions" and "metadata"
+   ✓ CORRECT: { "dimensions": {...}, "metadata": {...} }
+   ✗ WRONG: { "dimensions": {...}, "extraction_metadata": {...} }
+
+2. INSIDE "dimensions": 7 CATEGORY keys (Product_Attributes, Quality_Attributes, etc.)
+   ✓ CORRECT: "dimensions": { "Product_Attributes": {...} }
+   ✗ WRONG: "dimensions": { "extraction_metadata": {...} }
+
+3. INSIDE each CATEGORY: individual DIMENSION keys
+   ✓ CORRECT: "Product_Attributes": { "Product_Category": [...], "Functionality": [...] }
+   ✗ WRONG: "Product_Attributes": "some value"
+
+4. INSIDE each DIMENSION: MUST be a LIST of entity objects
+   ✓ CORRECT: "Product_Category": [{"entity": "glitter glue", "sentiment": "positive"}, ...]
+   ✗ WRONG: "Product_Category": {"entity": "glitter glue"}
+   ✗ WRONG: "Product_Category": "glitter glue"
+
+5. "metadata" is SEPARATE TOP-LEVEL KEY
+   ✓ CORRECT: { "dimensions": {...}, "metadata": {...} }
+   ✗ WRONG: { "dimensions": {..., "metadata": {...}} }
+
+6. INSIDE "metadata": put "extraction_metadata" with confidence scores
+   ✓ CORRECT: "metadata": { "extraction_metadata": { "overall_confidence": 0.92 } }
+   ✗ WRONG: "dimensions": { "extraction_metadata": { ... } }
+
+## EXAMPLES OF WRONG vs CORRECT
+
+❌ WRONG EXAMPLE 1 - extraction_metadata in wrong place:
+{
+  "dimensions": {
+    "Product_Attributes": {...},
+    "extraction_metadata": {...}  ← WRONG! This should NOT be inside dimensions
+  }
+}
+
+✓ CORRECT EXAMPLE 1:
+{
+  "dimensions": {
+    "Product_Attributes": {...}
+  },
+  "metadata": {
+    "extraction_metadata": {...}  ← CORRECT! Separate top-level key
+  }
+}
+
+❌ WRONG EXAMPLE 2 - Category as list instead of dict:
+{
+  "dimensions": {
+    "Product_Attributes": [...]  ← WRONG! Should be dict with dimensions inside
+  }
+}
+
+✓ CORRECT EXAMPLE 2:
+{
+  "dimensions": {
+    "Product_Attributes": {
+      "Product_Category": [...]  ← CORRECT! Category is dict, dimension values are lists
+    }
+  }
+}
+
+❌ WRONG EXAMPLE 3 - Dimension value not a list:
+{
+  "dimensions": {
+    "Product_Attributes": {
+      "Product_Category": "glitter glue"  ← WRONG! Should be list of objects
+    }
+  }
+}
+
+✓ CORRECT EXAMPLE 3:
+{
+  "dimensions": {
+    "Product_Attributes": {
+      "Product_Category": [{"entity": "glitter glue", "sentiment": "positive", "confidence": 0.95}]  ← CORRECT!
+    }
+  }
+}
+
+## IMPORTANT RULES:
+- Use EXACT dimension names with underscores: Product_Category, Quality_Craftsmanship, etc.
+- If no information for a dimension, use empty array: "Functionality": []
+- sentiment values MUST be one of: "positive", "negative", "neutral" (lowercase, in quotes)
+- confidence must be a number 0-1 (e.g., 0.95)
+- original_text must be quoted string containing evidence from the review
+- reviewer_id and user_type will be added by the extraction system
+
+## SUMMARY - THREE KEY NESTING LEVELS:
+Level 1: "dimensions" (dict) and "metadata" (dict) at top
+  ↓
+Level 2: Inside "dimensions": 7 categories (Product_Attributes, Quality_Attributes, ...) as dicts
+  ↓
+Level 3: Inside each category: dimensions as dicts, with VALUES being LISTS of entity objects
 """
     
     return dimensions_schema, output_format
@@ -507,6 +636,60 @@ def rule_based_extraction(review_text: str, product_title: str) -> Dict:
 
 
 # ============================================================================
+# Phase 1 改进 2.8: JSON 格式验证与修复（新增）
+# ============================================================================
+
+def validate_dimensions_format(dimensions: Dict) -> Tuple[bool, Optional[str]]:
+    """
+    验证维度JSON格式是否正确
+    
+    返回：(is_valid, error_message)
+    """
+    if not isinstance(dimensions, dict):
+        return False, f"Dimensions must be dict, got {type(dimensions).__name__}"
+    
+    # 检查是否包含非法的顶级键
+    illegal_keys = {'extraction_metadata', 'overall_confidence', 'entity_count', 'dimensions_found'}
+    found_illegal = dimensions.keys() & illegal_keys
+    if found_illegal:
+        return False, f"Found illegal top-level keys in dimensions: {found_illegal}. These should be in metadata, not dimensions."
+    
+    # 验证每个维度类别
+    valid_categories = {
+        'Product_Attributes', 'Quality_Attributes', 'Appearance_Design',
+        'User_Experience', 'Usage_Scenarios', 'Price_Value', 'Special_Requirements'
+    }
+    
+    for category, category_data in dimensions.items():
+        if not isinstance(category_data, dict):
+            return False, f"Category '{category}' should be dict, got {type(category_data).__name__}"
+        
+        for dimension, entities in category_data.items():
+            if isinstance(entities, float) and math.isnan(entities):
+                continue  # NaN is allowed
+            if not isinstance(entities, list):
+                return False, f"Dimension '{category}.{dimension}' should be list, got {type(entities).__name__}"
+    
+    return True, None
+
+
+def generate_format_fix_prompt(original_response: str, error_message: str) -> str:
+    """
+    生成修复格式错误的重试提示
+    """
+    return f"""Your previous response had a JSON format error:
+ERROR: {error_message}
+
+Please fix the format and output ONLY the corrected JSON. Remember:
+- 'dimensions' must be a dict with categories (Product_Attributes, Quality_Attributes, etc.) as keys
+- Each category must contain dimensions with entity LISTS as values
+- 'extraction_metadata', 'overall_confidence', etc. should NOT appear as top-level keys in dimensions
+- Put metadata fields in the 'metadata' or 'extraction_metadata' key OUTSIDE of dimensions
+
+Output corrected JSON now:"""
+
+
+# ============================================================================
 # Phase 1 改进 3: 隐式方面检测（新增）
 # ============================================================================
 
@@ -629,20 +812,44 @@ Output format: You MUST output JSON with BOTH dimensions and aspects sections.
 
 Extract now. Output ONLY valid JSON, no explanation."""
     
-    try:
-        log_with_timestamp(f"[{asin}] 🌐 调用 LLM API (prompt_len={len(combined_prompt)})")
-        response = client.call(combined_prompt, max_tokens=2048)
-        log_with_timestamp(f"[{asin}] ✅ LLM 响应收到 (len={len(response)})")
-        result = parse_response(response, asin)
-        
-        if result:
-            # 检查返回格式
+    max_retries = 5
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            if attempt == 0:
+                prompt_to_send = combined_prompt
+                log_with_timestamp(f"[{asin}] 🌐 调用 LLM API (prompt_len={len(combined_prompt)})")
+            else:
+                prompt_to_send = last_error if last_error else combined_prompt
+                log_with_timestamp(f"[{asin}] 🔄 重试 LLM 调用 (第 {attempt}/{max_retries - 1} 次重试)")
+            
+            response = client.call(prompt_to_send, max_tokens=4096)
+            
+            if not response or len(response.strip()) == 0:
+                log_with_timestamp(f"[{asin}] ⚠️  LLM 返回空响应")
+                last_error = combined_prompt
+                continue
+            
+            log_with_timestamp(f"[{asin}] ✅ LLM 响应收到 (len={len(response)})")
+            result = parse_response(response, asin)
+            
+            if not result:
+                log_with_timestamp(f"[{asin}] ⚠️  JSON 解析失败，重试 LLM")
+                last_error = combined_prompt
+                continue
+            
             if "dimensions" not in result:
                 result["dimensions"] = {}
             if "aspects" not in result:
                 result["aspects"] = []
             
-            # 添加用户元数据
+            is_valid, error_msg = validate_dimensions_format(result.get("dimensions", {}))
+            if not is_valid:
+                log_with_timestamp(f"[{asin}] ⚠️  维度格式错误: {error_msg}")
+                last_error = generate_format_fix_prompt(response, error_msg or "unknown format error")
+                continue
+            
             for category, category_data in result.get("dimensions", {}).items():
                 if not isinstance(category_data, dict):
                     continue
@@ -655,22 +862,16 @@ Extract now. Output ONLY valid JSON, no explanation."""
                         entity['reviewer_id'] = reviewer_id
                         entity['user_type'] = user_type
             
-            # 为方面添加元数据
             for aspect in result.get("aspects", []):
                 aspect['reviewer_id'] = reviewer_id
                 aspect['user_type'] = user_type
             
-            # 检测隐式方面（规则基础）
             implicit_detected = detect_implicit_aspects(review_text)
-            
-            # 合并隐式和显式方面（避免重复）
             explicit_aspects = {a.get('aspect'): a for a in result.get('aspects', [])}
             for implicit_aspect in implicit_detected:
-                aspect_key = implicit_aspect.get('aspect')
-                if aspect_key not in explicit_aspects:
+                if implicit_aspect.get('aspect') not in explicit_aspects:
                     result['aspects'].append(implicit_aspect)
             
-            # 添加提取元数据
             review_length = safe_str_len(review_text, f'metadata_review_length_{asin}')
             result['metadata'] = {
                 'extraction_version': '2.0',
@@ -680,39 +881,27 @@ Extract now. Output ONLY valid JSON, no explanation."""
                 'rating': rating,
                 'explicit_aspects_count': len([a for a in result.get('aspects', []) if not a.get('is_implicit', False)]),
                 'implicit_aspects_count': len([a for a in result.get('aspects', []) if a.get('is_implicit', False)]),
-                'dimensions_extraction_attempted': True,
-                'aspects_extraction_attempted': True,
+                'attempts': attempt + 1,
                 'timestamp': datetime.now().isoformat()
             }
             
             return result
-        else:
-            log_with_timestamp(f"[{asin}] ❌ LLM 响应解析失败，启用备选提取...")
-            fallback_result = rule_based_extraction(review_text, product_title)
-            fallback_result['metadata']['error'] = 'Failed to parse LLM response, using fallback'
-            aspects_len = safe_list_len(fallback_result.get('aspects', []), f'fallback_aspects_{asin}')
-            log_with_timestamp(f"[{asin}] ✅ 备选提取完成: {aspects_len} 个方面")
-            return fallback_result
+        
+        except Exception as e:
+            log_with_timestamp(f"[{asin}] ⚠️  LLM 调用异常 (attempt {attempt + 1}/{max_retries}): {type(e).__name__}: {str(e)[:80]}")
+            last_error = combined_prompt
+            continue
     
-    except Exception as e:
-        log_with_timestamp(f"[{asin}] ❌ LLM 提取异常: {type(e).__name__}: {str(e)[:100]}")
-        log_with_timestamp(f"[{asin}] 🔄 启用备选规则基础提取...")
-        try:
-            fallback_result = rule_based_extraction(review_text, product_title)
-            aspects_len = safe_list_len(fallback_result.get('aspects', []), f'fallback_aspects_exception_{asin}')
-            log_with_timestamp(f"[{asin}] ✅ 备选提取完成: {aspects_len} 个方面")
-            fallback_result['metadata']['error'] = f'LLM extraction failed ({type(e).__name__}), using fallback'
-            return fallback_result
-        except Exception as fallback_error:
-            log_with_timestamp(f"[{asin}] ❌ 备选提取也失败: {type(fallback_error).__name__}")
-            return {
-                'dimensions': {},
-                'aspects': [],
-                'metadata': {
-                    'error': f'Both LLM and fallback failed: {type(e).__name__}, {type(fallback_error).__name__}',
-                    'extraction_version': '2.0'
-                }
-            }
+    log_with_timestamp(f"[{asin}] ❌ {max_retries} 次尝试全部失败，返回空结果")
+    return {
+        'dimensions': {},
+        'aspects': [],
+        'metadata': {
+            'error': f'All {max_retries} LLM attempts failed',
+            'extraction_version': '2.0',
+            'attempts': max_retries
+        }
+    }
 
 
 # ============================================================================
@@ -763,7 +952,7 @@ def validate_extraction_quality(extraction_result: Dict) -> Dict:
         warnings.append(f"{low_confidence_count} aspects have low confidence (<0.5)")
     
     # 检查sentiment值的有效性
-    valid_sentiments = {'positive', 'negative', 'neutral', 'POSITIVE', 'MIXED', 'NEGATIVE'}
+    valid_sentiments = {'positive', 'negative', 'neutral', 'mixed', 'POSITIVE', 'NEGATIVE', 'NEUTRAL', 'MIXED'}
     for aspect in aspects:
         sentiment = aspect.get('aspect_sentiment', '')
         if sentiment and sentiment not in valid_sentiments:
@@ -1120,7 +1309,7 @@ def main():
         'results': results
     }
     
-    output_file = os.path.join(args.output_dir, f'preferences_{user_id}_v2.json')
+    output_file = os.path.join(args.output_dir, f'preferences_{user_id}.json')
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(output_data, f, indent=2, ensure_ascii=False)
     

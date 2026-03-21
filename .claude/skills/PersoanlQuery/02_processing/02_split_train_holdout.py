@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Stage 3a: Split Train and Holdout Data
+Stage 2: Filter User Data
 
-将偏好提取结果分割为画像集(persona)和查询集(query)。
-- 画像集: 用于构建用户画像的训练数据
-- 查询集: 用于测试的查询数据
+过滤偏好提取结果，只保留符合条件的商品。
+- 输入: Stage 1 的偏好提取结果
+- 输出: 过滤后的查询集数据
 
 Input: result/personal_query/01_preference_extraction/preferences_{user_id}.json
 Output: result/personal_query/02_processing/{user_id}/query.json
 
-Note: 直接读取 Stage 1 输出，不再依赖 Stage 2
+Note: 直接读取 Stage 1 输出
 """
 
 import json
@@ -290,92 +290,42 @@ def load_preferences_results(preferences_file: str, metadata_file: str):
     return converted_results
 
 
-def split_user_data(results, user_id, min_attrs=3, min_cat_size=4, min_other_users=3):
+def filter_user_data(results, user_id, min_attrs=5, min_other_users=3):
     """
-    将用户数据分割为画像集和查询集
+    过滤用户数据：只保留符合条件的商品
     
     筛选条件:
     - target_attributes >= min_attrs
-    - public_attributes >= min_other_users
-    
-    分割策略:
-    - 每个类目最多保留 min_cat_size 个商品到画像集
-    - 其余商品进入查询集
     """
-    category_to_items = defaultdict(list)
-    for item in results:
-        cat = item.get('category', 'Unknown')
-        category_to_items[cat].append(item)
-
-    persona_items = []
     query_items = []
+    filtered_count = 0
 
-    candidates_by_cat = defaultdict(list)
-    non_candidates_by_cat = defaultdict(list)
+    for item in results:
+        selected_attrs = []
+        target_attrs = item.get('target_attributes', {})
+        if target_attrs:
+            selected_attrs = target_attrs.get('selected_attributes', [])
+        
+        if not selected_attrs:
+            selected_attrs = item.get('selected_attributes', [])
 
-    for cat, items in category_to_items.items():
-        for item in items:
-            selected_attrs = []
-            target_attrs = item.get('target_attributes', {})
-            if target_attrs:
-                selected_attrs = target_attrs.get('selected_attributes', [])
-            
-            if not selected_attrs:
-                selected_attrs = item.get('selected_attributes', [])
+        meets_attr_req = len(selected_attrs) >= min_attrs
 
-            public_attrs = []
-            public_attrs_data = item.get('public_attributes', {})
-            if isinstance(public_attrs_data, dict):
-                public_attrs = public_attrs_data.get('selected_attributes', [])
-
-            meets_attr_req = len(selected_attrs) >= min_attrs
-            # DISABLED: public_attrs requirement
-            # meets_public_req = len(public_attrs) >= min_other_users
-
-            # 只检查target attributes数量，不检查public attributes
-            if meets_attr_req:  # and meets_public_req:
-                candidates_by_cat[cat].append(item)
-            else:
-                non_candidates_by_cat[cat].append(item)
-                if not meets_attr_req:
-                    item['_filter_reason'] = f"属性数不足 ({len(selected_attrs)} < {min_attrs})"
-                # elif not meets_public_req:
-                #     item['_filter_reason'] = f"public属性数不足 ({len(public_attrs)} < {min_other_users})"
-
-    total_candidates = sum(len(items) for items in candidates_by_cat.values())
-    total_products = len(results)
-
-    log_with_timestamp(f"  候选商品数: {total_candidates}")
-    log_with_timestamp(f"  总商品数: {total_products}, 非候选商品: {sum(len(items) for items in non_candidates_by_cat.values())}")
-
-    all_categories = sorted(set(candidates_by_cat.keys()) | set(non_candidates_by_cat.keys()))
-    retained_in_persona = 0
-    to_query = 0
-
-    for cat in all_categories:
-        cat_candidates = candidates_by_cat[cat][:]
-        cat_non_candidates = non_candidates_by_cat[cat]
-
-        if len(cat_candidates) > min_cat_size:
-            random.shuffle(cat_candidates)
-            persona_items.extend(cat_candidates[:min_cat_size])
-            query_items.extend(cat_candidates[min_cat_size:])
-            retained_in_persona += min_cat_size
-            to_query += len(cat_candidates) - min_cat_size
+        if meets_attr_req:
+            query_items.append(item)
         else:
-            persona_items.extend(cat_candidates)
-            retained_in_persona += len(cat_candidates)
+            filtered_count += 1
+            item['_filter_reason'] = f"属性数不足 ({len(selected_attrs)} < {min_attrs})"
 
-        persona_items.extend(cat_non_candidates)
+    log_with_timestamp(f"  总商品数: {len(results)}, 过滤掉: {filtered_count}个, 保留: {len(query_items)}个")
 
-    log_with_timestamp(f"  从候选商品保留在画像集: {retained_in_persona}个, 去查询集: {to_query}个")
-
-    split_stats = {
-        "total_candidates": total_candidates,
-        "total_non_candidates": sum(len(items) for items in non_candidates_by_cat.values())
+    filter_stats = {
+        "total_products": len(results),
+        "filtered_count": filtered_count,
+        "retained_count": len(query_items)
     }
 
-    return persona_items, query_items, split_stats
+    return query_items, filter_stats
 
 
 def deduplicate_item_attributes(item):
@@ -400,13 +350,12 @@ def deduplicate_item_attributes(item):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Split user data into persona and query sets (reads Stage 1 preferences)")
+    parser = argparse.ArgumentParser(description="Filter user data based on attribute count (reads Stage 1 preferences)")
     parser.add_argument("--preferences-dir", required=True, help="Directory containing preferences_USERID.json files from Stage 1")
     parser.add_argument("--metadata-file", required=True, help="Product metadata file for category extraction")
     parser.add_argument("--output-dir", required=True, help="Output directory for split data")
     parser.add_argument("--user-id", help="Single user ID to process")
-    parser.add_argument("--min-attrs", type=int, default=3, help="Minimum attributes for query items (default: 3)")
-    parser.add_argument("--min-cat-size", type=int, default=4, help="Minimum items per category in persona set (default: 4)")
+    parser.add_argument("--min-attrs", type=int, default=5, help="Minimum attributes for query items (default: 5)")
     parser.add_argument("--min-other-users", type=int, default=3, help="Minimum public attributes from other users (default: 3)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
@@ -433,57 +382,39 @@ def main():
             log_with_timestamp(f"  Warning: No results found for user {user_id}")
             continue
 
-        persona_items, query_items, split_stats = split_user_data(
+        query_items, filter_stats = filter_user_data(
             results, user_id,
-            min_attrs=args.min_attrs, min_cat_size=args.min_cat_size, min_other_users=args.min_other_users
+            min_attrs=args.min_attrs, min_other_users=args.min_other_users
         )
 
-        log_with_timestamp(f"  Query items: {len(query_items)}, Persona items: {len(persona_items)}")
-
         # 清理 public_attributes
-        for item in persona_items:
+        for item in query_items:
             if 'public_attributes' in item:
                 del item['public_attributes']
             if '_filter_reason' in item:
                 del item['_filter_reason']
 
         # 过滤无属性的物品
-        original_persona_count = len(persona_items)
-        persona_items = [
-            item for item in persona_items
+        original_query_count = len(query_items)
+        query_items = [
+            item for item in query_items
             if item.get('target_attributes', {}).get('selected_attributes', [])
         ]
-        filtered_count = original_persona_count - len(persona_items)
+        filtered_count = original_query_count - len(query_items)
         if filtered_count > 0:
             log_with_timestamp(f"  过滤掉 {filtered_count} 个无属性的物品")
 
-        # 过滤查询集中不存在的类别
-        query_categories = set(item.get('category', '') for item in query_items)
-        original_persona_count = len(persona_items)
-        persona_items = [
-            item for item in persona_items
-            if item.get('category', '') in query_categories
-        ]
-        filtered_by_cat = original_persona_count - len(persona_items)
-        if filtered_by_cat > 0:
-            log_with_timestamp(f"  过滤掉 {filtered_by_cat} 个查询集中不存在的类别")
-
-        # 对每个商品进行属性去重 [DISABLED - 已注释掉去重逻辑]
-        # persona_items = [deduplicate_item_attributes(item) for item in persona_items]
-        # query_items = [deduplicate_item_attributes(item) for item in query_items]
-        # 保持原始数据，不进行去重
-        pass
-
-        persona_dimensions_by_category = {}
-        for item in persona_items:
+        # 计算查询集维度统计
+        query_dimensions_by_category = {}
+        for item in query_items:
             cat = item.get('category', '')
-            if cat not in persona_dimensions_by_category:
-                persona_dimensions_by_category[cat] = set()
+            if cat not in query_dimensions_by_category:
+                query_dimensions_by_category[cat] = set()
             attrs = item.get('target_attributes', {}).get('selected_attributes', [])
             for attr in attrs:
                 dim = attr.get('dimension', '')
                 if dim:
-                    persona_dimensions_by_category[cat].add(dim)
+                    query_dimensions_by_category[cat].add(dim)
 
         # 创建用户目录结构
         user_dir = os.path.join(args.output_dir, user_id)
@@ -494,29 +425,26 @@ def main():
         data_to_save = {
             "user_id": user_id,
             "timestamp": datetime.now().isoformat(),
-            "split_strategy": "all_candidates_as_query_set",
+            "filter_strategy": "min_attrs_filter",
             "min_attrs": args.min_attrs,
             "min_other_users": args.min_other_users,
-            "total_candidates": split_stats["total_candidates"],
-            "total_non_candidates": split_stats["total_non_candidates"],
-            "total_products": len(results),
-            "persona_count": len(persona_items),
+            "total_products": filter_stats["total_products"],
+            "filtered_count": filter_stats["filtered_count"],
+            "retained_count": filter_stats["retained_count"],
             "query_count": len(query_items),
-            "actual_query_ratio": len(query_items) / len(results) if len(results) > 0 else 0,
-            "persona_dimensions_by_category": {k: list(v) for k, v in persona_dimensions_by_category.items()},
-            "persona_results": persona_items,
+            "filter_ratio": filter_stats["retained_count"] / filter_stats["total_products"] if filter_stats["total_products"] > 0 else 0,
+            "query_dimensions_by_category": {k: list(v) for k, v in query_dimensions_by_category.items()},
             "query_results": query_items
         }
 
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(data_to_save, f, indent=2, ensure_ascii=False)
 
-        log_with_timestamp(f"  Split: Persona={len(persona_items)}, Query={len(query_items)}")
+        log_with_timestamp(f"  保留: {len(query_items)}/{filter_stats['total_products']} 商品")
         log_with_timestamp(f"  Output: {output_file}")
         
         summary.append({
             "user_id": user_id,
-            "persona_count": len(persona_items),
             "query_count": len(query_items)
         })
 
