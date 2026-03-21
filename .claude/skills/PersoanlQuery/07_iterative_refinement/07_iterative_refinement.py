@@ -539,6 +539,8 @@ def sanitize_query_text(text: str) -> str:
         query = query[1:-1].strip()
 
     query = query.replace("?", ".")
+    query = re.sub(r'([.!?])\1+', r'\1', query)
+    query = re.sub(r'\s+([,.!?;:])', r'\1', query)
     query = " ".join(query.split())
     return query.strip()
 
@@ -651,6 +653,12 @@ def _count_content_word_changes(base_query: str, candidate_query: str) -> int:
     return sum((base_counter - cand_counter).values()) + sum((cand_counter - base_counter).values())
 
 
+def has_meaningful_surface_change(base_query: str, candidate_query: str) -> bool:
+    base_tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9\-\.]*", base_query.lower())
+    cand_tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9\-\.]*", candidate_query.lower())
+    return base_tokens != cand_tokens
+
+
 def compute_edit_cost(base_query: str, candidate_query: str) -> float:
     base_tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9\-\.]*", base_query.lower())
     cand_tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9\-\.]*", candidate_query.lower())
@@ -730,6 +738,8 @@ def _maybe_add_candidate(
         return
     candidate_query = sanitize_query_text(candidate_query)
     if not candidate_query or candidate_query == base_query or candidate_query in seen:
+        return
+    if not has_meaningful_surface_change(base_query, candidate_query):
         return
     if re.match(r"^(with|for|that|and|or)\b", candidate_query.strip(), flags=re.IGNORECASE):
         return
