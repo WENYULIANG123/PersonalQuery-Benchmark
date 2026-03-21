@@ -633,6 +633,10 @@ def _rewrite_sentence_prefix(sentence: str, new_prefix: str) -> Optional[str]:
             tail = sentence[match.end():].strip()
             if not tail:
                 return None
+            if re.match(r"^to\s+[a-z]+\b", tail, flags=re.IGNORECASE):
+                lowered_prefix = new_prefix.strip().lower()
+                if lowered_prefix in {"i am looking for", "looking for", "please show me", "show me"}:
+                    return None
             rewritten = f"{new_prefix}{tail}"
             end = sentence[-1] if sentence and sentence[-1] in ".!?" else ""
             return sanitize_query_text(rewritten + end)
