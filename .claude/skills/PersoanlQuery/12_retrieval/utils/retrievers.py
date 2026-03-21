@@ -1468,6 +1468,85 @@ class MiniLMRetriever:
         return results
 
 
+class MultiQAMiniLMRetriever:
+    """
+    MultiQA-MiniLM retriever using sentence-transformers/multi-qa-MiniLM-L6-cos-v1.
+    
+    Optimized for QA tasks using cosine similarity, used in PBR project.
+    """
+    def __init__(self, model_name: str = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"):
+        self.model_name = model_name
+        self.model = None
+        self.doc_embeddings = None
+        self.doc_ids = []
+        self.all_metadata = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    def _get_model(self):
+        if self.model is None:
+            log_with_timestamp(f"  Loading MultiQA-MiniLM model: {self.model_name}")
+            from sentence_transformers import SentenceTransformer
+            self.model = SentenceTransformer(self.model_name, device=self.device)
+            log_with_timestamp(f"  Using device: {self.device}")
+        return self.model
+
+    def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
+        """Build MultiQA-MiniLM index using enhanced document text"""
+        log_with_timestamp("  Building MultiQA-MiniLM index...")
+        model = self._get_model()
+
+        self.doc_ids = [doc.get('asin', '') for doc in documents]
+        self.all_metadata = all_metadata
+        texts = [build_document_text(doc, all_metadata) for doc in documents]
+
+        self.doc_embeddings = model.encode(texts, show_progress_bar=True, batch_size=32)
+        log_with_timestamp(f"  MultiQA-MiniLM index built with {len(self.doc_ids)} docs")
+
+    def encode_query(self, query: str) -> np.ndarray:
+        """Encode query to embedding vector"""
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        model = self._get_model()
+        
+        with _model_inference_lock:
+            query_embedding = model.encode([query])
+        
+        if isinstance(query_embedding, torch.Tensor):
+            query_embedding = query_embedding.cpu().numpy()
+        
+        return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
+
+    def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+        """Search using MultiQA-MiniLM embeddings"""
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        model = self._get_model()
+        
+        with _model_inference_lock:
+            query_embedding = model.encode([query])
+        
+        if isinstance(query_embedding, np.ndarray):
+            query_embedding = torch.from_numpy(query_embedding).float().to(self.device)
+        
+        doc_embeddings = self.doc_embeddings
+        if isinstance(doc_embeddings, np.ndarray):
+            doc_embeddings = torch.from_numpy(doc_embeddings).float().to(query_embedding.device)
+        if torch.is_tensor(doc_embeddings):
+            if doc_embeddings.device != query_embedding.device:
+                doc_embeddings = doc_embeddings.to(query_embedding.device)
+        
+        from sentence_transformers import util
+        scores = util.cos_sim(query_embedding, doc_embeddings)[0]
+        
+        # Optimized: Use torch.topk instead of full sort (O(n log k) vs O(n log n))
+        topk_values, topk_indices = torch.topk(scores, k=min(top_k, len(self.doc_ids)))
+        results = [(self.doc_ids[idx.item()], topk_values[i].item()) 
+                   for i, idx in enumerate(topk_indices)]
+        return results
+
+
 class MPNetRetriever:
     """
     MPNet retriever using sentence-transformers/all-mpnet-base-v2.

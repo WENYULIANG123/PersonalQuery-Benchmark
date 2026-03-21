@@ -938,9 +938,24 @@ def evaluate_retriever(
     all_asins: List[str], 
     k_values: List[int] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100], 
     save_candidates_path: str = None,
-    mode: str = None
+    mode: str = None,
+    return_query_results: bool = False
 ) -> Dict:
-    """Evaluate a retriever on queries"""
+    """Evaluate a retriever on queries
+    
+    Args:
+        retriever: The retriever instance
+        queries: List of query dictionaries
+        all_asins: List of all ASIN identifiers
+        k_values: K values for evaluation metrics
+        save_candidates_path: Path to save candidates (optional)
+        mode: Query mode tag (clean/noisy)
+        return_query_results: If True, return (metrics, query_results) tuple instead of just metrics
+    
+    Returns:
+        If return_query_results=False: aggregated metrics dict
+        If return_query_results=True: (aggregated metrics dict, query_results list) tuple
+    """
     import time
     
     retriever_type = type(retriever).__name__
@@ -948,6 +963,7 @@ def evaluate_retriever(
     
     all_metrics = {k: [] for k in k_values}
     all_candidates = []
+    query_results = []  # 新增：收集每个查询的结果
     
     search_times = []
     
@@ -979,6 +995,25 @@ def evaluate_retriever(
                 'candidates': results
             })
         
+        # 新增：保存top10结果
+        if return_query_results:
+            top10_results = [
+                {
+                    'rank': rank + 1,
+                    'asin': result[0],
+                    'score': float(result[1]) if isinstance(result[1], (int, float, np.number)) else float(result[1]) if hasattr(result[1], '__float__') else result[1]
+                }
+                for rank, result in enumerate(results[:10])
+            ]
+            
+            query_results.append({
+                'query_idx': idx,
+                'asin': asin,
+                'query_text': query_text,
+                'search_time_seconds': search_time,
+                'top10_results': top10_results
+            })
+        
         relevant = {asin}
         for k in k_values:
             metrics = compute_enhanced_metrics(retrieved_asins, relevant, k)
@@ -996,7 +1031,11 @@ def evaluate_retriever(
         log_with_timestamp(f"[EVAL_RETRIEVER_DONE] {retriever_type} evaluation complete")
         log_with_timestamp(f"  → {len(queries)} queries, avg search time: {avg_search_time:.3f}s/query")
     
-    return aggregated
+    # 返回结果
+    if return_query_results:
+        return aggregated, query_results
+    else:
+        return aggregated
 
 
 def load_cached_candidates(cache_file: str) -> List[Dict]:
