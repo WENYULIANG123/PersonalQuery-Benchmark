@@ -1,0 +1,56 @@
+{
+  "version": "complexity_template_qa_v1",
+  "global": {
+    "input_glob": "/fs04/ar57/wenyu/result/personal_query/06_query/queries_*.json",
+    "output_file": "/fs04/ar57/wenyu/result/personal_query/06_query/complexity_template_qa_report.json",
+    "word_range": {
+      "low": [24, 31],
+      "medium": [24, 31],
+      "high": [26, 34]
+    }
+  },
+  "levels": {
+    "low": {
+      "must_patterns_any": [
+        "\\bfrom\\b",
+        "\\bpriced under\\b|\\bunder\\b",
+        "\\bavailable in\\b|\\bin\\b",
+        "\\bmade of\\b|\\bof\\b",
+        "\\bwith\\b"
+      ],
+      "min_must_hits": 3,
+      "max_clause_connectors": 1,
+      "max_relative_markers": 0,
+      "max_negations": 1
+    },
+    "medium": {
+      "must_patterns_any": [
+        "\\bthat\\b|\\bwhich\\b|\\bwho\\b",
+        "\\bsuitable for\\b|\\bfor\\b",
+        "\\bwith\\b",
+        "\\boffering\\b|\\boffer\\b",
+        "\\bwithin\\b"
+      ],
+      "min_must_hits": 3,
+      "min_relative_markers": 1,
+      "max_relative_markers": 2,
+      "min_clause_connectors": 1,
+      "max_clause_connectors": 3,
+      "max_negations": 2
+    },
+    "high": {
+      "must_patterns_any": [
+        "\\bin which\\b",
+        "\\bwhose\\b",
+        "\\bwhere\\b",
+        "\\bund(er)?\\b",
+        "\\bguaranteed\\b|\\bverified\\b|\\bmaintained\\b"
+      ],
+      "min_must_hits": 3,
+      "min_relative_markers": 2,
+      "min_clause_connectors": 2,
+      "min_nested_markers": 2,
+      "max_negations": 3
+    }
+  }
+}

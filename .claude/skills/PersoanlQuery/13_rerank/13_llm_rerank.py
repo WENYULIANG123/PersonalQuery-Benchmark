@@ -142,7 +142,7 @@ class UserQueryEvaluator:
             return self.query_index
 
         queries_dir = Path(self.config["input_paths"]["queries_dir"])
-        query_files = sorted(queries_dir.glob("dual_queries_*.json"))
+        query_files = sorted(queries_dir.glob("queries_*.json"))
         query_index = {}
 
         for query_file in query_files:

@@ -1948,8 +1948,8 @@ def load_dual_queries(query_dir: str) -> Dict[str, List[Dict]]:
     query_path = Path(query_dir)
     users_queries = {}
 
-    for query_file in query_path.glob("dual_queries_*.json"):
-        user_id = query_file.stem.replace("dual_queries_", "")
+    for query_file in query_path.glob("queries_*.json"):
+        user_id = query_file.stem.replace("queries_", "")
 
         try:
             with open(query_file, 'r', encoding='utf-8') as f:

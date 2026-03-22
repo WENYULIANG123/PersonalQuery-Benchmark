@@ -7,7 +7,7 @@ For each query pair, evaluates how well the query aligns with the
 user's persona across 5 dimensions using LLM.
 
 Input: 
-  - result/personal_query/07_query/dual_queries_{user_id}.json
+  - result/personal_query/07_query/queries_{user_id}.json
   - result/personal_query/04_persona/persona_{Category}_{user_id}.json
   
 Output: result/personal_query/11_evaluation/evaluation_{user_id}.json
@@ -580,7 +580,7 @@ def main():
     )
     parser.add_argument(
         "--input-file",
-        default="/fs04/ar57/wenyu/result/personal_query/07_query/dual_queries_A13OFOB1394G31.json",
+        default="/fs04/ar57/wenyu/result/personal_query/07_query/queries_A13OFOB1394G31.json",
         help="Input dual queries JSON file"
     )
     parser.add_argument(

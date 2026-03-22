@@ -35,8 +35,8 @@ def load_stage7_module(script_path: Path):
 
 def find_users_with_dual_queries(query_dir: Path) -> List[str]:
     users = []
-    for query_file in sorted(query_dir.glob("dual_queries_*.json")):
-        user_id = query_file.stem.replace("dual_queries_", "")
+    for query_file in sorted(query_dir.glob("queries_*.json")):
+        user_id = query_file.stem.replace("queries_", "")
         if user_id and user_id != "summary":
             users.append(user_id)
     return users
@@ -87,7 +87,7 @@ def validate_users(
 def copy_user_query_files(user_ids: List[str], src_query_dir: Path, dst_query_dir: Path) -> int:
     copied = 0
     for user_id in user_ids:
-        src_file = src_query_dir / f"dual_queries_{user_id}.json"
+        src_file = src_query_dir / f"queries_{user_id}.json"
         if not src_file.exists():
             log_with_timestamp(f"  - Missing query file for {user_id}: {src_file}")
             continue
@@ -103,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--query-dir",
         default="/home/wlia0047/ar57/wenyu/result/personal_query/06_query",
-        help="Directory containing dual_queries_{USER_ID}.json files",
+        help="Directory containing queries_{USER_ID}.json files",
     )
     parser.add_argument(
         "--linguistic-dir",
@@ -174,7 +174,7 @@ def main() -> int:
 
     all_users = find_users_with_dual_queries(query_dir)
     if not all_users:
-        log_with_timestamp("ERROR: No dual_queries_*.json found in query dir")
+        log_with_timestamp("ERROR: No queries_*.json found in query dir")
         return 1
 
     target_users = sorted(set(args.user_ids)) if args.user_ids else all_users

@@ -106,3 +106,9 @@ opencode
 *.fdb_latexmk
 *.fls
 *.synctex.gz
+
+# 排除用户评论数据文件
+result/personal_query/00_data_preparation/reviews_*.json
+result/personal_query/00_data_preparation/all_user_reviews.json
+result/personal_query/00_data_preparation/all_qualified_users.json
+result/personal_query/06_query/dual_queries_*.json

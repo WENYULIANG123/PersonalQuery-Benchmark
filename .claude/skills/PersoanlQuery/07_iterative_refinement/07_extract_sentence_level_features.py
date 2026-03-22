@@ -298,13 +298,13 @@ def main():
     # Paths
     review_data_path = Path("/home/wlia0047/wenyu/data/Amazon-Reviews-2018/processed/user_reviews/user_product_reviews.json")
     output_dir = Path("/home/wlia0047/wenyu/result/user_profile/07_neural_proxy/sentence_features")
-    dual_queries_dir = Path("/home/wlia0047/wenyu/result/user_profile/06_query")
+    queries_dir = Path("/home/wlia0047/wenyu/result/user_profile/06_query")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Get target users from dual_queries directory
     target_users = set()
-    for f in dual_queries_dir.glob("dual_queries_*.json"):
-        user_id = f.stem.replace("dual_queries_", "")
+    for f in queries_dir.glob("queries_*.json"):
+        user_id = f.stem.replace("queries_", "")
         target_users.add(user_id)
 
     logger.info(f"Found {len(target_users)} target users from dual_queries")

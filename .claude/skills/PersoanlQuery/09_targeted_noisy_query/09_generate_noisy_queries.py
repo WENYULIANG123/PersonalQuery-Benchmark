@@ -1405,7 +1405,7 @@ def main():
     if QUERY_SOURCE == 'stage7':
         STAGE7_RESULTS_FILE = os.path.join(BASE_DIR, f"result/personal_query/07_iterative_refinement/{USER_ID}_interative_query.json")
     else:
-        STAGE7_RESULTS_FILE = os.path.join(BASE_DIR, f"result/personal_query/06_query/dual_queries_{USER_ID}.json")
+        STAGE7_RESULTS_FILE = os.path.join(BASE_DIR, f"result/personal_query/06_query/queries_{USER_ID}.json")
     WRITING_ANALYSIS_FILE = os.path.join(BASE_DIR, f"result/personal_query/04_writing_analysis/writing_analysis_{USER_ID}.json")
     
     log_with_timestamp("=" * 60)

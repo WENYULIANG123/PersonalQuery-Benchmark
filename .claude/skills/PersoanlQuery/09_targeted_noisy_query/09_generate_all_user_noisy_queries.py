@@ -3,10 +3,10 @@
 Stage 9: Generate Noisy Queries for All Users
 
 主脚本：自动处理所有用户的噪声查询生成。
-根据 06_query 目录下的 dual_queries_{USER_ID}.json 文件，批量生成带噪声的查询。
+根据 06_query 目录下的 queries_{USER_ID}.json 文件，批量生成带噪声的查询。
 
 Input: 
-  - /home/wlia0047/ar57/wenyu/result/personal_query/06_query/dual_queries_{USER_ID}.json (per user)
+  - /home/wlia0047/ar57/wenyu/result/personal_query/06_query/queries_{USER_ID}.json (per user)
   - /home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/writing_analysis_{USER_ID}.json (per user)
 
 Output: 
@@ -51,9 +51,9 @@ def find_users_with_query_files(query_dir: str, source: str) -> List[str]:
                     continue
                 user_id = filename.replace('_interative_query.json', '')
             else:
-                if not filename.startswith('dual_queries_') or not filename.endswith('.json'):
+                if not filename.startswith('queries_') or not filename.endswith('.json'):
                     continue
-                user_id = filename.replace('dual_queries_', '').replace('.json', '')
+                user_id = filename.replace('queries_', '').replace('.json', '')
             
             if user_id and user_id != 'summary':
                 users_found.append(user_id)
@@ -81,7 +81,7 @@ def validate_user_files(
         if source == 'stage7':
             query_file = os.path.join(query_dir, f'{user_id}_interative_query.json')
         else:
-            query_file = os.path.join(query_dir, f'dual_queries_{user_id}.json')
+            query_file = os.path.join(query_dir, f'queries_{user_id}.json')
         writing_file = os.path.join(writing_analysis_dir, f'writing_analysis_{user_id}.json')
         
         if not os.path.exists(query_file):

@@ -138,9 +138,9 @@ def main():
     # Load dual queries
     log_with_timestamp("Loading dual queries...")
     dual_query_files = sorted([
-        os.path.join(args.dual_queries_dir, f)
-        for f in os.listdir(args.dual_queries_dir)
-        if f.startswith('dual_queries_') and f.endswith('.json')
+        os.path.join(args.queries_dir, f)
+        for f in os.listdir(args.queries_dir)
+        if f.startswith('queries_') and f.endswith('.json')
     ])
 
     all_results = []
@@ -150,8 +150,8 @@ def main():
             data = json.load(f)
 
         if isinstance(data, list):
-            # Extract user_id from filename (dual_queries_USERID.json)
-            user_id = os.path.basename(dual_file).replace('dual_queries_', '').replace('.json', '')
+            # Extract user_id from filename (queries_USERID.json)
+            user_id = os.path.basename(dual_file).replace('queries_', '').replace('.json', '')
         else:
             user_id = data.get('user_id')
         user_persona = personas.get(user_id, '')

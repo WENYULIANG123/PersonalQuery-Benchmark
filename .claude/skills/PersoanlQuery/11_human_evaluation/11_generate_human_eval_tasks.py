@@ -219,18 +219,18 @@ def get_user_persona_summary(personas_dict):
     return "\n\n".join(summary_parts)
 
 
-def load_stage7_dual_queries(dual_queries_dir):
+def load_stage7_dual_queries(queries_dir):
     """Load Stage 7 dual queries"""
     log_with_timestamp("Loading Stage 7 dual queries...")
     dual_queries = {}
     
-    if not os.path.exists(dual_queries_dir):
-        log_with_timestamp(f"Warning: Dual queries directory not found: {dual_queries_dir}")
+    if not os.path.exists(queries_dir):
+        log_with_timestamp(f"Warning: Dual queries directory not found: {queries_dir}")
         return dual_queries
     
-    for filename in os.listdir(dual_queries_dir):
-        if filename.startswith('dual_queries_') and filename.endswith('.json'):
-            filepath = os.path.join(dual_queries_dir, filename)
+    for filename in os.listdir(queries_dir):
+        if filename.startswith('queries_') and filename.endswith('.json'):
+            filepath = os.path.join(queries_dir, filename)
             try:
                 with open(filepath, 'r', encoding='utf-8') as f:
                     data = json.load(f)

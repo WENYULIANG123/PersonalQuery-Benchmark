@@ -1321,12 +1321,12 @@ def setup_logging():
 
 def find_users_with_queries() -> List[str]:
     users = []
-    pattern = os.path.join(STAGE6_DIR, "dual_queries_*.json")
+    pattern = os.path.join(STAGE6_DIR, "queries_*.json")
     query_files = glob.glob(pattern)
     
     for file_path in query_files:
         filename = os.path.basename(file_path)
-        if filename.startswith("dual_queries_") and filename.endswith(".json"):
+        if filename.startswith("queries_") and filename.endswith(".json"):
             user_id = filename[13:-5]
             users.append(user_id)
 

@@ -62,7 +62,7 @@ def load_iterative_results(iterative_dir: str) -> Dict[str, Dict[str, str]]:
 
 
 def create_refined_dual_queries(
-    dual_queries_dir: str,
+    queries_dir: str,
     refined_queries: Dict[str, Dict[str, str]],
     output_dir: str
 ):
@@ -79,7 +79,7 @@ def create_refined_dual_queries(
     os.makedirs(output_dir, exist_ok=True)
 
     # Get all dual query files
-    dual_files = [f for f in os.listdir(dual_queries_dir) if f.startswith("dual_queries_") and f.endswith(".json")]
+    dual_files = [f for f in os.listdir(queries_dir) if f.startswith("queries_") and f.endswith(".json")]
 
     stats = {
         "total_users": len(dual_files),
@@ -90,8 +90,8 @@ def create_refined_dual_queries(
     }
 
     for filename in dual_files:
-        user_id = filename.replace("dual_queries_", "").replace(".json", "")
-        input_path = os.path.join(dual_queries_dir, filename)
+        user_id = filename.replace("queries_", "").replace(".json", "")
+        input_path = os.path.join(queries_dir, filename)
         output_path = os.path.join(output_dir, filename)
 
         # Load original dual queries
@@ -156,7 +156,7 @@ def main():
     print("=" * 60)
     print("Creating Refined Dual Query Files")
     print("=" * 60)
-    print(f"Dual queries dir: {args.dual_queries_dir}")
+    print(f"Dual queries dir: {args.queries_dir}")
     print(f"Iterative results dir: {args.iterative_results_dir}")
     print(f"Output dir: {args.output_dir}")
     print("=" * 60)
@@ -172,7 +172,7 @@ def main():
     # Create refined dual query files
     print("\nCreating refined dual query files...")
     stats = create_refined_dual_queries(
-        args.dual_queries_dir,
+        args.queries_dir,
         refined_queries,
         args.output_dir
     )

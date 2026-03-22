@@ -1,9 +1,57 @@
 # AGENTS.md - Python Execution Rules
 
-## ⚠️ CRITICAL: ALL Python Scripts Must Use sbatch_wrapper
+## ⚠️ CRITICAL: 根据是否涉及模型调用选择执行方式
 
-**Never run Python scripts directly. Always use sbatch_wrapper.py:**
+### 执行方式判断
 
+| 脚本类型 | 执行方式 | 命令格式 |
+|---------|---------|---------|
+| **不涉及 GPU** | 直接 conda 环境执行 | `source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && conda activate /home/wlia0047/ar57_scratch/wenyu/stark && cd /fs04/ar57/wenyu && python3 script.py` |
+| **GPU 训练/检索** | 必须使用 sbatch_wrapper | `python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu "source ... && conda activate ... && cd /fs04/ar57/wenyu && python3 script.py"` |
+
+### 为什么区分执行方式？
+
+**直接执行（无 GPU）**：
+- ✅ 更快的启动时间（无需排队 SLURM）
+- ✅ 适合 LLM 调用、模型推理、数据处理、文件IO、纯计算
+- ✅ 适合调试阶段快速迭代
+
+**sbatch_wrapper（GPU 训练）**：
+- ✅ GPU 资源分配 via SLURM
+- ✅ 任务追踪和日志记录
+- ✅ 超时处理
+- ✅ 集群基础设施集成
+
+---
+
+## Critical Execution Rules
+
+### Rule 1: 判断脚本是否涉及模型/GPU调用
+
+**需要 sbatch_wrapper --gpu（GPU 训练）**：
+- ✅ 模型训练（pytorch, tensorflow 等）
+- ✅ GPU 依赖的检索/评估操作
+
+**直接执行（无需 GPU）**：
+- ✅ LLM 调用（GLM, GPT, Claude 等）
+- ✅ 模型推理（CPU 或通过 API）
+- ✅ 向量化/嵌入生成（CPU）
+- ✅ 数据预处理/清洗
+- ✅ 文件 IO 操作
+- ✅ JSON/CSV 处理
+- ✅ 纯计算
+
+### Rule 2: 正确使用执行方式
+
+**不涉及模型时——直接执行**：
+```bash
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+cd /fs04/ar57/wenyu && \
+python3 script.py
+```
+
+**涉及模型时——必须使用 sbatch_wrapper**：
 ```bash
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
@@ -11,34 +59,12 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
      cd /fs04/ar57/wenyu && python3 script.py"
 ```
 
-This ensures:
-- ✅ Correct conda environment
-- ✅ GPU resource allocation via SLURM
-- ✅ Job tracking and logging
-- ✅ Proper timeout handling
-- ✅ Full integration with cluster infrastructure
+### Rule 3: Required Environment Every Time
 
----
-
-## Critical Execution Rules
-
-### Rule 1: ALWAYS Use sbatch_wrapper for Python Execution
-- ❌ **NEVER**: `python3 script.py`
-- ❌ **NEVER**: Direct Python execution
-- ✅ **ALWAYS**: Use sbatch_wrapper.py wrapper
-
-### Rule 2: Required Environment Every Time
-Every sbatch_wrapper call MUST include:
+Every execution call MUST include:
 1. Conda activation: `source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh`
 2. Environment: `conda activate /home/wlia0047/ar57_scratch/wenyu/stark`
 3. Working directory: `cd /fs04/ar57/wenyu` (or appropriate path)
-
-### Rule 3: When to Use sbatch_wrapper
-- ✅ All training/fine-tuning (Stage 14)
-- ✅ All evaluation scripts (Stage 12, 13)
-- ✅ All model inference
-- ✅ All GPU-dependent operations
-- ✅ All tests that use ML models
 
 ### Rule 4: Task Completion & Summary
 - ❌ **NEVER**: Create README files or documentation after task completion
@@ -72,31 +98,24 @@ When a task is complete, provide a concise summary of:
 
 ## Example Commands
 
-### Run a Single Test
+### 直接执行（不涉及模型）
+
 ```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /fs04/ar57/wenyu/.claude/skills/PersoanlQuery/13_rerank/llm_reranking/tests && \
-     python3 test_preference_classifier.py"
+# 数据处理、文件IO等
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+cd /fs04/ar57/wenyu && \
+python3 script.py
 ```
 
-### Run Model Fine-tuning (Stage 14)
-```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /fs04/ar57/wenyu/.claude/skills/PersoanlQuery/14_fine_tuning && \
-     python3 finetune_e5_gpu.py"
-```
+### sbatch_wrapper 执行（涉及模型）
 
-### Run Evaluation Scripts
 ```bash
+# LLM调用、模型训练、GPU操作
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /fs04/ar57/wenyu && \
-     python3 ./.claude/skills/PersoanlQuery/12_retrieval/scripts/verify_all_retrievers.py"
+     cd /fs04/ar57/wenyu && python3 script.py"
 ```
 
 ---
@@ -116,17 +135,16 @@ description: 提取细粒度用户偏好并生成"接地气"的用户画像与�
 
 **运行命令**：
 ```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/00_data_preparation/00_batch_prepare_data.py \
-     --review-file /fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/Arts_Crafts_and_Sewing.json.gz \
-     --meta-file /fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz \
-     --min-reviews 100 \
-     --max-reviews 400 \
-     --max-users 10 \
-     --output-dir result/personal_query/00_data_preparation"
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+cd /home/wlia0047/ar57/wenyu && \
+python -u .claude/skills/PersoanlQuery/00_data_preparation/00_batch_prepare_data.py \
+    --review-file /fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/Arts_Crafts_and_Sewing.json.gz \
+    --meta-file /fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz \
+    --min-reviews 100 \
+    --max-reviews 400 \
+    --max-users 10 \
+    --output-dir result/personal_query/00_data_preparation
 ```
 
 ---
@@ -137,13 +155,12 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 
 **运行命令**：
 ```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py  \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/01_preference_extraction/01_batch_extract_preferences_all.py \
-     --output-dir result/personal_query/01_preference_extraction \
-     --max-workers 10"
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+cd /home/wlia0047/ar57/wenyu && \
+python -u .claude/skills/PersoanlQuery/01_preference_extraction/01_batch_extract_preferences_all.py \
+    --output-dir result/personal_query/01_preference_extraction \
+    --max-workers 10
 ```
 
 ### Stage 2: 数据处理与过滤
@@ -165,19 +182,17 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py  \
 **运行命令**：
 ```bash
 # 处理所有用户（默认）
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/02_processing/run_stage2_pipeline.py"
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+cd /home/wlia0047/ar57/wenyu && \
+python -u .claude/skills/PersoanlQuery/02_processing/run_stage2_pipeline.py
 
 # 或只处理特定用户
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/02_processing/run_stage2_pipeline.py \
-     --user-id A13OFOB1394G31"
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+cd /home/wlia0047/ar57/wenyu && \
+python -u .claude/skills/PersoanlQuery/02_processing/run_stage2_pipeline.py \
+--user-id A13OFOB1394G31
 ```
 
 **参数说明**：
@@ -206,12 +221,10 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 **运行命令**：
 ```bash
 # 处理所有选中用户（默认）
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/04_writing_analysis/04_extract_all_user_errors.py"
-
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+cd /home/wlia0047/ar57/wenyu && \
+python -u .claude/skills/PersoanlQuery/04_writing_analysis/04_extract_all_user_errors.py
 ```
 
 
@@ -221,12 +234,11 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 
 **运行命令**：
 ```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/05_syntactic_analysis/05_extract_local_features.py \
-     --reviews-file /fs04/ar57/wenyu/result/personal_query/00_data_preparation/all_user_reviews.json \
-     --output-dir /fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis"
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/05_syntactic_analysis/05_extract_local_features.py \
+    --reviews-file /fs04/ar57/wenyu/result/personal_query/00_data_preparation/all_user_reviews.json \
+    --output-dir /fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis
 ```
 
 ---
@@ -238,12 +250,10 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 **运行命令**：
 ```bash
 # 处理所有用户（默认）
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/06_query/06_generate_all_user_queries.py"
-
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+cd /home/wlia0047/ar57/wenyu && \
+python -u .claude/skills/PersoanlQuery/06_query/06_generate_all_user_queries.py
 ```
 
 ### Stage 7: 迭代式风格优化
@@ -252,17 +262,16 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 
 **运行命令**：
 ```bash
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/07_iterative_refinement/07_iterative_refinement.py \
-     --query-dir /home/wlia0047/wenyu/result/personal_query/06_query \
-     --linguistic-dir /home/wlia0047/wenyu/result/personal_query/05_syntactic_analysis \
-     --output-dir /home/wlia0047/wenyu/result/personal_query/07_iterative_refinement \
-     --max-rounds 5 \
-     --candidates-per-round 3 \
-     --feature-set style_only_16 \
-     --max-workers 1"
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/07_iterative_refinement/07_iterative_refinement.py \
+    --query-dir /home/wlia0047/wenyu/result/personal_query/06_query \
+    --linguistic-dir /home/wlia0047/wenyu/result/personal_query/05_syntactic_analysis \
+    --output-dir /home/wlia0047/wenyu/result/personal_query/07_iterative_refinement \
+    --max-rounds 5 \
+    --candidates-per-round 3 \
+    --feature-set style_only_16 \
+    --max-workers 1
 ```
 
 ### Stage 8: 拼写难度打分模型
@@ -288,25 +297,23 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
 #### 批量处理所有用户（推荐）
 ```bash
 # 批量处理所有完成Stage 6的用户
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/09_targeted_noisy_query/09_generate_all_user_noisy_queries.py"
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+cd /home/wlia0047/ar57/wenyu && \
+python -u .claude/skills/PersoanlQuery/09_targeted_noisy_query/09_generate_all_user_noisy_queries.py
 ```
 
 #### 处理单个用户
 ```bash
 # 单个用户处理
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/09_targeted_noisy_query/09_generate_noisy_queries.py \
-     --stage7-results result/personal_query/07_iterative_refinement/iterative_refinement_v2/iterative_results.json \
-     --writing-analysis result/personal_query/04_writing_analysis/results/writing_analysis_{USER_ID}.json \
-     --output-dir result/personal_query/09_targeted_noisy_query \
-     --user-ids {USER_ID}"
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+cd /home/wlia0047/ar57/wenyu && \
+python -u .claude/skills/PersoanlQuery/09_targeted_noisy_query/09_generate_noisy_queries.py \
+    --stage7-results result/personal_query/07_iterative_refinement/iterative_refinement_v2/iterative_results.json \
+    --writing-analysis result/personal_query/04_writing_analysis/results/writing_analysis_{USER_ID}.json \
+    --output-dir result/personal_query/09_targeted_noisy_query \
+    --user-ids {USER_ID}
 ```
 
 **批量脚本特性**：
@@ -328,35 +335,32 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 **运行命令**：
 ```bash
 # LLM 评分
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/10_evaluation/10_evaluate_LLM_score.py \
-     --input-file /fs04/ar57/wenyu/result/personal_query/06_query/dual_queries_A13OFOB1394G31.json \
-     --persona-dir /fs04/ar57/wenyu/result/personal_query/03_persona \
-     --output-dir /fs04/ar57/wenyu/result/personal_query/10_evaluation \
-     --workers 10"
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+cd /home/wlia0047/ar57/wenyu && \
+python -u .claude/skills/PersoanlQuery/10_evaluation/10_evaluate_LLM_score.py \
+    --input-file /fs04/ar57/wenyu/result/personal_query/06_query/queries_A13OFOB1394G31.json \
+    --persona-dir /fs04/ar57/wenyu/result/personal_query/03_persona \
+    --output-dir /fs04/ar57/wenyu/result/personal_query/10_evaluation \
+    --workers 10
 
 # 语义相似度分析
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/10_evaluation/10_evaluate_semantic_similarity.py \
-     --dual-queries-dir /fs04/ar57/wenyu/result/personal_query/06_query \
-     --persona-dir /fs04/ar57/wenyu/result/personal_query/03_persona \
-     --output-dir /fs04/ar57/wenyu/result/personal_query/10_evaluation \
-     --method sbert"
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+cd /home/wlia0047/ar57/wenyu && \
+python -u .claude/skills/PersoanlQuery/10_evaluation/10_evaluate_semantic_similarity.py \
+    --dual-queries-dir /fs04/ar57/wenyu/result/personal_query/06_query \
+    --persona-dir /fs04/ar57/wenyu/result/personal_query/03_persona \
+    --output-dir /fs04/ar57/wenyu/result/personal_query/10_evaluation \
+    --method sbert
 
 # 画像多样性评估
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu && \
-     python -u .claude/skills/PersoanlQuery/10_evaluation/10_evaluate_persona_diversity.py \
-     --persona-dir /fs04/ar57/wenyu/result/personal_query/03_persona \
-     --output-file /fs04/ar57/wenyu/result/personal_query/10_evaluation/diversity_metrics.json"
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+cd /home/wlia0047/ar57/wenyu && \
+python -u .claude/skills/PersoanlQuery/10_evaluation/10_evaluate_persona_diversity.py \
+    --persona-dir /fs04/ar57/wenyu/result/personal_query/03_persona \
+    --output-file /fs04/ar57/wenyu/result/personal_query/10_evaluation/diversity_metrics.json
 ```
 
 ---
@@ -368,32 +372,29 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
 **运行命令**：
 ```bash
 # Step 1: 生成人类评估任务
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/11_human_evaluation/11_generate_human_eval_tasks.py \
-     --stage10-dir /home/wlia0047/wenyu/result/personal_query/10_evaluation \
-     --stage9-dir /home/wlia0047/wenyu/result/personal_query/09_targeted_noisy_query \
-     --persona-dir /home/wlia0047/wenyu/result/personal_query/03_persona/results \
-     --output-dir /home/wlia0047/wenyu/result/personal_query/11_human_evaluation/tasks"
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/11_human_evaluation/11_generate_human_eval_tasks.py \
+    --stage10-dir /home/wlia0047/wenyu/result/personal_query/10_evaluation \
+    --stage9-dir /home/wlia0047/wenyu/result/personal_query/09_targeted_noisy_query \
+    --persona-dir /home/wlia0047/wenyu/result/personal_query/03_persona/results \
+    --output-dir /home/wlia0047/wenyu/result/personal_query/11_human_evaluation/tasks
 
 # Step 2: 计算对齐指标
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/11_human_evaluation/11_compute_alignment_metrics.py \
-     --human-results /home/wlia0047/wenyu/result/personal_query/11_human_evaluation/human_eval_results.json \
-     --llm-results /home/wlia0047/wenyu/result/personal_query/10_evaluation/evaluation_summary.json \
-     --llm-dir /home/wlia0047/wenyu/result/personal_query/10_evaluation \
-     --output-dir /home/wlia0047/wenyu/result/personal_query/11_human_evaluation/reports"
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/11_human_evaluation/11_compute_alignment_metrics.py \
+    --human-results /home/wlia0047/wenyu/result/personal_query/11_human_evaluation/human_eval_results.json \
+    --llm-results /home/wlia0047/wenyu/result/personal_query/10_evaluation/evaluation_summary.json \
+    --llm-dir /home/wlia0047/wenyu/result/personal_query/10_evaluation \
+    --output-dir /home/wlia0047/wenyu/result/personal_query/11_human_evaluation/reports
 
 # Step 3: 生成报告
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/11_human_evaluation/11_generate_report.py \
-     --metrics-dir /home/wlia0047/wenyu/result/personal_query/11_human_evaluation/reports \
-     --output-dir /home/wlia0047/wenyu/result/personal_query/11_human_evaluation/reports"
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/11_human_evaluation/11_generate_report.py \
+    --metrics-dir /home/wlia0047/wenyu/result/personal_query/11_human_evaluation/reports \
+    --output-dir /home/wlia0047/wenyu/result/personal_query/11_human_evaluation/reports
 ```
 
 ---
@@ -450,25 +451,23 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
 **运行命令**：
 ```bash
 # 批量处理所有查询（包含属性选择评估和商品验证）
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/13_rerank && \
-     python3 13_batch_llm_rerank_all.py --config 15_config.json \
-     --meta-file /fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz"
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+cd /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/13_rerank && \
+python3 13_batch_llm_rerank_all.py --config 15_config.json \
+    --meta-file /fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz
 
 # 单独运行属性选择脚本（单条查询 JSON 示例）
-# query-file 需要是单条查询 JSON，不能直接传 dual_queries_*.json
-python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
-    "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
-     conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
-     cd /fs04/ar57/wenyu && \
-     python3 /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/13_rerank/13_select_attributes_from_history.py \
-     --user-id A2U6VP21H9UVV3 \
-     --category Yarn \
-     --query-file /fs04/ar57/wenyu/result/personal_query/13_rerank/results/tmp_attr_query_A2U6_yarn.json \
-     --meta-file /fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz \
-     --output-file /fs04/ar57/wenyu/result/personal_query/13_rerank/results/attr_select_A2U6_yarn_thr0.7_rerun.json"
+# query-file 需要是单条查询 JSON，不能直接传 queries_*.json
+source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
+conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
+cd /fs04/ar57/wenyu && \
+python3 /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/13_rerank/13_select_attributes_from_history.py \
+    --user-id A2U6VP21H9UVV3 \
+    --category Yarn \
+    --query-file /fs04/ar57/wenyu/result/personal_query/13_rerank/results/tmp_attr_query_A2U6_yarn.json \
+    --meta-file /fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz \
+    --output-file /fs04/ar57/wenyu/result/personal_query/13_rerank/results/attr_select_A2U6_yarn_thr0.7_rerun.json
 ```
 
 其中 `tmp_attr_query_A2U6_yarn.json` 的内容示例：

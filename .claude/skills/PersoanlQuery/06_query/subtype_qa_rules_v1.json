@@ -1,0 +1,100 @@
+{
+  "version": "subtype_qa_v1",
+  "global": {
+    "length": {
+      "target_words": 26,
+      "min_words": 25,
+      "max_words": 28,
+      "hard_min_words": 20,
+      "hard_max_words": 35,
+      "normalize_strategy": "trim_low_priority_then_expand_safe_tail",
+      "safe_tail_pool": [
+        "for consistent daily use",
+        "with practical everyday reliability",
+        "for stable results in regular tasks"
+      ]
+    },
+    "scoring": {
+      "pass_threshold": 0.8,
+      "weights": {
+        "length_ok": 0.35,
+        "trigger_hit": 0.4,
+        "forbidden_ok": 0.15,
+        "structure_ok": 0.1
+      }
+    }
+  },
+  "subtypes": {
+    "Conditional": {
+      "must_keywords_any": ["if", "unless", "provided that", "as long as", "in case"],
+      "must_patterns_any": ["\\bif\\b", "\\bunless\\b", "\\bprovided that\\b"],
+      "forbidden_patterns": ["\\bif\\b.*\\bif\\b", "\\bunless\\b.*\\bunless\\b"],
+      "min_trigger_hits": 1,
+      "max_clause_connectors": 2
+    },
+    "Causal": {
+      "must_keywords_any": ["because", "therefore", "thus", "hence", "as a result"],
+      "must_patterns_any": ["\\bbecause\\b", "\\btherefore\\b|\\bthus\\b|\\bhence\\b"],
+      "forbidden_patterns": ["\\bbecause\\b.*\\bbecause\\b"],
+      "min_trigger_hits": 1,
+      "max_clause_connectors": 2
+    },
+    "Concessive": {
+      "must_keywords_any": ["although", "even though", "though", "while", "whereas"],
+      "must_patterns_any": ["\\balthough\\b|\\beven though\\b|\\bthough\\b|\\bwhereas\\b"],
+      "forbidden_patterns": ["\\balthough\\b.*\\balthough\\b", "\\bthough\\b.*\\bthough\\b"],
+      "min_trigger_hits": 1,
+      "max_clause_connectors": 2
+    },
+    "Comparative": {
+      "must_keywords_any": ["better than", "rather than", "as", "more than", "less than", "compared to", "instead of"],
+      "must_patterns_any": ["\\bbetter than\\b|\\brather than\\b|\\bmore than\\b|\\bless than\\b|\\bcompared to\\b|\\binstead of\\b"],
+      "forbidden_patterns": ["\\bbetter than\\b.*\\bbetter than\\b", "\\bas\\b\\s+\\w+\\s+\\bas\\b.*\\bas\\b\\s+\\w+\\s+\\bas\\b"],
+      "min_trigger_hits": 1,
+      "max_comparative_chains": 1
+    },
+    "Purpose": {
+      "must_keywords_any": ["to", "in order to", "so that"],
+      "must_patterns_any": ["\\bin order to\\b|\\bso that\\b|\\bto\\s+\\w+"],
+      "forbidden_patterns": ["\\bin order to\\b.*\\bin order to\\b", "\\bso that\\b.*\\bso that\\b"],
+      "min_trigger_hits": 1,
+      "max_purpose_clauses": 1
+    },
+    "Passive": {
+      "must_keywords_any": ["is", "are", "was", "were", "made of", "designed for"],
+      "must_patterns_any": ["\\b(is|are|was|were)\\s+\\w+ed\\b", "\\bmade of\\b|\\bdesigned for\\b"],
+      "forbidden_patterns": ["\\b(is|are|was|were)\\s+\\w+ed\\b.*\\b(is|are|was|were)\\s+\\w+ed\\b"],
+      "min_trigger_hits": 1,
+      "max_passive_chains": 1
+    },
+    "Apposition_Parenthetical": {
+      "must_keywords_any": [","],
+      "must_patterns_any": [",\\s*[^,]{2,40},", "\\ba\\s+[^,]{1,20},\\s*"],
+      "forbidden_patterns": [",\\s*[^,]{2,40},\\s*[^,]{2,40},", "\\(.*\\(.*\\).*\\)"],
+      "min_trigger_hits": 1,
+      "max_parenthetical_segments": 1
+    },
+    "Interrogative": {
+      "must_keywords_any": ["do", "does", "can", "could", "would", "will", "is", "are", "?"],
+      "must_patterns_any": ["^\\s*(do|does|did|can|could|would|will|is|are|am)\\b", "\\?\\s*$"],
+      "forbidden_patterns": ["\\?\\s*\\w", "^\\s*i\\s"],
+      "min_trigger_hits": 1,
+      "must_end_with_question_mark": true
+    },
+    "Elliptical_Telegraphic": {
+      "must_keywords_any": [","],
+      "must_patterns_any": ["^[A-Za-z0-9\\-\\s,]+\\.?$", "\\b\\w+\\s*,\\s*\\w+"],
+      "forbidden_patterns": ["\\b(I am|I need|I want)\\b", "\\balthough\\b|\\bbecause\\b|\\bif\\b"],
+      "min_trigger_hits": 1,
+      "max_finite_verbs_proxy": 1
+    },
+    "Constraint_List": {
+      "must_keywords_any": ["with", "including", "featuring", "and"],
+      "must_patterns_any": ["\\b(with|including|featuring)\\b.*(,|\\band\\b).*(,|\\band\\b)"],
+      "forbidden_patterns": ["(,\\s*){4,}", "\\band\\b.*\\band\\b.*\\band\\b.*\\band\\b"],
+      "min_trigger_hits": 1,
+      "min_constraint_items": 3,
+      "max_constraint_items": 4
+    }
+  }
+}

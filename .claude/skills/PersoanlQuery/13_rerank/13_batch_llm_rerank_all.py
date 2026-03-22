@@ -96,7 +96,7 @@ class BatchEvaluator:
     """批量评估管理器"""
 
     # 配置常量
-    QUERY_FILENAME_PATTERN = "dual_queries_*.json"
+    QUERY_FILENAME_PATTERN = "queries_*.json"
     QUERY_ID_KEY = "query_id"
     GROUPBY_COLUMNS = ['sentiment', 'noise_level', 'retriever', 'llm']
     TIMESTAMP_FORMAT = '%Y%m%d_%H%M%S'
@@ -167,7 +167,7 @@ class BatchEvaluator:
             logger.error(f"查询目录不存在: {queries_dir}")
             return []
 
-        query_pattern = f"dual_queries_{self.user_id}.json" if self.user_id else self.QUERY_FILENAME_PATTERN
+        query_pattern = f"queries_{self.user_id}.json" if self.user_id else self.QUERY_FILENAME_PATTERN
         query_files = sorted(queries_dir.glob(query_pattern))
         if not query_files:
             logger.warning(f"未在 {queries_dir} 中找到匹配模式的文件: {query_pattern}")

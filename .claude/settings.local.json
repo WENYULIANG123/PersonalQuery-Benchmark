@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(lsof:*)",
+      "Bash(opencode session:*)",
+      "Bash(opencode run:*)",
+      "Bash(opencode:*)",
+      "Bash(netstat -tlnp)",
+      "Bash(taskoutput b5qm7ze9t:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
