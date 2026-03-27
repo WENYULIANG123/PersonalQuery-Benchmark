@@ -729,58 +729,8 @@ def main():
     # Get current directory
     current_dir = os.getcwd() or "/home/wlia0047/ar57/wenyu"
     
-    # 节点选择逻辑
-    selected_node = None
-    nodelist_option = ""
-    partition_option = ""
-    
-    if use_gpu:
-        print("[sbatch_wrapper] 🔍 正在查询GPU节点状态（检查空闲GPU）...", file=sys.stderr)
-        gpu_nodes = get_gpu_node_status()
-        
-        if gpu_nodes:
-            selected_node = select_best_gpu_node(gpu_nodes, prefer_gpu_type)
-            print_gpu_status(gpu_nodes, selected_node)
-            
-            if selected_node:
-                nodelist_option = f"#SBATCH --nodelist={selected_node['node']}"
-                print(f"[sbatch_wrapper] ✅ 已选择最佳GPU节点: {selected_node['node']} (空闲GPU: {selected_node.get('gpu_idle', 0)})", file=sys.stderr)
-            else:
-                print("[sbatch_wrapper] ⚠️  未能找到有空闲GPU的节点，将由SLURM自动分配", file=sys.stderr)
-        else:
-            print("[sbatch_wrapper] ⚠️  无法获取GPU节点状态，将由SLURM自动分配", file=sys.stderr)
-        
-        partition_option = "#SBATCH -p gpu"
-    else:
-        print("[sbatch_wrapper] 🔍 正在查询CPU节点状态...", file=sys.stderr)
-        cpu_nodes = get_cpu_node_status()
-        
-        if cpu_nodes:
-            selected_node = select_best_cpu_node(cpu_nodes)
-            
-            if cpu_nodes:
-                print("\n[sbatch_wrapper] 📊 CPU节点状态 (前10个):", file=sys.stderr)
-                print("-" * 60, file=sys.stderr)
-                print(f"{'节点':<15} {'CPU空闲/总数':<18} {'空闲率':<10}", file=sys.stderr)
-                print("-" * 60, file=sys.stderr)
-                
-                sorted_nodes = sorted(cpu_nodes, key=lambda n: (-n['cpu_idle'], -n['idle_ratio'], n['node']))[:10]
-                for node in sorted_nodes:
-                    marker = "✅ " if selected_node and node['node'] == selected_node['node'] else "   "
-                    cpu_ratio = f"{node['cpu_idle']}/{node['cpu_total']}"
-                    idle_pct = f"{node['idle_ratio']*100:.1f}%"
-                    print(f"{marker}{node['node']:<13} {cpu_ratio:<18} {idle_pct:<10}", file=sys.stderr)
-                print("-" * 60, file=sys.stderr)
-            
-            if selected_node:
-                nodelist_option = f"#SBATCH --nodelist={selected_node['node']}"
-                print(f"[sbatch_wrapper] ✅ 已选择最佳CPU节点: {selected_node['node']} (CPU空闲: {selected_node['cpu_idle']}/{selected_node['cpu_total']})", file=sys.stderr)
-            else:
-                print("[sbatch_wrapper] ⚠️  未能选择到CPU节点，将由SLURM自动分配", file=sys.stderr)
-        else:
-            print("[sbatch_wrapper] ⚠️  无法获取CPU节点状态，将由SLURM自动分配", file=sys.stderr)
-        
-        partition_option = "#SBATCH -p comp"
+    # 节点分配由 SLURM 自动选择
+    partition_option = "#SBATCH -p gpu" if use_gpu else "#SBATCH -p comp"
     
     # Create sbatch script
     memory_allocation = "#SBATCH --mem=32G" if is_python_script_command(original_command) else ""
@@ -794,11 +744,11 @@ def main():
 {memory_allocation}
 {gpu_allocation}
 {time_allocation}
-{nodelist_option}
 set -e
 source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh
 conda activate /home/wlia0047/ar57_scratch/wenyu/stark
 cd "{current_dir}"
+export PYTHONUNBUFFERED=1
 {original_command}
 """
     

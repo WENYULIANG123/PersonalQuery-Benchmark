@@ -31,7 +31,7 @@ from utils import retrievers
 def load_fullscale_metadata(metadata_file: str) -> Dict:
     """Load full metadata"""
     log_with_timestamp(f"Loading metadata from {metadata_file}...")
-    metadata = load_product_metadata(metadata_file)
+    metadata, _ = load_product_metadata(metadata_file, None)
     return metadata
 
 
@@ -305,7 +305,7 @@ def main():
     log_with_timestamp(f"[DEBUG] Category: {category}")
     
     # Load full-scale metadata
-    metadata_file = "/home/wlia0047/ar57/wenyu/result/personal_query/12_retrieval/document_cache/Arts_Crafts_and_Sewing_metadata.pkl"
+    metadata_file = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/12_retrieval/document_cache/Arts_Crafts_and_Sewing_metadata.pkl"
     log_with_timestamp(f"[DEBUG] Metadata file path: {metadata_file}")
     log_with_timestamp(f"[DEBUG] Metadata file exists: {os.path.exists(metadata_file)}")
     
@@ -323,7 +323,7 @@ def main():
             raise
     else:
         log_with_timestamp("[DEBUG] Metadata cache not found, loading from raw data...")
-        raw_metadata_file = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2023/metafiles2/meta_Arts_Crafts_and_Sewing.json.gz"
+        raw_metadata_file = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz"
         log_with_timestamp(f"[DEBUG] Raw metadata file: {raw_metadata_file}")
         metadata = load_fullscale_metadata(raw_metadata_file)
     
@@ -336,7 +336,7 @@ def main():
     # Compute document hash for cache keys
     log_with_timestamp(f"[DEBUG] Computing document hash...")
     doc_hash = compute_document_hash(documents)
-    cache_dir = "/home/wlia0047/ar57/wenyu/result/personal_query/12_retrieval/retriever_cache"
+    cache_dir = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/12_retrieval/retriever_cache"
     log_with_timestamp(f"[DEBUG] Creating cache directory...")
     os.makedirs(cache_dir, exist_ok=True)
     log_with_timestamp(f"Document hash: {doc_hash}")

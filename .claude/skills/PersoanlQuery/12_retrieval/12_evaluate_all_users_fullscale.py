@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""
-Full-scale dense retrieval evaluation with all modules integrated.
-"""
-
-#!/usr/bin/env python3
-"""
-Full-scale dense retrieval evaluation with all modules integrated.
-"""
+"""Full-scale dense retrieval evaluation with all modules integrated."""
 
 # ===== Standard Library Imports =====
 import sys
@@ -45,6 +38,7 @@ from utils import utils
 from utils import retrievers
 
 log_with_timestamp = utils.log_with_timestamp
+log_progress = lambda msg: print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True, file=sys.stderr)
 load_product_metadata = utils.load_product_metadata
 load_reviews_for_products = utils.load_reviews_for_products
 load_qa_for_products = utils.load_qa_for_products
@@ -352,7 +346,7 @@ class LazyEmbeddingCache:
     └─ e5_metadata_457d1871f380782c05a5d94e656fef2c.pkl
     """
     
-    def __init__(self, cache_dir: str = "/home/wlia0047/ar57/wenyu/result/personal_query/12_retrieval/retriever_cache"):
+    def __init__(self, cache_dir: str = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/12_retrieval/retriever_cache"):
         self.cache_dir = cache_dir
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
     
@@ -623,7 +617,7 @@ class LazyRetrieverWrapper:
     def __init__(self, retriever: Any, cache_dir: str = None):
         self.retriever = retriever
         self.retriever_name = self._infer_retriever_name(retriever)
-        self.cache_dir = cache_dir or "/home/wlia0047/ar57/wenyu/result/personal_query/12_retrieval/embedding_cache"
+        self.cache_dir = cache_dir or "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/12_retrieval/embedding_cache"
         
         # 创建embeddings索引（轻量级，不涉及GPU）
         self._build_embedding_index()
@@ -985,14 +979,13 @@ class RetrieverManager:
         self._cache_lock = threading.Lock()
         
         self.base_dir = "/home/wlia0047/ar57/wenyu"
-        self.cache_dir = os.path.join(self.base_dir, "result/personal_query/12_retrieval/retriever_cache")
+        self.cache_dir = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/12_retrieval/retriever_cache"
         os.makedirs(self.cache_dir, exist_ok=True)
         
         self.lazy_cache = LazyEmbeddingCache(self.cache_dir)
         
         self._available_retrievers = {
             'bm25': retrievers.BM25,
-            'tfidf': retrievers.TFIDFRetriever,
             'dirichlet': retrievers.DirichletPriorRetriever,
             'dense': retrievers.DenseRetriever,
             'ance': retrievers.ANCERetriever,
@@ -1220,48 +1213,48 @@ evaluate_retriever = utils.evaluate_retriever
 
 def _print_metrics_summary(retriever_name: str, user_id: str, mode: str, metrics: Dict, num_queries: int, clean_metrics: Dict = None):
     """Print detailed metrics for completed evaluation with optional noise robustness comparison"""
-    log_with_timestamp(f"  ✓ {retriever_name.upper()} ({user_id}, {mode}) - {num_queries} queries")
-    log_with_timestamp(f"    Precision:  P@1={metrics.get('P@1', 0):.4f}  P@3={metrics.get('P@3', 0):.4f}  P@5={metrics.get('P@5', 0):.4f}  P@10={metrics.get('P@10', 0):.4f}")
-    log_with_timestamp(f"    Recall:     R@1={metrics.get('R@1', 0):.4f}  R@3={metrics.get('R@3', 0):.4f}  R@5={metrics.get('R@5', 0):.4f}  R@10={metrics.get('R@10', 0):.4f}")
-    log_with_timestamp(f"    MAP:        M@1={metrics.get('MAP@1', 0):.4f}  M@3={metrics.get('MAP@3', 0):.4f}  M@5={metrics.get('MAP@5', 0):.4f}  M@10={metrics.get('MAP@10', 0):.4f}")
-    log_with_timestamp(f"    NDCG:      ND@1={metrics.get('NDCG@1', 0):.4f} ND@3={metrics.get('NDCG@3', 0):.4f} ND@5={metrics.get('NDCG@5', 0):.4f} ND@10={metrics.get('NDCG@10', 0):.4f}")
-    log_with_timestamp(f"    MRR:       MR@1={metrics.get('MRR@1', 0):.4f} MR@3={metrics.get('MRR@3', 0):.4f} MR@5={metrics.get('MRR@5', 0):.4f} MR@10={metrics.get('MRR@10', 0):.4f}")
-    
+    log_progress(f"  ✓ {retriever_name.upper()} ({user_id}, {mode}) - {num_queries} queries")
+    log_progress(f"    Precision:  P@1={metrics.get('P@1', 0):.4f}  P@3={metrics.get('P@3', 0):.4f}  P@5={metrics.get('P@5', 0):.4f}  P@10={metrics.get('P@10', 0):.4f}")
+    log_progress(f"    Recall:     R@1={metrics.get('R@1', 0):.4f}  R@3={metrics.get('R@3', 0):.4f}  R@5={metrics.get('R@5', 0):.4f}  R@10={metrics.get('R@10', 0):.4f}")
+    log_progress(f"    MAP:        M@1={metrics.get('MAP@1', 0):.4f}  M@3={metrics.get('MAP@3', 0):.4f}  M@5={metrics.get('MAP@5', 0):.4f}  M@10={metrics.get('MAP@10', 0):.4f}")
+    log_progress(f"    NDCG:      ND@1={metrics.get('NDCG@1', 0):.4f} ND@3={metrics.get('NDCG@3', 0):.4f} ND@5={metrics.get('NDCG@5', 0):.4f} ND@10={metrics.get('NDCG@10', 0):.4f}")
+    log_progress(f"    MRR:       MR@1={metrics.get('MRR@1', 0):.4f} MR@3={metrics.get('MRR@3', 0):.4f} MR@5={metrics.get('MRR@5', 0):.4f} MR@10={metrics.get('MRR@10', 0):.4f}")
+
     if 'F1@1' in metrics:
-        log_with_timestamp(f"    F1-Score:   F@1={metrics.get('F1@1', 0):.4f}  F@3={metrics.get('F1@3', 0):.4f}  F@5={metrics.get('F1@5', 0):.4f}  F@10={metrics.get('F1@10', 0):.4f}")
-        log_with_timestamp(f"    Hit Rate:   H@1={metrics.get('Hit@1', 0):.4f}  H@3={metrics.get('Hit@3', 0):.4f}  H@5={metrics.get('Hit@5', 0):.4f}  H@10={metrics.get('Hit@10', 0):.4f}")
-        log_with_timestamp(f"    Avg Rank:   AR@1={metrics.get('AvgRank@1', 0):.1f}  AR@3={metrics.get('AvgRank@3', 0):.1f}  AR@5={metrics.get('AvgRank@5', 0):.1f}  AR@10={metrics.get('AvgRank@10', 0):.1f}")
-    
+        log_progress(f"    F1-Score:   F@1={metrics.get('F1@1', 0):.4f}  F@3={metrics.get('F1@3', 0):.4f}  F@5={metrics.get('F1@5', 0):.4f}  F@10={metrics.get('F1@10', 0):.4f}")
+        log_progress(f"    Hit Rate:   H@1={metrics.get('Hit@1', 0):.4f}  H@3={metrics.get('Hit@3', 0):.4f}  H@5={metrics.get('Hit@5', 0):.4f}  H@10={metrics.get('Hit@10', 0):.4f}")
+        log_progress(f"    Avg Rank:   AR@1={metrics.get('AvgRank@1', 0):.1f}  AR@3={metrics.get('AvgRank@3', 0):.1f}  AR@5={metrics.get('AvgRank@5', 0):.1f}  AR@10={metrics.get('AvgRank@10', 0):.1f}")
+
     if 'DCG@1' in metrics:
-        log_with_timestamp(f"    DCG:       DCG@1={metrics.get('DCG@1', 0):.4f} DCG@3={metrics.get('DCG@3', 0):.4f} DCG@5={metrics.get('DCG@5', 0):.4f} DCG@10={metrics.get('DCG@10', 0):.4f}")
-        log_with_timestamp(f"    CG:        CG@1={metrics.get('CG@1', 0):.4f}  CG@3={metrics.get('CG@3', 0):.4f}  CG@5={metrics.get('CG@5', 0):.4f}  CG@10={metrics.get('CG@10', 0):.4f}")
-        log_with_timestamp(f"    ERR:       ERR@1={metrics.get('ERR@1', 0):.4f} ERR@3={metrics.get('ERR@3', 0):.4f} ERR@5={metrics.get('ERR@5', 0):.4f} ERR@10={metrics.get('ERR@10', 0):.4f}")
-        log_with_timestamp(f"    RBP:       RBP@1={metrics.get('RBP@1', 0):.4f} RBP@3={metrics.get('RBP@3', 0):.4f} RBP@5={metrics.get('RBP@5', 0):.4f} RBP@10={metrics.get('RBP@10', 0):.4f}")
-    
+        log_progress(f"    DCG:       DCG@1={metrics.get('DCG@1', 0):.4f} DCG@3={metrics.get('DCG@3', 0):.4f} DCG@5={metrics.get('DCG@5', 0):.4f} DCG@10={metrics.get('DCG@10', 0):.4f}")
+        log_progress(f"    CG:        CG@1={metrics.get('CG@1', 0):.4f}  CG@3={metrics.get('CG@3', 0):.4f}  CG@5={metrics.get('CG@5', 0):.4f}  CG@10={metrics.get('CG@10', 0):.4f}")
+        log_progress(f"    ERR:       ERR@1={metrics.get('ERR@1', 0):.4f} ERR@3={metrics.get('ERR@3', 0):.4f} ERR@5={metrics.get('ERR@5', 0):.4f} ERR@10={metrics.get('ERR@10', 0):.4f}")
+        log_progress(f"    RBP:       RBP@1={metrics.get('RBP@1', 0):.4f} RBP@3={metrics.get('RBP@3', 0):.4f} RBP@5={metrics.get('RBP@5', 0):.4f} RBP@10={metrics.get('RBP@10', 0):.4f}")
+
     if 'NDCG@10_stats' in metrics:
         stats = metrics['NDCG@10_stats']
-        log_with_timestamp(f"    NDCG@10 Distribution: median={stats.get('median', 0):.4f} p90={stats.get('p90', 0):.4f} p95={stats.get('p95', 0):.4f} std={stats.get('std', 0):.4f}")
-    
+        log_progress(f"    NDCG@10 Distribution: median={stats.get('median', 0):.4f} p90={stats.get('p90', 0):.4f} p95={stats.get('p95', 0):.4f} std={stats.get('std', 0):.4f}")
+
     if 'Performance_Distribution@10' in metrics:
         dist = metrics['Performance_Distribution@10']
-        log_with_timestamp(f"    Query Classification: High{dist.get('high', 0):.1f}% Medium{dist.get('medium', 0):.1f}% Low{dist.get('low', 0):.1f}%")
-    
+        log_progress(f"    Query Classification: High{dist.get('high', 0):.1f}% Medium{dist.get('medium', 0):.1f}% Low{dist.get('low', 0):.1f}%")
+
     if clean_metrics and mode == 'noisy':
         ndcg_clean = clean_metrics.get('NDCG@10', 0)
         ndcg_noisy = metrics.get('NDCG@10', 0)
         ndcg_delta = ndcg_noisy - ndcg_clean
         ndcg_rel = (ndcg_delta / ndcg_clean * 100) if ndcg_clean > 0 else 0
-        
+
         hit_clean = clean_metrics.get('Hit@10', 0)
         hit_noisy = metrics.get('Hit@10', 0)
         hit_delta = hit_noisy - hit_clean
-        
+
         robustness = 1 - abs(ndcg_delta) / ndcg_clean if ndcg_clean > 0 else 0
-        
-        log_with_timestamp(f"    Noise Robustness (vs Clean):")
-        log_with_timestamp(f"      NDCG@10: {ndcg_clean:.4f} → {ndcg_noisy:.4f} ({ndcg_delta:+.4f}, {ndcg_rel:+.1f}%)")
-        log_with_timestamp(f"      Hit@10:  {hit_clean:.4f} → {hit_noisy:.4f} ({hit_delta:+.4f})")
-        log_with_timestamp(f"      Robustness: {robustness:.1%}")
+
+        log_progress(f"    Noise Robustness (vs Clean):")
+        log_progress(f"      NDCG@10: {ndcg_clean:.4f} → {ndcg_noisy:.4f} ({ndcg_delta:+.4f}, {ndcg_rel:+.1f}%)")
+        log_progress(f"      Hit@10:  {hit_clean:.4f} → {hit_noisy:.4f} ({hit_delta:+.4f})")
+        log_progress(f"      Robustness: {robustness:.1%}")
 
 
 def _clean_user_old_results(user_id: str, output_dir: str):
@@ -1270,19 +1263,21 @@ def _clean_user_old_results(user_id: str, output_dir: str):
     if os.path.exists(user_output_dir):
         try:
             shutil.rmtree(user_output_dir)
-            log_with_timestamp(f"  🗑 Cleaned old results for {user_id}")
+            # Silent cleanup - detailed logs go to stderr, not .log file
+            print(f"  🗑 Cleaned old results for {user_id}", flush=True, file=sys.stderr)
         except Exception as e:
-            log_with_timestamp(f"  ⚠ Warning: Failed to clean old results for {user_id}: {e}")
+            print(f"  ⚠ Warning: Failed to clean old results for {user_id}: {e}", flush=True, file=sys.stderr)
 
 
+STAGE5_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis"
 STAGE6_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query"
 STAGE9_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/09_targeted_noisy_query"
 STAGE7_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/07_iterative_refinement"
-OUTPUT_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/12_retrieval"
+OUTPUT_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/12_retrieval"
 LOG_FILE = "/home/wlia0047/ar57/wenyu/stage12_fullscale_evaluation.log"
 
 RETRIEVER_NAMES = [
-    'bm25', 'tfidf', 'dirichlet',
+    'bm25', 'dirichlet',
     'dense', 'ance', 'bge', 'e5', 'minilm', 'mpnet', 'star',
     'colbert'
 ]
@@ -1290,7 +1285,7 @@ RETRIEVER_NAMES = [
 DEFAULT_K_VALUES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 100]
 
 RETRIEVER_TYPES = {
-    'sparse': ['bm25', 'tfidf'],
+    'sparse': ['bm25'],
     'dense': ['dense', 'ance', 'bge', 'e5', 'minilm', 'mpnet', 'star'],
     'late': []  # ['colbert']  ← 暂时禁用 ColBERT 评估
 }
@@ -1327,7 +1322,7 @@ def find_users_with_queries() -> List[str]:
     for file_path in query_files:
         filename = os.path.basename(file_path)
         if filename.startswith("queries_") and filename.endswith(".json"):
-            user_id = filename[13:-5]
+            user_id = filename[8:-5]  # Skip "queries_" (8 chars) and ".json" (5 chars)
             users.append(user_id)
 
     stage7_pattern = os.path.join(STAGE7_DIR, "*_interative_query.json")
@@ -1425,110 +1420,68 @@ def load_stage7_clean_noisy_queries(user_id: str) -> Dict[str, List[Dict]]:
     return result
 
 
-def load_user_queries(user_id: str, query_mode: str = 'both') -> Dict[str, List[Dict]]:
-    query_file = os.path.join(STAGE9_DIR, f"noisy_queries_{user_id}.json")
-    
+def load_user_queries(user_id: str) -> List[Dict]:
+    """加载用户查询（兼容新旧两种格式）"""
+    query_file = os.path.join(STAGE6_DIR, f"queries_{user_id}.json")
+
     if not os.path.exists(query_file):
-        return {}
-    
+        return []
+
     with open(query_file, 'r') as f:
         data = json.load(f)
-    
-    queries = data.get('queries', [])
-    result = {'clean': [], 'noisy': [], 'stage7': [], 'stage7_clean': [], 'stage7_noisy': []}
-    
-    for q in queries:
+
+    queries = []
+
+    # 新格式：target_user_query 是字符串
+    if 'target_user_query' in data and isinstance(data.get('target_user_query'), str):
+        asin = data.get('asin', '')
+        query_text = data.get('target_user_query', '')
+        category = data.get('category', '')
+        selected_attrs = data.get('selected_attributes', [])
+
+        if query_text and asin:
+            queries.append({
+                'asin': asin,
+                'query': query_text,
+                'type': 'target',
+                'category': category,
+                'selected_attributes': selected_attrs,
+            })
+        return queries
+
+    # 旧格式：results 数组
+    results = data.get('results', [])
+    for q in results:
         asin = q.get('asin', '')
         if not asin:
             continue
-        
-        pq = q.get('personalized_query', {})
-        
-        clean_query_text = pq.get('original', '')
-        if clean_query_text and query_mode in ['both', 'clean', 'all']:
-            result['clean'].append({
+
+        tuq = q.get('target_user_query', {})
+        if isinstance(tuq, dict):
+            query_text = tuq.get('query', '')
+            selected_attrs = tuq.get('selected_attributes', [])
+        else:
+            query_text = str(tuq)
+            selected_attrs = []
+        category = q.get('category', '')
+
+        if query_text:
+            queries.append({
                 'asin': asin,
-                'query': clean_query_text,
+                'query': query_text,
                 'type': 'target',
-                'category': '',
-                'selected_attributes': [],
-                'is_noisy': False
+                'category': category,
+                'selected_attributes': selected_attrs,
             })
-        
-        if query_mode in ['both', 'noisy', 'all']:
-            noisy_query_text = pq.get('noisy', pq.get('original', ''))
-            if noisy_query_text:
-                result['noisy'].append({
-                    'asin': asin,
-                    'query': noisy_query_text,
-                    'type': 'target',
-                    'category': '',
-                    'selected_attributes': [],
-                    'is_noisy': True
-                })
-    
-    if query_mode in ['stage7', 'all']:
-        result['stage7'] = load_stage7_queries(user_id)
 
-    if query_mode in ['stage7_clean', 'stage7_noisy', 'stage7_both', 'all']:
-        stage7_pair = load_stage7_clean_noisy_queries(user_id)
-        if query_mode in ['stage7_clean', 'stage7_both', 'all']:
-            result['stage7_clean'] = stage7_pair.get('stage7_clean', [])
-        if query_mode in ['stage7_noisy', 'stage7_both', 'all']:
-            result['stage7_noisy'] = stage7_pair.get('stage7_noisy', [])
-
-    if query_mode == 'clean':
-        result['noisy'] = []
-        result['stage7'] = []
-    elif query_mode == 'noisy':
-        result['clean'] = []
-        result['stage7'] = []
-    elif query_mode == 'stage7':
-        result['clean'] = []
-        result['noisy'] = []
-        result['stage7_clean'] = []
-        result['stage7_noisy'] = []
-    elif query_mode == 'stage7_clean':
-        result['clean'] = []
-        result['noisy'] = []
-        result['stage7'] = []
-        result['stage7_noisy'] = []
-    elif query_mode == 'stage7_noisy':
-        result['clean'] = []
-        result['noisy'] = []
-        result['stage7'] = []
-        result['stage7_clean'] = []
-    elif query_mode == 'stage7_both':
-        result['clean'] = []
-        result['noisy'] = []
-        result['stage7'] = []
-
-    return result
+    return queries
 
 
-def _cache_path_for_mode(query_cache_root: str, retriever_name: str, user_id: str, mode: str) -> str:
-    if mode == 'clean':
-        subdir = 'stage6_clean_query'
-        suffix = 'clean'
-    elif mode == 'noisy':
-        subdir = 'stage6_noisy_query'
-        suffix = 'noisy'
-    elif mode == 'stage7_clean':
-        subdir = 'stage7_clean_query'
-        suffix = 'clean'
-    elif mode == 'stage7_noisy':
-        subdir = 'stage7_noisy_query'
-        suffix = 'noisy'
-    elif mode == 'stage7':
-        subdir = 'stage7_clean_query'
-        suffix = 'clean'
-    else:
-        raise ValueError(f"Unsupported mode: {mode}")
-
+def _cache_path_for_mode(query_cache_root: str, retriever_name: str, user_id: str) -> str:
     return os.path.join(
         query_cache_root,
-        subdir,
-        f"{retriever_name.lower()}_{user_id}_{suffix}_cache.pkl"
+        "stage6_query",
+        f"{retriever_name.lower()}_{user_id}_stage6_cache.pkl"
     )
 
 
@@ -1551,50 +1504,39 @@ def _evaluate_single_mode(retriever, retriever_name: str, user_id: str, mode: st
         return mode, {}
     
     try:
-        log_with_timestamp(f"[EVAL_MODE_START] {retriever_name}/{user_id} ({mode}): {len(queries)} queries, {len(all_asins)} products")
-        
-        # Load query cache if available (禁止编码，直接使用预生成缓存)
-        query_cache_root = "/home/wlia0047/ar57/wenyu/result/personal_query/12_retrieval/query_cache"
-        query_cache_file = _cache_path_for_mode(query_cache_root, retriever_name, user_id, mode)
+        log_progress(f"[EVAL_START] {retriever_name}/{user_id}: {len(queries)} queries, {len(all_asins)} products")
 
-        if not os.path.exists(query_cache_file):
-            legacy_cache_file = os.path.join(
-                query_cache_root,
-                f"{retriever_name.lower()}_{user_id}_{mode}_cache.pkl"
-            )
-            if os.path.exists(legacy_cache_file):
-                query_cache_file = legacy_cache_file
-        
+        query_cache_root = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/12_retrieval/query_cache"
+        query_cache_file = _cache_path_for_mode(query_cache_root, retriever_name, user_id)
+
         if os.path.exists(query_cache_file):
-            log_with_timestamp(f"  ✓ 加载查询缓存: {query_cache_file}")
+            log_progress(f"  ✓ 加载查询缓存: {query_cache_file}")
             retriever = retrievers.CachedRetriever(retriever, query_cache_file)
-            log_with_timestamp(f"  ✓ 已用 CachedRetriever 包装检索器 (禁止编码)")
         else:
-            log_with_timestamp(f"  ⚠️  查询缓存不存在: {query_cache_file}")
-            log_with_timestamp(f"  ⚠️  将使用原始检索器 (可能涉及编码)")
-        
+            log_progress(f"  ⚠️  查询缓存不存在: {query_cache_file}")
+
         try:
             cpu_percent = psutil.cpu_percent(interval=0.1)
             mem_info = psutil.virtual_memory()
             gpu_mem = torch.cuda.memory_allocated() / (1024**3) if torch.cuda.is_available() else 0
-            log_with_timestamp(f"  [RESOURCE_START] CPU: {cpu_percent}% | RAM: {mem_info.percent}% ({mem_info.used//(1024**3)}GB/{mem_info.total//(1024**3)}GB) | GPU: {gpu_mem:.2f}GB")
+            log_progress(f"  [RESOURCE_START] CPU: {cpu_percent}% | RAM: {mem_info.percent}% ({mem_info.used//(1024**3)}GB/{mem_info.total//(1024**3)}GB) | GPU: {gpu_mem:.2f}GB")
         except Exception as res_e:
-            log_with_timestamp(f"  [RESOURCE_LOG_FAILED] {type(res_e).__name__}: {str(res_e)}")
-        
+            log_progress(f"  [RESOURCE_LOG_FAILED] {type(res_e).__name__}: {str(res_e)}")
+
         # 调用修改后的evaluate_retriever，返回metrics和query_results
         metrics, query_results = evaluate_retriever(retriever, queries, all_asins, k_values, mode=mode, return_query_results=True)
-        
+
         _print_metrics_summary(retriever_name, user_id, mode, metrics, len(queries))
-        
+
         # Log system resources after evaluation
         try:
             cpu_percent = psutil.cpu_percent(interval=0.1)
             mem_info = psutil.virtual_memory()
             gpu_mem = torch.cuda.memory_allocated() / (1024**3) if torch.cuda.is_available() else 0
-            log_with_timestamp(f"  [RESOURCE_END] CPU: {cpu_percent}% | RAM: {mem_info.percent}% ({mem_info.used//(1024**3)}GB/{mem_info.total//(1024**3)}GB) | GPU: {gpu_mem:.2f}GB")
+            log_progress(f"  [RESOURCE_END] CPU: {cpu_percent}% | RAM: {mem_info.percent}% ({mem_info.used//(1024**3)}GB/{mem_info.total//(1024**3)}GB) | GPU: {gpu_mem:.2f}GB")
         except Exception as res_e:
-            log_with_timestamp(f"  [RESOURCE_LOG_FAILED] {type(res_e).__name__}: {str(res_e)}")
-        
+            log_progress(f"  [RESOURCE_LOG_FAILED] {type(res_e).__name__}: {str(res_e)}")
+
         output_data = {
             'user_id': user_id,
             'timestamp': datetime.now().isoformat(),
@@ -1628,10 +1570,10 @@ def _evaluate_single_mode(retriever, retriever_name: str, user_id: str, mode: st
             }
             with open(top10_output_file, 'w') as f:
                 json.dump(top10_data, f, indent=2, ensure_ascii=False)
-            log_with_timestamp(f"  ✓ 已保存top10结果: {top10_output_file}")
-        
-        log_with_timestamp(f"[EVAL_MODE_SUCCESS] {retriever_name}/{user_id} ({mode}) completed")
-        log_with_timestamp(f"  ✓ 已保存metrics: {output_file}")
+            log_progress(f"  ✓ 已保存top10结果: {top10_output_file}")
+
+        log_progress(f"[EVAL_MODE_SUCCESS] {retriever_name}/{user_id} ({mode}) completed")
+        log_progress(f"  ✓ 已保存metrics: {output_file}")
         return mode, metrics
         
     except Exception as e:
@@ -1663,104 +1605,28 @@ def evaluate_user_with_retriever(
     retriever,
     retriever_name: str,
     user_id: str,
-    user_queries: Dict[str, List[Dict]],
+    queries: List[Dict],
     all_asins: List[str],
     output_dir: str,
     k_values: List[int]
-) -> Dict[str, Dict]:
-    """并发评估多种查询模式，串行处理不同检索器和用户。"""
-    results = {}
-    
+) -> Dict:
+    """评估单个用户对单个检索器的查询。"""
     try:
-        log_with_timestamp(f"[RETRIEVER_EVAL_START] {retriever_name}/{user_id} - Submitting multi-mode evaluation tasks")
-        
-        non_empty_modes = [(mode, queries) for mode, queries in user_queries.items() if queries]
-        max_workers = max(1, min(3, len(non_empty_modes)))
+        log_progress(f"[RETRIEVER_EVAL_START] {retriever_name}/{user_id}: {len(queries)} queries")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
-            for mode, queries in non_empty_modes:
-                log_with_timestamp(f"[THREAD_SUBMIT] {retriever_name}/{user_id} ({mode}): {len(queries)} queries submitted to thread pool")
-                futures[mode] = executor.submit(
-                    _evaluate_single_mode,
-                    retriever, retriever_name, user_id, mode, queries,
-                    all_asins, output_dir, k_values
-                )
-            
-            log_with_timestamp(f"[WAITING_RESULTS] {retriever_name}/{user_id}: Waiting for {len(futures)} mode(s) to complete (timeout: 1800s)")
-            
-            for mode, future in futures.items():
-                try:
-                    log_with_timestamp(f"[THREAD_WAITING] {retriever_name}/{user_id} ({mode}): Waiting for result...")
-                    mode_result, metrics = future.result(timeout=1800)
-                    results[mode_result] = metrics
-                    log_with_timestamp(f"[THREAD_COMPLETED] {retriever_name}/{user_id} ({mode}): Successfully retrieved results")
-                    
-                except concurrent.futures.TimeoutError as te:
-                    log_with_timestamp(f"[TIMEOUT_ERROR] {retriever_name}/{user_id} ({mode}): TIMEOUT after 1800 seconds")
-                    log_with_timestamp(f"  Exception Type: TimeoutError")
-                    log_with_timestamp(f"  Exception Message: {str(te)}")
-                    log_with_timestamp(f"  [RESOURCE_AT_TIMEOUT] CPU: {psutil.cpu_percent(interval=0.1)}% | RAM: {psutil.virtual_memory().percent}%")
-                    if torch.cuda.is_available():
-                        log_with_timestamp(f"  [GPU_AT_TIMEOUT] GPU Memory: {torch.cuda.memory_allocated()/(1024**3):.2f}GB")
-                    
-                    # Log thread dump to diagnose deadlock
-                    import sys
-                    log_with_timestamp(f"  [THREAD_DUMP] Stuck thread(s):")
-                    for thread_id, frame in sys._current_frames().items():
-                        log_with_timestamp(f"    Thread {thread_id}:")
-                        for line in traceback.format_stack(frame):
-                            if line.strip():
-                                log_with_timestamp(f"      {line.strip()}")
-                
-                except Exception as e:
-                    log_with_timestamp(f"[THREAD_ERROR] {retriever_name}/{user_id} ({mode}): EXCEPTION occurred")
-                    log_with_timestamp(f"  Exception Type: {type(e).__name__}")
-                    log_with_timestamp(f"  Exception Message: {str(e)}")
-                    log_with_timestamp(f"  Exception Args: {e.args}")
-                    
-                    tb_lines = traceback.format_exc().split('\n')
-                    log_with_timestamp(f"  [FULL_TRACEBACK] ({len(tb_lines)} lines):")
-                    for i, line in enumerate(tb_lines):
-                        if line.strip():
-                            log_with_timestamp(f"    Line {i}: {line}")
-                    
-                    log_with_timestamp(f"  [RESOURCE_AT_THREAD_ERROR] CPU: {psutil.cpu_percent(interval=0.1)}% | RAM: {psutil.virtual_memory().percent}%")
-                    if torch.cuda.is_available():
-                        log_with_timestamp(f"  [GPU_AT_THREAD_ERROR] Allocated: {torch.cuda.memory_allocated()/(1024**3):.2f}GB | Reserved: {torch.cuda.memory_reserved()/(1024**3):.2f}GB")
-        
-        log_with_timestamp(f"[RETRIEVER_EVAL_DONE] {retriever_name}/{user_id}: Completed with {len(results)} mode(s)")
-        
-        if 'clean' in results and 'noisy' in results:
-            clean_metrics = results.get('clean')
-            noisy_metrics = results.get('noisy')
-            if clean_metrics and noisy_metrics:
-                _print_metrics_summary(retriever_name, user_id, 'noisy', noisy_metrics, len(user_queries.get('noisy', [])), clean_metrics=clean_metrics)
+        result, metrics = _evaluate_single_mode(
+            retriever, retriever_name, user_id, 'stage6', queries,
+            all_asins, output_dir, k_values
+        )
 
-        if 'stage7_clean' in results and 'stage7_noisy' in results:
-            stage7_clean_metrics = results.get('stage7_clean')
-            stage7_noisy_metrics = results.get('stage7_noisy')
-            if stage7_clean_metrics and stage7_noisy_metrics:
-                _print_metrics_summary(
-                    retriever_name,
-                    user_id,
-                    'noisy',
-                    stage7_noisy_metrics,
-                    len(user_queries.get('stage7_noisy', [])),
-                    clean_metrics=stage7_clean_metrics
-                )
+        log_progress(f"[RETRIEVER_EVAL_DONE] {retriever_name}/{user_id}: Completed")
         
+        return {'stage6': metrics}
+            
     except Exception as e:
-        log_with_timestamp(f"[RETRIEVER_EVAL_CRITICAL_ERROR] {retriever_name}/{user_id}: CRITICAL ERROR in thread pool management")
-        log_with_timestamp(f"  Exception Type: {type(e).__name__}")
-        log_with_timestamp(f"  Exception Message: {str(e)}")
-        
-        tb_lines = traceback.format_exc().split('\n')
-        for line in tb_lines:
-            if line.strip():
-                log_with_timestamp(f"  Traceback: {line}")
+        log_with_timestamp(f"[RETRIEVER_EVAL_ERROR] {retriever_name}/{user_id}: {type(e).__name__}: {str(e)}")
     
-    return results
+    return {}
 
 
 def evaluate_batch_fullscale(
@@ -1797,8 +1663,8 @@ def evaluate_batch_fullscale(
     valid_users = []
     
     for user_id in user_ids:
-        queries = load_user_queries(user_id, mode)
-        if any(queries.values()):
+        queries = load_user_queries(user_id)
+        if queries:
             user_queries_map[user_id] = queries
             valid_users.append(user_id)
         else:
@@ -1814,7 +1680,7 @@ def evaluate_batch_fullscale(
     logger.info(f"Converting {len(all_asins)} metadata entries to document format...")
     documents = []
     for i, asin in enumerate(all_asins_list):
-        if i % 50000 == 0:
+        if i % 100000 == 0:
             logger.info(f"  Processed {i}/{len(all_asins_list)}")
         
         if asin in metadata:
@@ -1881,93 +1747,87 @@ def evaluate_batch_fullscale(
     logger.info(f"  Dense ({len(RETRIEVER_TYPES['dense'])}): {', '.join(RETRIEVER_TYPES['dense'])}")
     logger.info(f"  Late ({len(RETRIEVER_TYPES['late'])}): {', '.join(RETRIEVER_TYPES['late'])}")
     
-    logger.info("\n[SERIAL_USERS] Users processed serially (one user completes before next starts)")
-    logger.info("[SELECTIVE_CONCURRENCY] Within user: Sparse: 8 workers → Dense: 1 worker (CPU vs GPU-bound)")
-    
+    logger.info("\n[SERIAL_RETRIEVERS] Retrievers processed serially (one retriever completes all users before next starts)")
+    logger.info("[CONCURRENT_USERS] Within retriever: Users processed concurrently (Sparse: 8 workers, Dense: 4 workers)")
+
     sparse_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix='sparse')
-    dense_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix='dense')
-    
+    dense_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix='dense')
+
     try:
-        for user_idx, user_id in enumerate(valid_users, 1):
-            logger.info(f"\n[USER_START] Processing user {user_idx}/{len(valid_users)}: {user_id}")
-            
-            for retriever_type in RETRIEVER_ORDER:
-                executor = sparse_executor if retriever_type == 'sparse' else dense_executor
-                phase_name = retriever_type.upper()
-                
-                logger.info(f"  [{phase_name}_START] Evaluating {len(RETRIEVER_TYPES[retriever_type])} {retriever_type} retrievers...")
-                
-                futures_for_phase = []
-                
-                for retriever_name in RETRIEVER_TYPES[retriever_type]:
-                    if retriever_name in retrievers:
-                        retriever = retrievers[retriever_name]
-                        future = executor.submit(
-                            evaluate_user_with_retriever,
-                            retriever,
-                            retriever_name,
-                            user_id,
-                            user_queries_map[user_id],
-                            all_asins_list,
-                            OUTPUT_DIR,
-                            DEFAULT_K_VALUES
-                        )
-                        futures_for_phase.append((future, user_id, retriever_name, retriever_type))
-                
-                for future, user_id_inner, retriever_name, retriever_type_inner in futures_for_phase:
+        # 外层循环：按检索器顺序处理
+        for retriever_type in RETRIEVER_ORDER:
+            executor = sparse_executor if retriever_type == 'sparse' else dense_executor
+            phase_name = retriever_type.upper()
+
+            logger.info(f"\n{'=' * 80}")
+            logger.info(f"[{phase_name}_PHASE_START] Processing all {len(RETRIEVER_TYPES[retriever_type])} {retriever_type} retrievers...")
+            logger.info(f"{'=' * 80}")
+
+            for retriever_name in RETRIEVER_TYPES[retriever_type]:
+                if retriever_name not in retrievers:
+                    continue
+
+                retriever = retrievers[retriever_name]
+                retriever_user_count = len(valid_users)
+
+                logger.info(f"\n[RETRIEVER_START] {retriever_name.upper()}: Processing {retriever_user_count} users")
+
+                # 为该检索器提交所有用户的任务
+                futures_for_retriever = []
+
+                for user_idx, user_id in enumerate(valid_users, 1):
+                    future = executor.submit(
+                        evaluate_user_with_retriever,
+                        retriever,
+                        retriever_name,
+                        user_id,
+                        user_queries_map[user_id],
+                        all_asins_list,
+                        OUTPUT_DIR,
+                        DEFAULT_K_VALUES
+                    )
+                    futures_for_retriever.append((future, user_id, retriever_name, retriever_type))
+
+                # 等待该检索器所有用户完成
+                retriever_completed = 0
+                for future, user_id_inner, retriever_name_inner, retriever_type_inner in futures_for_retriever:
                     try:
-                        logger.info(f"  [FUTURE_WAITING] {retriever_name} ({retriever_type_inner}) for {user_id_inner}: Waiting for result (timeout: 1800s)...")
                         user_results = future.result(timeout=1800)
-                        results['succeeded'][user_id_inner].append(retriever_name)
+                        results['succeeded'][user_id_inner].append(retriever_name_inner)
                         completed += 1
-                        logger.info(f"  [FUTURE_COMPLETED] {retriever_name} ({retriever_type_inner}) for {user_id_inner}: ✓ SUCCESS")
-                        
-                        if completed % 5 == 0:
-                            logger.info(f"  Progress: {completed}/{total_evaluations} ({100*completed/total_evaluations:.1f}%)")
-                            
+                        retriever_completed += 1
+
+                        # 仅每100个用户输出一次进度
+                        if retriever_completed % 100 == 0:
+                            logger.info(f"  Progress [{retriever_name_inner}]: {retriever_completed}/{retriever_user_count} ({100*retriever_completed/retriever_user_count:.1f}%)")
+
                     except concurrent.futures.TimeoutError as te:
-                        logger.error(f"  ✗ TIMEOUT: {retriever_name} ({retriever_type_inner}) for {user_id_inner} - exceeded 1800 seconds")
-                        logger.error(f"    Exception Type: TimeoutError")
-                        logger.error(f"    [RESOURCE_AT_TIMEOUT] CPU: {psutil.cpu_percent(interval=0.1)}% | RAM: {psutil.virtual_memory().percent}%")
-                        if torch.cuda.is_available():
-                            logger.error(f"    [GPU_AT_TIMEOUT] GPU Memory: {torch.cuda.memory_allocated()/(1024**3):.2f}GB / Reserved: {torch.cuda.memory_reserved()/(1024**3):.2f}GB")
-                        results['failed'][user_id_inner].append(retriever_name)
+                        logger.error(f"  ✗ TIMEOUT: {user_id_inner} ({retriever_name_inner}) - exceeded 1800 seconds")
+                        results['failed'][user_id_inner].append(retriever_name_inner)
                         completed += 1
-                        
+                        retriever_completed += 1
+
                     except Exception as e:
-                        logger.error(f"  ✗ FAILED: {retriever_name} ({retriever_type_inner}) for {user_id_inner}")
-                        logger.error(f"    Exception Type: {type(e).__name__}")
-                        logger.error(f"    Exception Message: {str(e)}")
-                        logger.error(f"    Exception Args: {e.args}")
-                        
-                        tb_list = traceback.format_exc().split('\n')
-                        logger.error(f"    [FULL_TRACEBACK] ({len(tb_list)} lines):")
-                        for i, tb_line in enumerate(tb_list):
-                            if tb_line.strip():
-                                logger.error(f"      [{i}] {tb_line}")
-                        
-                        try:
-                            cpu_p = psutil.cpu_percent(interval=0.1)
-                            mem = psutil.virtual_memory()
-                            logger.error(f"    [RESOURCE_AT_ERROR] CPU: {cpu_p}% | RAM: {mem.percent}% ({mem.used//(1024**3)}GB/{mem.total//(1024**3)}GB)")
-                            
-                            if torch.cuda.is_available():
-                                gpu_alloc = torch.cuda.memory_allocated() / (1024**3)
-                                gpu_resv = torch.cuda.memory_reserved() / (1024**3)
-                                try:
-                                    gpu_cached = torch.cuda.memory_cached() / (1024**3)
-                                    logger.error(f"    [GPU_AT_ERROR] Allocated: {gpu_alloc:.2f}GB | Reserved: {gpu_resv:.2f}GB | Cached: {gpu_cached:.2f}GB")
-                                except AttributeError:
-                                    logger.error(f"    [GPU_AT_ERROR] Allocated: {gpu_alloc:.2f}GB | Reserved: {gpu_resv:.2f}GB")
-                        except Exception as res_e:
-                            logger.error(f"    [RESOURCE_LOG_FAILED] {type(res_e).__name__}: {str(res_e)}")
-                        
-                        results['failed'][user_id_inner].append(retriever_name)
+                        logger.error(f"  ✗ FAILED: {user_id_inner} ({retriever_name_inner})")
+                        logger.error(f"    Exception: {type(e).__name__}: {str(e)}")
+                        results['failed'][user_id_inner].append(retriever_name_inner)
                         completed += 1
-                
-                logger.info(f"  [{phase_name}_DONE] {retriever_type.capitalize()} phase completed for {user_id}")
-            
-            logger.info(f"[USER_DONE] ✓ User {user_idx}/{len(valid_users)} ({user_id}) completed all evaluations")
+                        retriever_completed += 1
+
+                logger.info(f"[RETRIEVER_DONE] {retriever_name.upper()}: Completed {retriever_completed}/{retriever_user_count} users")
+
+                # 打印该检索器的三个复杂度等级查询指标比较
+                by_complexity, complexity_counts = load_retriever_results(
+                    OUTPUT_DIR, retriever_name, valid_users
+                )
+                print_retriever_complexity_summary(retriever_name, by_complexity, complexity_counts)
+
+            logger.info(f"[{phase_name}_PHASE_DONE] All {retriever_type} retrievers completed")
+
+        # 汇总统计
+        total_succeeded = sum(len(v) for v in results['succeeded'].values())
+        total_failed = sum(len(v) for v in results['failed'].values())
+        logger.info(f"\n[AGGREGATE] Succeeded: {total_succeeded}, Failed: {total_failed}")
     
     finally:
         sparse_executor.shutdown(wait=True)
@@ -1985,31 +1845,91 @@ def evaluate_batch_fullscale(
     return results
 
 
+def get_user_complexity(user_id):
+    """Get user complexity level (high1-high18) from stage6 query template."""
+    query_file = os.path.join(STAGE6_DIR, f"queries_{user_id}.json")
+    if os.path.exists(query_file):
+        try:
+            with open(query_file, 'r') as f:
+                data = json.load(f)
+            template = data.get('selected_subtype', '')
+            # Template to complexity mapping (18 HIGH variants)
+            if template in ['HIGH-1']:
+                return 'high1'
+            elif template in ['HIGH-2']:
+                return 'high2'
+            elif template in ['HIGH-3']:
+                return 'high3'
+            elif template in ['HIGH-4']:
+                return 'high4'
+            elif template in ['HIGH-5']:
+                return 'high5'
+            elif template in ['HIGH-6']:
+                return 'high6'
+            elif template in ['HIGH-7']:
+                return 'high7'
+            elif template in ['HIGH-8']:
+                return 'high8'
+            elif template in ['HIGH-9']:
+                return 'high9'
+            elif template in ['HIGH-10']:
+                return 'high10'
+            elif template in ['HIGH-11']:
+                return 'high11'
+            elif template in ['HIGH-12']:
+                return 'high12'
+            elif template in ['HIGH-13']:
+                return 'high13'
+            elif template in ['HIGH-14']:
+                return 'high14'
+            elif template in ['HIGH-15']:
+                return 'high15'
+            elif template in ['HIGH-16']:
+                return 'high16'
+            elif template in ['HIGH-17']:
+                return 'high17'
+            elif template in ['HIGH-18']:
+                return 'high18'
+            else:
+                return 'unknown'
+        except:
+            return 'unknown'
+    return 'unknown'
+
+
 def load_all_results(output_dir, user_ids):
     """Load all evaluation result files and aggregate metrics."""
     logger = logging.getLogger(__name__)
-    
+
     # Result structure: {retriever: {mode: {metric: value}}}
     aggregated = defaultdict(lambda: defaultdict(dict))
+    # Complexity-grouped: {complexity: {retriever: {mode: {metric: [values]}}}}
+    by_complexity = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+    complexity_counts = {f'high{i}': 0 for i in range(1, 19)}
+    complexity_counts['unknown'] = 0
     file_count = 0
-    
+
     for user_id in user_ids:
         user_dir = os.path.join(output_dir, user_id)
         if not os.path.exists(user_dir):
             continue
-        
+
+        # Get user complexity
+        complexity = get_user_complexity(user_id)
+        complexity_counts[complexity] = complexity_counts.get(complexity, 0) + 1
+
         for result_file in glob.glob(os.path.join(user_dir, "retrieval_*.json")):
             try:
                 filename = os.path.basename(result_file)
                 parts = filename.replace("retrieval_", "").replace("_fullscale.json", "").split("_")
-                
+
                 if len(parts) >= 2:
                     mode = parts[-1]
                     retriever = "_".join(parts[:-1])
-                    
+
                     with open(result_file, 'r') as f:
                         data = json.load(f)
-                    
+
                     if 'metrics' in data:
                         metrics = data['metrics']
                         for metric_key, metric_val in metrics.items():
@@ -2018,12 +1938,79 @@ def load_all_results(output_dir, user_ids):
                                 if key not in aggregated[retriever][mode]:
                                     aggregated[retriever][mode][key] = []
                                 aggregated[retriever][mode][key].append(metric_val)
-                    
+
+                                # Also track by complexity
+                                if key not in by_complexity[complexity][retriever][mode]:
+                                    by_complexity[complexity][retriever][mode][key] = []
+                                by_complexity[complexity][retriever][mode][key].append(metric_val)
+
                     file_count += 1
             except Exception as e:
                 logger.error(f"Error loading {result_file}: {e}")
-    
-    return aggregated, file_count
+
+    return aggregated, file_count, by_complexity, complexity_counts
+
+
+def load_retriever_results(output_dir, retriever_name, user_ids):
+    """Load evaluation results for a specific retriever, grouped by complexity."""
+    by_complexity = defaultdict(list)
+    complexity_counts = {f'high{i}': 0 for i in range(1, 19)}
+    complexity_counts['unknown'] = 0
+
+    for user_id in user_ids:
+        user_dir = os.path.join(output_dir, user_id)
+        if not os.path.exists(user_dir):
+            continue
+
+        complexity = get_user_complexity(user_id)
+        complexity_counts[complexity] += 1
+
+        result_file = os.path.join(user_dir, f"retrieval_{retriever_name}_stage6_fullscale.json")
+        if os.path.exists(result_file):
+            try:
+                with open(result_file, 'r') as f:
+                    data = json.load(f)
+                if 'metrics' in data and 'NDCG@10' in data['metrics']:
+                    by_complexity[complexity].append(data['metrics']['NDCG@10'])
+            except Exception:
+                pass
+
+    return by_complexity, complexity_counts
+
+
+def print_retriever_complexity_summary(retriever_name, by_complexity, complexity_counts):
+    """Print NDCG@10 comparison for three complexity levels for a specific retriever."""
+    levels = [f'high{i}' for i in range(1, 19)]
+    print(f"\n{'='*80}")
+    print(f"📊 [{retriever_name}] 各复杂度等级 NDCG@10 对比")
+    print(f"{'='*80}")
+
+    print(f"\n复杂度分布: ", end="")
+    total = sum(complexity_counts.values())
+    dist_str = ", ".join([f"{l}: {complexity_counts.get(l, 0)}" for l in levels])
+    print(f"{dist_str} (总计: {total})")
+
+    print(f"\n{'复杂度':<10} | {'NDCG@10':<12} | {'样本数':<8}")
+    print("-" * 50)
+
+    for level in levels:
+        values = by_complexity.get(level, [])
+        n_samples = len(values)
+        if n_samples > 0:
+            mean_val = sum(values) / n_samples
+            print(f"{level.upper():<10} | {mean_val:<12.4f} | {n_samples:<8}")
+        else:
+            print(f"{level.upper():<10} | {'N/A':<12} | {n_samples:<8}")
+
+    # Find best/worst
+    valid_levels = [(l, sum(by_complexity.get(l, [])) / len(by_complexity.get(l, [1])))
+                   for l in levels if by_complexity.get(l)]
+    if len(valid_levels) >= 2:
+        best = max(valid_levels, key=lambda x: x[1])
+        worst = min(valid_levels, key=lambda x: x[1])
+        print(f"最佳: {best[0].upper()}={best[1]:.4f}, 最差: {worst[0].upper()}={worst[1]:.4f}")
+
+    print("=" * 50)
 
 
 def compute_comparison_metrics(aggregated):
@@ -2266,11 +2253,192 @@ def print_comparison_report(comparison, has_both_modes=False):
     print("="*100)
 
 
+def print_complexity_report(by_complexity, complexity_counts):
+    """Print retrieval performance grouped by query complexity level (high1-high18)."""
+    print("\n" + "="*100)
+    print("📊 不同HIGH句式复杂度用户的检索性能对比".center(100))
+    print("="*100)
+
+    # Print complexity distribution
+    total = sum(complexity_counts.values())
+    print(f"\n复杂度分布:")
+    levels = [f'high{i}' for i in range(1, 19)]
+    for level in levels:
+        count = complexity_counts.get(level, 0)
+        pct = count / total * 100 if total > 0 else 0
+        print(f"  {level:<10}: {count:<6} ({pct:.1f}%)")
+
+    # Define metrics to display
+    metrics_to_show = ['NDCG@10', 'P@1', 'P@10', 'MAP@10', 'MRR@10', 'Hit@10']
+    levels = [f'high{i}' for i in range(1, 19)]
+
+    # Collect data: {complexity: {retriever: {metric: value}}}
+    data = {}
+    for complexity in levels:
+        data[complexity] = {}
+        if complexity not in by_complexity:
+            continue
+        for retriever, modes_data in by_complexity[complexity].items():
+            data[complexity][retriever] = {}
+            mode_data = modes_data.get('stage6', {})
+            if not mode_data:
+                mode_data = modes_data.get('clean', {})
+            for metric in metrics_to_show:
+                if metric in mode_data and mode_data[metric]:
+                    values = mode_data[metric]
+                    if isinstance(values, list) and len(values) > 0:
+                        data[complexity][retriever][metric] = sum(values) / len(values)
+
+    # Get all retrievers that have data
+    all_retrievers = set()
+    for complexity in levels:
+        if complexity in data:
+            all_retrievers.update(data[complexity].keys())
+    all_retrievers = sorted(all_retrievers)
+
+    if not all_retrievers:
+        print("\n⚠️  没有找到复杂度分组数据")
+        print("="*100)
+        return
+
+    # Print multi-metric comparison table for each complexity
+    for complexity in levels:
+        if complexity not in data or not data[complexity]:
+            continue
+        print(f"\n【{complexity.upper()}复杂度用户】")
+        print("─" * 100)
+
+        # Header
+        header = f"{'检索器':<12}"
+        for metric in metrics_to_show:
+            header += f" {metric:>10}"
+        print(header)
+        print("-" * 100)
+
+        # Data rows
+        for retriever in all_retrievers:
+            if retriever not in data[complexity]:
+                continue
+            row = f"{retriever:<12}"
+            for metric in metrics_to_show:
+                if metric in data[complexity][retriever]:
+                    row += f" {data[complexity][retriever][metric]:>10.4f}"
+                else:
+                    row += f" {'N/A':>10}"
+            print(row)
+
+    # Summary: best retriever per complexity
+    print(f"\n【最佳检索器推荐 (按复杂度)】")
+    print("─" * 100)
+    print(f"{'复杂度':<12} {'最佳检索器':<15} {'NDCG@10':>12} {'P@10':>12} {'MAP@10':>12}")
+    print("-" * 100)
+    for complexity in levels:
+        if complexity not in data or not data[complexity]:
+            continue
+        best_retriever = None
+        best_ndcg = -1
+        for retriever, metrics in data[complexity].items():
+            if 'NDCG@10' in metrics and metrics['NDCG@10'] > best_ndcg:
+                best_ndcg = metrics['NDCG@10']
+                best_retriever = retriever
+        if best_retriever:
+            m = data[complexity][best_retriever]
+            print(f"{complexity.upper():<12} {best_retriever:<15} {m.get('NDCG@10', 0):>12.4f} {m.get('P@10', 0):>12.4f} {m.get('MAP@10', 0):>12.4f}")
+
+    # Cross-complexity average comparison
+    print(f"\n【各检索器整体表现 (跨复杂度平均)】")
+    print("─" * 100)
+    header = f"{'检索器':<12}"
+    for metric in metrics_to_show:
+        header += f" {metric:>10}"
+    print(header)
+    print("-" * 100)
+
+    for retriever in all_retrievers:
+        row = f"{retriever:<12}"
+        for metric in metrics_to_show:
+            vals = []
+            for complexity in levels:
+                if complexity in data and retriever in data[complexity] and metric in data[complexity][retriever]:
+                    vals.append(data[complexity][retriever][metric])
+            if vals:
+                row += f" {sum(vals)/len(vals):>10.4f}"
+            else:
+                row += f" {'N/A':>10}"
+        print(row)
+
+    # Summary: 18 complexity levels cross-retrievers average
+    templates = {
+        'high1': 'Relative Clause',
+        'high2': 'Nested Clause',
+        'high3': 'Participial Structure',
+        'high4': 'Appositive Structure',
+        'high5': 'Prepositional Stacking',
+        'high6': 'Infinitival Structure',
+        'high7': 'Passive Structure',
+        'high8': 'Cleft Sentence',
+        'high9': 'Coordination-heavy',
+        'high10': 'Reduced Relative',
+        'high11': 'Right-branching',
+        'high12': 'Left-dislocation',
+        'high13': 'Existential Sentence',
+        'high14': 'Nominalization',
+        'high15': 'Wh-clause',
+        'high16': 'Inversion',
+        'high17': 'Modifier Stacking',
+        'high18': 'Parenthetical',
+    }
+    print(f"\n【十八个HIGH句式等级跨检索器平均值汇总】")
+    print("─" * 100)
+    header = f"{'复杂度':<20} {'模板':<25}"
+    for metric in metrics_to_show:
+        header += f" {metric:>10}"
+    print(header)
+    print("-" * 100)
+
+    complexity_avgs = {}
+    for complexity in levels:
+        if complexity not in data or not data[complexity]:
+            continue
+        row = f"{complexity.upper():<20} {templates.get(complexity, ''):<25}"
+        metric_avgs = []
+        for metric in metrics_to_show:
+            vals = []
+            for retriever in all_retrievers:
+                if retriever in data[complexity] and metric in data[complexity][retriever]:
+                    vals.append(data[complexity][retriever][metric])
+            if vals:
+                avg = sum(vals) / len(vals)
+                metric_avgs.append(avg)
+                row += f" {avg:>10.4f}"
+            else:
+                metric_avgs.append(0)
+                row += f" {'N/A':>10}"
+        complexity_avgs[complexity] = metric_avgs
+        print(row)
+
+    # Overall average
+    print("-" * 100)
+    overall_row = f"{'整体平均':<20} {'':25}"
+    for i, metric in enumerate(metrics_to_show):
+        all_vals = []
+        for complexity in levels:
+            if complexity in complexity_avgs:
+                all_vals.append(complexity_avgs[complexity][i])
+        if all_vals:
+            overall_row += f" {sum(all_vals)/len(all_vals):>10.4f}"
+        else:
+            overall_row += f" {'N/A':>10}"
+    print(overall_row)
+
+    print("\n" + "="*100)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Full-scale Retrieval Evaluation')
     parser.add_argument('--mode', default='both', choices=['clean', 'noisy', 'stage7', 'stage7_clean', 'stage7_noisy', 'stage7_both', 'both', 'all'])
     parser.add_argument('--parallel', type=int, default=1, help='Parallel (user, retriever) pairs (default: 1 = serial across retrievers/users, but parallel clean/noisy)')
-    parser.add_argument('--users', type=int, default=11, help='Number of users to evaluate')
+    parser.add_argument('--users', type=int, default=0, help='Number of users to evaluate (0=all users)')
     
     args = parser.parse_args()
     
@@ -2280,7 +2448,8 @@ def main():
     logger.info(f"Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("=" * 80)
     
-    user_ids = find_users_with_queries()[:args.users]
+    all_users = find_users_with_queries()
+    user_ids = all_users if args.users == 0 else all_users[:args.users]
     logger.info(f"Found {len(user_ids)} users")
     
     results = evaluate_batch_fullscale(
@@ -2296,12 +2465,15 @@ def main():
     
     # Load all results and print comparison report
     logger.info("\nLoading all results for comparison analysis...")
-    aggregated, file_count = load_all_results(OUTPUT_DIR, user_ids)
+    aggregated, file_count, by_complexity, complexity_counts = load_all_results(OUTPUT_DIR, user_ids)
     logger.info(f"Loaded {file_count} result files")
-    
+    logger.info(f"Complexity distribution: {complexity_counts}")
+
     if aggregated:
         comparison, has_both_modes = compute_comparison_metrics(aggregated)
         print_comparison_report(comparison, has_both_modes)
+        # Print complexity comparison
+        print_complexity_report(by_complexity, complexity_counts)
     else:
         logger.warning("No results found for comparison analysis")
 

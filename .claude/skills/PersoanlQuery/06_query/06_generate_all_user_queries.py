@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import importlib.util
+from collections import Counter
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -102,8 +103,8 @@ def assign_levels_normal(validated_users: Dict[str, Dict[str, str]], ratios: Dic
 
 
 def run_query_generation(template_module, user_id: str, profile_file: str, output_dir: str, seed: Optional[int] = None, forced_level: Optional[str] = None) -> Dict:
-    log_with_timestamp(f"\n[{user_id}] Starting template query generation...")
-    log_with_timestamp(f"[{user_id}]   Profile: {profile_file}")
+    # log_with_timestamp(f"\n[{user_id}] Starting template query generation...")
+    # log_with_timestamp(f"[{user_id}]   Profile: {profile_file}")
     
     try:
         out_fp = template_module.run_generation(
@@ -112,10 +113,10 @@ def run_query_generation(template_module, user_id: str, profile_file: str, outpu
             seed=seed,
             forced_level=forced_level,
         )
-        
-        log_with_timestamp(f"[{user_id}] ✓ Completed successfully: {out_fp}")
+
+        # log_with_timestamp(f"[{user_id}] ✓ Completed successfully: {out_fp}")
         return {'success': True, 'user_id': user_id}
-        
+
     except Exception as e:
         log_with_timestamp(f"[{user_id}] ✗ FAILED: {e}")
         return {'success': False, 'user_id': user_id, 'error': str(e)}
@@ -218,11 +219,6 @@ def main():
         'user_ids': None,
         'seed': None,
         'skip_summary': False,
-        'level_distribution': {
-            'low': 0.16,
-            'medium': 0.68,
-            'high': 0.16,
-        },
     }
 
     script_path = os.path.join(os.path.dirname(__file__), '06_generate_template_queries.py')
@@ -233,42 +229,43 @@ def main():
     spec.loader.exec_module(template_module)
 
     os.makedirs(config['output_dir'], exist_ok=True)
-    
+
     log_with_timestamp("="*80)
-    log_with_timestamp("Stage 6: Generate Template Queries from Stage5 (No LLM)")
+    log_with_timestamp("Stage 6: Generate Template Queries (Template Clustering + Cosine Similarity)")
     log_with_timestamp("="*80)
-    
+    log_with_timestamp("Step 1: Group 18 HIGH templates into low/medium/high groups")
+    log_with_timestamp("Step 2: Compute center feature vector for each group")
+    log_with_timestamp("Step 3: Match user to best group via cosine similarity")
+    log_with_timestamp("="*80)
+
     if config['user_ids']:
         user_ids = config['user_ids']
         log_with_timestamp(f"Processing {len(user_ids)} user(s) specified by --user-ids")
     else:
         user_ids = find_users_with_profiles(config['profile_dir'])
-    
+
     if not user_ids:
         log_with_timestamp("ERROR: No users to process!")
         sys.exit(1)
-    
+
     validated_users = validate_user_files(
         user_ids,
         config['profile_dir']
     )
-    
+
     if not validated_users:
         log_with_timestamp("ERROR: No valid users found!")
         sys.exit(1)
 
-    forced_levels = assign_levels_normal(validated_users, config['level_distribution'])
-    low_count = sum(1 for v in forced_levels.values() if v == 'low')
-    medium_count = sum(1 for v in forced_levels.values() if v == 'medium')
-    high_count = sum(1 for v in forced_levels.values() if v == 'high')
-    log_with_timestamp(f"Assigned complexity levels -> low={low_count}, medium={medium_count}, high={high_count}")
-    
     log_with_timestamp("="*80)
-    log_with_timestamp("Starting query generation...")
+    log_with_timestamp("Starting query generation (similarity-based template selection)...")
     log_with_timestamp("="*80)
-    
+
     failed_users = []
-    
+    level_counts = Counter()
+    total_users = len(validated_users)
+    processed = 0
+
     for user_id, files in validated_users.items():
         result = run_query_generation(
             template_module=template_module,
@@ -276,25 +273,41 @@ def main():
             profile_file=files['profile_file'],
             output_dir=config['output_dir'],
             seed=config['seed'],
-            forced_level=forced_levels.get(user_id),
+            forced_level=None,  # 使用基于相似度的自动选择
         )
-        
+
+        processed += 1
+        if processed % 100 == 0:
+            log_with_timestamp(f"Progress: {processed}/{total_users} users processed ({processed*100//total_users}%)")
+
         if not result['success']:
             failed_users.append(user_id)
-    
+
+        # 读取输出文件获取实际选择的级别
+        output_file = os.path.join(config['output_dir'], f'queries_{user_id}.json')
+        if os.path.exists(output_file):
+            try:
+                with open(output_file, 'r', encoding='utf-8') as f:
+                    user_data = json.load(f)
+                    level = user_data.get('selected_subtype', 'unknown')
+                    level_counts[level] += 1
+            except:
+                pass
+
     log_with_timestamp("="*80)
+    log_with_timestamp(f"Template selection distribution: {dict(level_counts.most_common(5))}")
     if failed_users:
         log_with_timestamp(f"WARNING: {len(failed_users)} users failed: {', '.join(failed_users)}")
     else:
         log_with_timestamp("All users completed successfully!")
-    
+
     if not config['skip_summary']:
         summary = generate_summary(config['output_dir'], list(validated_users.keys()))
-        
+
         if summary['processed_users'] == 0:
             log_with_timestamp("ERROR: No users were successfully processed!")
             sys.exit(1)
-    
+
     log_with_timestamp("="*80)
     log_with_timestamp("ALL PROCESSING COMPLETE!")
     log_with_timestamp("="*80)

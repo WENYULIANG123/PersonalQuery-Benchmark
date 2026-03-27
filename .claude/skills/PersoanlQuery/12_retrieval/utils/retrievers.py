@@ -941,17 +941,21 @@ class ColBERTRetriever:
 
 
 class TFIDFRetriever:
-    """TF-IDF retrieval as a baseline"""
+    """TF-IDF retrieval as a baseline with FAISS acceleration"""
     def __init__(self):
         self.doc_vectors = None
         self.feature_names = None
         self.doc_ids = []
         self.all_metadata = None
+        self.faiss_index = None
+        self._doc_vectors_dense = None
 
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
-        """Build TF-IDF index"""
-        log_with_timestamp("  Building TF-IDF index...")
+        """Build TF-IDF index with FAISS"""
+        log_with_timestamp("  Building TF-IDF index with FAISS...")
         from sklearn.feature_extraction.text import TfidfVectorizer
+        import faiss
+        import numpy as np
 
         self.doc_ids = [doc.get('asin', '') for doc in documents]
         self.all_metadata = all_metadata
@@ -961,7 +965,7 @@ class TFIDFRetriever:
 
         # 构建 TF-IDF 向量化器
         self.vectorizer = TfidfVectorizer(
-            max_features=5000,
+            max_features=20000,
             min_df=1,
             max_df=0.95,
             ngram_range=(1, 2),  # 使用 unigrams 和 bigrams
@@ -971,19 +975,36 @@ class TFIDFRetriever:
         self.doc_vectors = self.vectorizer.fit_transform(texts)
         self.feature_names = self.vectorizer.get_feature_names_out()
 
-        log_with_timestamp(f"  TF-IDF index built with {len(self.doc_ids)} docs, {len(self.feature_names)} features")
+        # 转换为密集向量并进行L2归一化（用于余弦相似度）
+        self._doc_vectors_dense = self.doc_vectors.toarray().astype('float32')
+        # 行归一化：每个文档向量的模为1，余弦相似度 = 内积
+        norms = np.linalg.norm(self._doc_vectors_dense, axis=1, keepdims=True)
+        norms[norms == 0] = 1e-8  # 避免除零
+        self._doc_vectors_dense = self._doc_vectors_dense / norms
+
+        # 创建FAISS索引（内积索引，因为向量已归一化）
+        d = self._doc_vectors_dense.shape[1]  # 特征维度
+        self.faiss_index = faiss.IndexFlatIP(d)
+        self.faiss_index.add(self._doc_vectors_dense)
+
+        log_with_timestamp(f"  TF-IDF index built with FAISS: {len(self.doc_ids)} docs, {d} features")
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """Search using TF-IDF"""
-        query_vector = self.vectorizer.transform([query])
+        """Search using TF-IDF with FAISS"""
+        import numpy as np
 
-        # 计算余弦相似度
-        from sklearn.metrics.pairwise import cosine_similarity
-        scores = cosine_similarity(query_vector, self.doc_vectors)[0]
+        query_vector = self.vectorizer.transform([query]).toarray().astype('float32')[0]
+        # 归一化查询向量
+        norm = np.linalg.norm(query_vector)
+        if norm > 0:
+            query_vector = query_vector / norm
+        query_vector = query_vector.reshape(1, -1)
 
-        results = [(self.doc_ids[i], scores[i]) for i in range(len(self.doc_ids))]
-        results.sort(key=lambda x: -x[1])
-        return results[:top_k]
+        # 使用FAISS搜索
+        scores, indices = self.faiss_index.search(query_vector, top_k)
+
+        results = [(self.doc_ids[idx], float(scores[0][i])) for i, idx in enumerate(indices[0])]
+        return results
 
 
 class DirichletPriorRetriever:
@@ -1748,8 +1769,8 @@ class CachedRetriever:
         if cache_file and os.path.exists(cache_file):
             with open(cache_file, 'rb') as f:
                 self.cache = pickle.load(f)
-            log_with_timestamp(f"  Loaded cache: {len(self.cache)} queries")
-    
+            # log_with_timestamp(f"  Loaded cache: {len(self.cache)} queries")
+
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using cached embedding or fallback to base retriever"""
         if query in self.cache:

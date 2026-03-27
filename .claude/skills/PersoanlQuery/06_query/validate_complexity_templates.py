@@ -113,7 +113,7 @@ def main() -> None:
     for fp in files:
         data = load_json(fp)
         user_id = data.get("user_id", "unknown")
-        top_level = str(data.get("selected_skeleton_level", "medium")).lower()
+        top_level = str(data.get("selected_subtype", "HIGH-1")).lower()
         for idx, item in enumerate(data.get("results", [])):
             tu = item.get("target_user_query", {})
             query = (tu.get("query") or "").strip()

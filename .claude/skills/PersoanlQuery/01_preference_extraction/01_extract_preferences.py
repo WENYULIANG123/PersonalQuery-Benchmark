@@ -1,1322 +1,1007 @@
 #!/usr/bin/env python3
 """
-Stage 1 升级版 v2: Preference Extraction + Aspect-Level Analysis
-基于学术最佳实践（ABSA论文、Amazon NAACL 2022、ACL 2025）
+Stage 1 v5: 5-Slot Product Attribute Extraction
 
-改进点：
-1. 添加置信度评分（Confidence Scoring）
-2. 检测隐式方面（Implicit Aspect Detection）
-3. 同时输出维度级别（21维度）和方面级别的数据
-4. 质量检查和数据验证
+提取 5 个标准槽位：
+- A1: Category (产品类型)
+- A2: Brand (品牌)
+- A3: Price (价格)
+- A4: Appearance (外观：颜色+风格)
+- A5: Usage (使用场景：for X)
 
-Input: reviews_{USER_ID}.json from Stage 0
-Output: preferences_{USER_ID}.json with dimensions + aspects + confidence scores
+Input: meta_Arts_Crafts_and_Sewing.json.gz
+Output: attributes_Arts_Crafts_and_Sewing.json
 """
 
 import os
 import sys
 import json
-import argparse
+import gzip
 import re
-import math
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Any, Tuple
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from multiprocessing import Pool, cpu_count
 
-sys.path.insert(0, "/home/wlia0047/ar57/wenyu/.claude/skills")
-from llm_client import LLMClient
-
-
-# ============================================================================
-# 防御性数据处理工具函数 - 100% 容错
-# ============================================================================
-
-def safe_list_len(value: Any, context: str = "") -> int:
-    """
-    计算列表长度 - 允许NaN（表示该维度无数据）
-    NaN会被记录但不会抛异常，返回0
-    """
-    if value is None:
-        raise TypeError(f"[{context}] Cannot get length of None value")
-    
-    if isinstance(value, (list, tuple)):
-        return len(value)
-    
-    if isinstance(value, float):
-        if math.isnan(value):
-            # NaN是有效数据，表示该维度无法提取
-            log_with_timestamp(f"[{context}] ⚠️  检测到NaN - 该维度无法从review中提取")
-            return 0
-        if math.isinf(value):
-            log_with_timestamp(f"[{context}] ⚠️  检测到Infinity")
-            return 0
-        raise TypeError(f"[{context}] Expected list, got float: {value}")
-    
-    if isinstance(value, dict):
-        raise TypeError(f"[{context}] Expected list/tuple, got dict with {len(value)} keys")
-    
-    raise TypeError(f"[{context}] Expected list/tuple, got {type(value).__name__}: {repr(value)[:100]}")
-
-def safe_dict_get(obj: Dict, key: str, context: str = "") -> Any:
-    """
-    从字典获取值 - 允许NaN通过（表示数据缺失）
-    """
-    if not isinstance(obj, dict):
-        raise TypeError(f"[{context}] Expected dict, got {type(obj).__name__}")
-    
-    if key not in obj:
-        raise KeyError(f"[{context}] Key '{key}' not found in dict. Available keys: {list(obj.keys())[:10]}")
-    
-    value = obj[key]
-    
-    if isinstance(value, float):
-        if math.isnan(value):
-            log_with_timestamp(f"[{context}] ⚠️  字典值为NaN")
-            return value
-        if math.isinf(value):
-            log_with_timestamp(f"[{context}] ⚠️  字典值为Infinity")
-            return value
-    
-    return value
-
-def ensure_string(value: Any, context: str = "") -> str:
-    """
-    确保值为字符串 - Fail-fast设计
-    非字符串类型立即抛出错误，暴露数据质量问题
-    """
-    if value is None:
-        raise TypeError(f"[{context}] Cannot convert None to string")
-    
-    if isinstance(value, str):
-        return value
-    
-    if isinstance(value, float):
-        if math.isnan(value):
-            raise ValueError(f"[{context}] Cannot convert NaN (float('nan')) to string")
-        if math.isinf(value):
-            raise ValueError(f"[{context}] Cannot convert Infinity (float('inf')) to string")
-        raise TypeError(f"[{context}] Expected str, got float: {value}")
-    
-    if isinstance(value, (int, bool)):
-        raise TypeError(f"[{context}] Expected str, got {type(value).__name__}: {value}")
-    
-    raise TypeError(f"[{context}] Expected str, got {type(value).__name__}: {repr(value)[:100]}")
-
-
-def safe_str_len(value: Any, context: str = "") -> int:
-    """
-    安全字符串长度计算 - Fail-fast设计
-    抛出明确的错误而非返回默认值
-    """
-    if value is None:
-        raise TypeError(f"[{context}] Cannot get length of None value")
-    
-    if isinstance(value, str):
-        return len(value)
-    
-    if isinstance(value, float):
-        if math.isnan(value):
-            raise ValueError(f"[{context}] Cannot get length of NaN (float('nan'))")
-        if math.isinf(value):
-            raise ValueError(f"[{context}] Cannot get length of Infinity (float('inf') or float('-inf'))")
-        raise TypeError(f"[{context}] Expected str, got float: {value}")
-    
-    if isinstance(value, (int, bool)):
-        raise TypeError(f"[{context}] Expected str, got {type(value).__name__}: {value}")
-    
-    raise TypeError(f"[{context}] Expected str, got {type(value).__name__}: {repr(value)[:100]}")
-
-# ============================================================================
-# 工具函数
-# ============================================================================
 
 def log_with_timestamp(message: str):
-    """带时间戳的日志输出"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}", flush=True)
 
 
-def parse_response(response: str, asin: str = "UNKNOWN") -> Optional[Dict]:
-    if not response:
-        log_with_timestamp(f"[{asin}] ❌ LLM 返回空响应")
+def extract_price(price_str: Any) -> Optional[str]:
+    """提取价格"""
+    if not price_str:
         return None
-    
-    log_with_timestamp(f"[{asin}] 📝 解析 LLM 响应 (长度: {len(response)} 字符)")
-    
-    try:
-        import re
-        json_str = None
-        
-        # 尝试1: 提取 ```json 块
-        if "```json" in response:
-            log_with_timestamp(f"[{asin}] 🔍 检测到 ```json 块")
-            match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
-            if match:
-                json_str = match.group(1)
-        
-        # 尝试2: 提取 ``` 块
-        elif "```" in response:
-            log_with_timestamp(f"[{asin}] 🔍 检测到 ``` 块")
-            match = re.search(r'```\s*(.*?)\s*```', response, re.DOTALL)
-            if match:
-                json_str = match.group(1)
-        
-        # 尝试3: 直接正则提取 JSON
-        else:
-            log_with_timestamp(f"[{asin}] 🔍 尝试直接正则提取 JSON")
-            match = re.search(r'\{.*\}', response, re.DOTALL)
-            if match:
-                json_str = match.group(0)
-        
-        # 尝试标准解析
-        if json_str:
-            try:
-                parsed = json.loads(json_str)
-                log_with_timestamp(f"[{asin}] ✅ JSON 解析成功")
-                return parsed
-            except json.JSONDecodeError:
-                pass
-        
-        # 尝试4: 宽松解析 - 修复常见错误（方案A第2步）
-        log_with_timestamp(f"[{asin}] 🔧 尝试宽松解析（修复常见错误）...")
-        if not json_str:
-            json_str = response
-        
-        fixed_str = json_str
-        fixed_str = re.sub(r'\bNEUTRAL\b', '"neutral"', fixed_str)
-        fixed_str = re.sub(r'\bPOSITIVE\b', '"positive"', fixed_str)
-        fixed_str = re.sub(r'\bNEGATIVE\b', '"negative"', fixed_str)
-        fixed_str = re.sub(r"(?<=[{,:\[])\s*'|'\s*(?=[}\],:])", '"', fixed_str)
-        
-        try:
-            parsed = json.loads(fixed_str)
-            log_with_timestamp(f"[{asin}] ✅ 宽松解析成功")
-            return parsed
-        except json.JSONDecodeError:
-            pass
-        
-        # 尝试5: 补完截断的 JSON（方案A第3步）
-        log_with_timestamp(f"[{asin}] 🔧 尝试补完截断的 JSON...")
-        if not fixed_str.rstrip().endswith('}'):
-            open_braces = fixed_str.count('{') - fixed_str.count('}')
-            open_brackets = fixed_str.count('[') - fixed_str.count(']')
-            if open_braces > 0:
-                fixed_str += '}' * open_braces
-            if open_brackets > 0:
-                fixed_str += ']' * open_brackets
-            
-            try:
-                parsed = json.loads(fixed_str)
-                log_with_timestamp(f"[{asin}] ✅ 补完后的 JSON 解析成功")
-                return parsed
-            except json.JSONDecodeError:
-                pass
-        
-        # 尝试6: 提取最外层对象（栈式解析，替代PCRE递归正则）
-        log_with_timestamp(f"[{asin}] 🔧 尝试提取最外层 JSON 对象...")
-        depth = 0
-        start = None
-        outermost_objects = []
-        for i, c in enumerate(fixed_str):
-            if c == '{':
-                if depth == 0:
-                    start = i
-                depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth == 0 and start is not None:
-                    outermost_objects.append(fixed_str[start:i+1])
-                    start = None
-        for obj_str in outermost_objects:
-            try:
-                parsed = json.loads(obj_str)
-                log_with_timestamp(f"[{asin}] ✅ 提取最外层对象成功")
-                return parsed
-            except:
-                pass
-        
-        log_with_timestamp(f"[{asin}] ⚠️  所有JSON解析尝试都失败了")
+    price_str = str(price_str).strip()
+    match = re.search(r'\$?([\d,]+\.?\d*)', price_str)
+    if match:
+        price = match.group(1).replace(',', '')
+        # 去掉末尾的句点
+        price = price.rstrip('.')
+        return price if price else None
+    return None
+
+
+def extract_price_from_text(text: str) -> Optional[str]:
+    """从文本（title/description/feature）中提取价格"""
+    if not text:
         return None
-    
-    except Exception as e:
-        log_with_timestamp(f"[{asin}] ❌ 异常: {type(e).__name__}: {str(e)}")
-        return None
+    # 匹配各种价格格式：$19.99, $1,299.00, 19.99 dollars, 1299 usd 等
+    match = re.search(r'\$[\d,]+\.?\d*', text)
+    if match:
+        price = match.group(0).replace('$', '').replace(',', '')
+        # 去掉末尾的句点
+        price = price.rstrip('.')
+        return price if price else None
+    # 匹配纯数字+单位
+    match = re.search(r'(\d+\.?\d*)\s*(dollars?|usd)', text, re.IGNORECASE)
+    if match:
+        price = match.group(1).rstrip('.')
+        return price if price else None
+    return None
 
 
-# ============================================================================
-# Phase 1 改进 1: 维度提取提示（保持原有）
-# ============================================================================
-
-def get_fixed_dimension_prompt():
-    """返回固定的21维度schema提示"""
-    
-    dimensions_schema = """
-## Fixed Dimension Schema (21 Dimensions, 7 Categories)
-
-You MUST extract preferences into these FIXED dimensions ONLY. Do NOT create new dimensions.
-
-### CRITICAL DIMENSION BOUNDARIES - Read Carefully
-
-**Product_Category vs Material_Composition:**
-- Product_Category: Product type/name (e.g., "glitter glue", "embossing folder", "die cut", "scissors")
-- Material_Composition: Raw material/ingredient (e.g., "plastic", "metal", "cotton", "leather", "silver-colored")
-
-**Ease_of_Use vs Compatibility:**
-- Ease_of_Use: How easy/convenient to use (e.g., "easy to use", "simple to assemble", "intuitive")
-- Compatibility: What systems/devices it works with (e.g., "works with Cuttlebug", "compatible with Sizzix")
-
-**Functionality vs Usage_Scenario:**
-- Functionality: What the product does/features (e.g., "cuts paper", "creates embossed effect")
-- Usage_Scenario: Where/how the user uses it (e.g., "for greeting cards", "at home", "for scrapbooking")
-
-### All 21 Dimensions:
-
-**Product_Attributes:**
-1. Product_Category - Product type/name
-2. Functionality - Product features/capabilities
-3. Material_Composition - Raw material/ingredient
-
-**Quality_Attributes:**
-4. Quality_Craftsmanship - Quality/workmanship
-5. Performance - Performance effectiveness
-6. Safety - Safety requirements
-
-**Appearance_Design:**
-7. Appearance_Color - Visual appearance
-8. Size_Dimensions - Size fit
-9. Style_Design - Style preference
-
-**User_Experience:**
-10. Comfort - Comfort level
-11. Ease_of_Use - Usability
-12. Portability - Portability
-
-**Usage_Scenarios:**
-13. Target_User - Intended user
-14. Usage_Scenario - Where/how to use
-15. Special_Purpose - Special use case
-
-**Price_Value:**
-16. Price - Price related
-17. Value - Value for money
-18. Packaging_Quantity - Packaging specs
-
-**Special_Requirements:**
-19. Compatibility - Device/system compatibility
-20. Special_User_Needs - Special user requirements
-21. Brand_Preference - Brand preference
-"""
-    
-    output_format = """
-## Output Format - CRITICAL JSON STRUCTURE
-
-You MUST output JSON with this EXACT nested structure. Pay very close attention to where each key belongs!
-
-{
-  "dimensions": {
-    "Product_Attributes": {
-      "Product_Category": [{"entity": "...", "sentiment": "positive/negative/neutral", "original_text": "...", "confidence": 0.95}],
-      "Functionality": [...],
-      "Material_Composition": [...]
-    },
-    "Quality_Attributes": {
-      "Quality_Craftsmanship": [...],
-      "Performance": [...],
-      "Safety": [...]
-    },
-    "Appearance_Design": {
-      "Appearance_Color": [...],
-      "Size_Dimensions": [...],
-      "Style_Design": [...]
-    },
-    "User_Experience": {
-      "Comfort": [...],
-      "Ease_of_Use": [...],
-      "Portability": [...]
-    },
-    "Usage_Scenarios": {
-      "Target_User": [...],
-      "Usage_Scenario": [...],
-      "Special_Purpose": [...]
-    },
-    "Price_Value": {
-      "Price": [...],
-      "Value": [...],
-      "Packaging_Quantity": [...]
-    },
-    "Special_Requirements": {
-      "Compatibility": [...],
-      "Special_User_Needs": [...],
-      "Brand_Preference": [...]
-    }
-  },
-  
-  "metadata": {
-    "extraction_metadata": {
-      "overall_confidence": 0.92,
-      "entity_count": 15,
-      "dimensions_found": 8
-    }
-  }
-}
-
-## CRITICAL INSTRUCTIONS FOR JSON NESTING (READ CAREFULLY!)
-
-1. TOP-LEVEL KEYS ONLY: "dimensions" and "metadata"
-   ✓ CORRECT: { "dimensions": {...}, "metadata": {...} }
-   ✗ WRONG: { "dimensions": {...}, "extraction_metadata": {...} }
-
-2. INSIDE "dimensions": 7 CATEGORY keys (Product_Attributes, Quality_Attributes, etc.)
-   ✓ CORRECT: "dimensions": { "Product_Attributes": {...} }
-   ✗ WRONG: "dimensions": { "extraction_metadata": {...} }
-
-3. INSIDE each CATEGORY: individual DIMENSION keys
-   ✓ CORRECT: "Product_Attributes": { "Product_Category": [...], "Functionality": [...] }
-   ✗ WRONG: "Product_Attributes": "some value"
-
-4. INSIDE each DIMENSION: MUST be a LIST of entity objects
-   ✓ CORRECT: "Product_Category": [{"entity": "glitter glue", "sentiment": "positive"}, ...]
-   ✗ WRONG: "Product_Category": {"entity": "glitter glue"}
-   ✗ WRONG: "Product_Category": "glitter glue"
-
-5. "metadata" is SEPARATE TOP-LEVEL KEY
-   ✓ CORRECT: { "dimensions": {...}, "metadata": {...} }
-   ✗ WRONG: { "dimensions": {..., "metadata": {...}} }
-
-6. INSIDE "metadata": put "extraction_metadata" with confidence scores
-   ✓ CORRECT: "metadata": { "extraction_metadata": { "overall_confidence": 0.92 } }
-   ✗ WRONG: "dimensions": { "extraction_metadata": { ... } }
-
-## EXAMPLES OF WRONG vs CORRECT
-
-❌ WRONG EXAMPLE 1 - extraction_metadata in wrong place:
-{
-  "dimensions": {
-    "Product_Attributes": {...},
-    "extraction_metadata": {...}  ← WRONG! This should NOT be inside dimensions
-  }
-}
-
-✓ CORRECT EXAMPLE 1:
-{
-  "dimensions": {
-    "Product_Attributes": {...}
-  },
-  "metadata": {
-    "extraction_metadata": {...}  ← CORRECT! Separate top-level key
-  }
-}
-
-❌ WRONG EXAMPLE 2 - Category as list instead of dict:
-{
-  "dimensions": {
-    "Product_Attributes": [...]  ← WRONG! Should be dict with dimensions inside
-  }
-}
-
-✓ CORRECT EXAMPLE 2:
-{
-  "dimensions": {
-    "Product_Attributes": {
-      "Product_Category": [...]  ← CORRECT! Category is dict, dimension values are lists
-    }
-  }
-}
-
-❌ WRONG EXAMPLE 3 - Dimension value not a list:
-{
-  "dimensions": {
-    "Product_Attributes": {
-      "Product_Category": "glitter glue"  ← WRONG! Should be list of objects
-    }
-  }
-}
-
-✓ CORRECT EXAMPLE 3:
-{
-  "dimensions": {
-    "Product_Attributes": {
-      "Product_Category": [{"entity": "glitter glue", "sentiment": "positive", "confidence": 0.95}]  ← CORRECT!
-    }
-  }
-}
-
-## IMPORTANT RULES:
-- Use EXACT dimension names with underscores: Product_Category, Quality_Craftsmanship, etc.
-- If no information for a dimension, use empty array: "Functionality": []
-- sentiment values MUST be one of: "positive", "negative", "neutral" (lowercase, in quotes)
-- confidence must be a number 0-1 (e.g., 0.95)
-- original_text must be quoted string containing evidence from the review
-- reviewer_id and user_type will be added by the extraction system
-
-## SUMMARY - THREE KEY NESTING LEVELS:
-Level 1: "dimensions" (dict) and "metadata" (dict) at top
-  ↓
-Level 2: Inside "dimensions": 7 categories (Product_Attributes, Quality_Attributes, ...) as dicts
-  ↓
-Level 3: Inside each category: dimensions as dicts, with VALUES being LISTS of entity objects
-"""
-    
-    return dimensions_schema, output_format
+def extract_product_type(category: List) -> Optional[str]:
+    """提取产品类型 - 取倒数第一个（最具体的类别），但需要长度合理"""
+    import re
+    if isinstance(category, list) and len(category) >= 1:
+        candidate = category[-1]
+        # 过滤掉过长的（可能是描述文本）和过短的
+        if candidate and 3 <= len(candidate) <= 50:
+            # 如果包含 &，取 & 前后更长的那部分
+            if ' & ' in candidate:
+                parts = candidate.split(' & ')
+                candidate = max(parts, key=len).strip()
+            # 去掉末尾标点符号
+            candidate = re.sub(r'[,，。.!?;：;]+$', '', candidate).strip()
+            return candidate if candidate else None
+        # 如果最后一个太长/太短，尝试倒数第二个
+        if len(category) >= 2:
+            candidate2 = category[-2]
+            if candidate2 and 3 <= len(candidate2) <= 50:
+                # 如果包含 &，取 & 前后更长的那部分
+                if ' & ' in candidate2:
+                    parts = candidate2.split(' & ')
+                    candidate2 = max(parts, key=len).strip()
+                # 去掉末尾标点符号
+                candidate2 = re.sub(r'[,，。.!?;：;]+$', '', candidate2).strip()
+                return candidate2 if candidate2 else None
+    return None
 
 
-# ============================================================================
-# Phase 1 改进 2: 方面级别提示（新增）
-# ============================================================================
+def extract_use_case(title: str, description: str, feature: List) -> Optional[str]:
+    """提取使用场景 - 使用扩充关键词列表（优化版）"""
+    import re
 
-def get_aspect_extraction_prompt():
-    """返回方面级别的提取提示"""
-    
-    aspect_prompt = """
-## Aspect-Level Extraction (补充维度提取)
-
-除了上述21维度分类，还应识别评论中的核心"方面"(aspects)。
-
-方面定义：评论中显式或隐式提到的产品特性、属性或用户评价。
-
-对每个主要方面，输出：
-{
-  "aspect": "方面表述（如 'glitter glue', 'fast drying'）",
-  "aspect_sentiment": "POSITIVE / MIXED / NEGATIVE",
-  "confidence": 0.95,
-  "is_implicit": false,
-  "evidence_spans": ["支持文本1", "支持文本2"],
-  "dimension_mapping": "对应的21维度（如 Product_Category）"
-}
-
-### 显式方面示例：
-- "Great glitter glue" → aspect: "glitter glue", is_implicit: false
-- "Fast drying time" → aspect: "drying time", is_implicit: false
-
-### 隐式方面示例（需要推理）：
-- "It's too expensive" → aspect: "price", is_implicit: true, reasoning: 隐喻成本问题
-- "Broke after one week" → aspect: "durability", is_implicit: true, reasoning: 隐喻品质问题
-- "Easy to use" → aspect: "ease_of_use", is_implicit: false (可能是显式的)
-
-### 隐式方面的关键词模式：
-
-**Price-related (隐式价格):**
-- expensive, costly, pricey, broke the bank, overpriced
-- deal, bargain, value, worth, bang for buck
-
-**Quality-related (隐式质量):**
-- broke, stopped working, fell apart, defective
-- lasted only X days/months, failed quickly
-
-**Durability-related (隐式耐用性):**
-- worn out, faded, deteriorated, degraded
-- holding up, still going strong
-
-**Functionality-related (隐式功能):**
-- doesn't work, failed to, unable to, can't
-- performs well, does the job, gets the job done
-
-限制：最多提取5个主要方面。优先提取显式方面。
-
-## Output Format
-
-{
-  "aspects": [
-    {
-      "aspect": "glitter glue",
-      "aspect_sentiment": "POSITIVE",
-      "confidence": 0.95,
-      "is_implicit": false,
-      "evidence_spans": ["Great glitter glue", "works beautifully"],
-      "dimension_mapping": "Product_Category"
-    },
-    ...
-  ]
-}
-
-IMPORTANT:
-- confidence 范围: 0-1
-- is_implicit: 是否为隐式方面
-- 最多返回5个方面
-"""
-    
-    return aspect_prompt
-
-
-# ============================================================================
-# Phase 1 改进 2.5: 规则基础备选提取（方案 C - 100% 容错）
-# ============================================================================
-
-def rule_based_extraction(review_text: str, product_title: str) -> Dict:
-    """
-    当 LLM 提取失败时的规则基础备选提取（方案 C）
-    确保即使 LLM 完全失败，也能返回有效数据
-    """
-    
-    dimensions = {}
-    aspects = []
-    
-    # 基础维度列表
-    fixed_categories = [
-        'Product_Attributes', 'Quality_Attributes', 'Appearance_Design',
-        'User_Experience', 'Usage_Scenarios', 'Price_Value', 'Special_Requirements'
+    # 场景关键词列表（扩充版 - 同时包含带for和不带的版本）
+    scene_keywords = [
+        # 人物群体
+        'for kids', 'for children', 'for beginners', 'for professionals',
+        'for men', 'for women', 'for teens', 'for adults', 'for seniors',
+        'for students', 'for teachers', 'for artists', 'for babies', 'for toddlers',
+        'kids', 'children', 'beginners', 'professionals', 'men', 'women',
+        'teens', 'adults', 'seniors', 'students', 'teachers', 'artists',
+        # 场所/地点
+        'for home', 'for office', 'for school', 'for classroom', 'for studio',
+        'for workshop', 'for outdoor', 'for indoor', 'for garden', 'for bedroom',
+        'for kitchen', 'for bathroom', 'for garage', 'for playroom',
+        'home', 'office', 'school', 'classroom', 'studio', 'workshop',
+        'outdoor', 'indoor', 'garden', 'bedroom', 'kitchen', 'bathroom',
+        # 活动/用途
+        'for travel', 'for camping', 'for hiking', 'for commuting',
+        'for exercise', 'for fitness', 'for sport', 'for sports', 'for running',
+        'for cycling', 'for swimming', 'for yoga', 'for meditation', 'for painting',
+        'for drawing', 'for sewing', 'for crafting', 'for scrapbooking',
+        'for jewelry', 'for knitting', 'for crocheting', 'for embroidery',
+        'for quilting', 'for woodworking', 'for gardening', 'for cooking',
+        'for baking', 'for photography', 'for writing', 'for journaling',
+        'travel', 'camping', 'hiking', 'commuting', 'exercise', 'fitness',
+        'sport', 'sports', 'running', 'cycling', 'swimming', 'yoga', 'meditation',
+        'painting', 'drawing', 'sewing', 'crafting', 'scrapbooking', 'jewelry',
+        'knitting', 'crocheting', 'embroidery', 'quilting', 'woodworking',
+        'gardening', 'cooking', 'baking', 'photography', 'writing', 'journaling',
+        # 场合/事件
+        'for gift', 'for party', 'for wedding', 'for birthday', 'for christmas',
+        'for holiday', 'for seasonal', 'for easter', 'for halloween',
+        'for thanksgiving', 'for valentine', 'for anniversary',
+        'gift', 'party', 'wedding', 'birthday', 'christmas', 'holiday',
+        'seasonal', 'easter', 'halloween', 'thanksgiving', 'valentine',
+        # DIY/手工相关
+        'diy', 'handmade', 'craft', 'crafts', 'making', 'creating',
+        'decorating', 'decoration',
+        'for soap making', 'for candle making', 'for cake decorating',
+        'for polymer clay', 'for modeling', 'for sculpture', 'for mosaic',
+        'for origami', 'for needlework', 'for weaving', 'for macrame',
+        'for leather craft', 'for metal work', 'for wire work',
+        'for doll making', 'for toy making', 'for model making',
+        'for printmaking', 'for block printing', 'for screen printing',
+        'for monogramming', 'for monogram', 'for cross stitch',
+        'soap making', 'candle making', 'cake decorating', 'polymer clay',
+        'modeling', 'sculpture', 'mosaic', 'origami', 'needlework',
+        'weaving', 'macrame', 'leather craft', 'metal work', 'wire work',
+        'doll making', 'toy making', 'model making', 'printmaking',
+        'block printing', 'screen printing', 'monogramming', 'cross stitch',
+        # 儿童相关
+        'for kids crafts', 'for kids art', 'for kids activities',
+        'for children crafts', 'for school projects', 'for educational',
+        'kids crafts', 'kids art', 'kids activities', 'children crafts',
+        'school projects', 'educational',
+        # 工具用途
+        'for cutting', 'for trimming', 'for shaping', 'for polishing',
+        'for sanding', 'for carving', 'for etching',
+        'cutting', 'trimming', 'shaping', 'polishing', 'sanding', 'carving', 'etching',
+        # 组织/存储
+        'for organizing', 'for storage', 'for display', 'for presentation',
+        'organizing', 'storage', 'display', 'presentation',
+        # Arts & Crafts常见用途
+        'applique', 'stamping', 'beading', 'jewelry making', 'yarn',
+        'quilt', 'papercraft', 'calligraphy', 'coloring', 'sculpting',
+        'molding', 'casting', 'floral', 'arrangement',
+        # 补充常见词
+        'paper', 'card', 'cards', 'scrapbook', 'stamp', 'die cut',
+        'vinyl', 'fabric', 'leather', 'wood', 'metal', 'clay',
+        'candle', 'soap', 'resin', 'glitter', 'ribbon', 'bow',
+        'frame', 'photo', 'picture', 'sign', 'label', 'tag',
+        'party', 'wedding', 'bridal', 'baby', 'shower',
+        'christmas', 'holiday', 'easter', 'halloween', 'thanksgiving',
+        'beads', 'jewelry', 'bracelet', 'necklace', 'earring',
+        'keychain', 'pendant', 'charm', ' Findings',
+        'felt', 'foam', 'rubber', 'plastic', 'ceramic', 'glass',
     ]
-    
-    # 初始化维度结构
-    for cat in fixed_categories:
-        dimensions[cat] = {}
-    
-    # 规则1: 从产品标题提取产品类别
-    title_words = product_title.lower().split()
-    if title_words:
-        entity = {
-            'entity': product_title,
-            'sentiment': 'neutral',
-            'original_text': f"Product: {product_title}",
-            'confidence': 0.7
-        }
-        if 'Product_Attributes' not in dimensions:
-            dimensions['Product_Attributes'] = {}
-        dimensions['Product_Attributes']['Product_Category'] = [entity]
-        aspects.append({
-            'aspect': product_title.split()[0],
-            'aspect_sentiment': 'neutral',
-            'confidence': 0.6,
-            'is_implicit': True
-        })
-    
-    # 规则2: 从评论提取情感极性和关键词
-    review_lower = review_text.lower()
-    
-    sentiment_keywords = {
-        'positive': ['good', 'great', 'excellent', 'amazing', 'love', 'perfect', 'best', 'wonderful', 'fantastic'],
-        'negative': ['bad', 'terrible', 'awful', 'horrible', 'hate', 'worst', 'poor', 'worst'],
+
+    # 场景关键词到输出标签的映射
+    scene_map = {
+        # 人物群体
+        'for kids': 'Kids', 'for children': 'Children', 'for beginners': 'Beginners',
+        'for professionals': 'Professional', 'for men': 'Men', 'for women': 'Women',
+        'for teens': 'Teens', 'for adults': 'Adults', 'for seniors': 'Seniors',
+        'for students': 'Students', 'for teachers': 'Teachers', 'for artists': 'Artists',
+        'kids': 'Kids', 'children': 'Children', 'beginners': 'Beginners',
+        'professionals': 'Professional', 'men': 'Men', 'women': 'Women',
+        'teens': 'Teens', 'adults': 'Adults', 'seniors': 'Seniors',
+        'students': 'Students', 'teachers': 'Teachers', 'artists': 'Artists',
+        # 场所/地点
+        'for home': 'Home', 'for office': 'Office', 'for school': 'School',
+        'for classroom': 'Classroom', 'for studio': 'Studio', 'for workshop': 'Workshop',
+        'for outdoor': 'Outdoor', 'for indoor': 'Indoor', 'for garden': 'Garden',
+        'for bedroom': 'Bedroom', 'for kitchen': 'Kitchen', 'for bathroom': 'Bathroom',
+        'for garage': 'Garage', 'for playroom': 'Playroom',
+        'home': 'Home', 'office': 'Office', 'school': 'School',
+        'classroom': 'Classroom', 'studio': 'Studio', 'workshop': 'Workshop',
+        'outdoor': 'Outdoor', 'indoor': 'Indoor', 'garden': 'Garden',
+        'bedroom': 'Bedroom', 'kitchen': 'Kitchen', 'bathroom': 'Bathroom',
+        'garage': 'Garage', 'playroom': 'Playroom',
+        # 活动/用途
+        'for travel': 'Travel', 'for camping': 'Camping', 'for hiking': 'Hiking',
+        'for commuting': 'Commuting', 'for exercise': 'Exercise', 'for fitness': 'Fitness',
+        'for sport': 'Sports', 'for sports': 'Sports', 'for running': 'Running',
+        'for cycling': 'Cycling', 'for swimming': 'Swimming', 'for yoga': 'Yoga',
+        'for meditation': 'Meditation', 'for painting': 'Painting', 'for drawing': 'Drawing',
+        'for sewing': 'Sewing', 'for crafting': 'Crafting', 'for scrapbooking': 'Scrapbooking',
+        'for jewelry': 'Jewelry', 'for knitting': 'Knitting', 'for crocheting': 'Crocheting',
+        'for embroidery': 'Embroidery', 'for quilting': 'Quilting', 'for woodworking': 'Woodworking',
+        'for gardening': 'Gardening', 'for cooking': 'Cooking', 'for baking': 'Baking',
+        'for photography': 'Photography', 'for writing': 'Writing', 'for journaling': 'Journaling',
+        'travel': 'Travel', 'camping': 'Camping', 'hiking': 'Hiking',
+        'commuting': 'Commuting', 'exercise': 'Exercise', 'fitness': 'Fitness',
+        'sport': 'Sports', 'sports': 'Sports', 'running': 'Running',
+        'cycling': 'Cycling', 'swimming': 'Swimming', 'yoga': 'Yoga',
+        'meditation': 'Meditation', 'painting': 'Painting', 'drawing': 'Drawing',
+        'sewing': 'Sewing', 'crafting': 'Crafting', 'scrapbooking': 'Scrapbooking',
+        'jewelry': 'Jewelry', 'knitting': 'Knitting', 'crocheting': 'Crocheting',
+        'embroidery': 'Embroidery', 'quilting': 'Quilting', 'woodworking': 'Woodworking',
+        'gardening': 'Gardening', 'cooking': 'Cooking', 'baking': 'Baking',
+        'photography': 'Photography', 'writing': 'Writing', 'journaling': 'Journaling',
+        # 场合/事件
+        'for gift': 'Gift', 'for party': 'Party', 'for wedding': 'Wedding',
+        'for birthday': 'Birthday', 'for christmas': 'Christmas', 'for holiday': 'Holiday',
+        'for seasonal': 'Seasonal', 'for easter': 'Easter', 'for halloween': 'Halloween',
+        'for thanksgiving': 'Thanksgiving', 'for valentine': 'Valentine', 'for anniversary': 'Anniversary',
+        'gift': 'Gift', 'party': 'Party', 'wedding': 'Wedding', 'birthday': 'Birthday',
+        'christmas': 'Christmas', 'holiday': 'Holiday', 'seasonal': 'Seasonal',
+        'easter': 'Easter', 'halloween': 'Halloween', 'thanksgiving': 'Thanksgiving',
+        'valentine': 'Valentine', 'anniversary': 'Anniversary',
+        # DIY/手工相关
+        'diy': 'DIY', 'handmade': 'Handmade', 'craft': 'Crafting', 'crafts': 'Crafting',
+        'making': 'Making', 'creating': 'Creating', 'decorating': 'Decorating', 'decoration': 'Decorating',
+        'for soap making': 'Soap Making', 'for candle making': 'Candle Making',
+        'for cake decorating': 'Cake Decorating', 'for polymer clay': 'Polymer Clay',
+        'for modeling': 'Modeling', 'for sculpture': 'Sculpting', 'for mosaic': 'Mosaic',
+        'for origami': 'Origami', 'for needlework': 'Needlework', 'for weaving': 'Weaving',
+        'for macrame': 'Macrame', 'for leather craft': 'Leather Craft',
+        'for metal work': 'Metal Work', 'for wire work': 'Wire Work',
+        'for doll making': 'Doll Making', 'for toy making': 'Toy Making',
+        'for model making': 'Model Making', 'for printmaking': 'Printmaking',
+        'for block printing': 'Block Printing', 'for screen printing': 'Screen Printing',
+        'for monogramming': 'Monogramming', 'for monogram': 'Monogramming',
+        'for cross stitch': 'Cross Stitch',
+        'soap making': 'Soap Making', 'candle making': 'Candle Making',
+        'cake decorating': 'Cake Decorating', 'polymer clay': 'Polymer Clay',
+        'modeling': 'Modeling', 'sculpture': 'Sculpting', 'mosaic': 'Mosaic',
+        'origami': 'Origami', 'needlework': 'Needlework', 'weaving': 'Weaving',
+        'macrame': 'Macrame', 'leather craft': 'Leather Craft',
+        'metal work': 'Metal Work', 'wire work': 'Wire Work',
+        'doll making': 'Doll Making', 'toy making': 'Toy Making',
+        'model making': 'Model Making', 'printmaking': 'Printmaking',
+        'block printing': 'Block Printing', 'screen printing': 'Screen Printing',
+        'monogramming': 'Monogramming', 'cross stitch': 'Cross Stitch',
+        # 儿童相关
+        'for kids crafts': 'Kids Crafts', 'for kids art': 'Kids Art',
+        'for kids activities': 'Kids Activities', 'for children crafts': 'Kids Crafts',
+        'for school projects': 'School Projects', 'for educational': 'Educational',
+        'kids crafts': 'Kids Crafts', 'kids art': 'Kids Art',
+        'kids activities': 'Kids Activities', 'children crafts': 'Kids Crafts',
+        'school projects': 'School Projects', 'educational': 'Educational',
+        # 工具用途
+        'for cutting': 'Cutting', 'for trimming': 'Trimming', 'for shaping': 'Shaping',
+        'for polishing': 'Polishing', 'for sanding': 'Sanding', 'for carving': 'Carving',
+        'for etching': 'Etching',
+        'cutting': 'Cutting', 'trimming': 'Trimming', 'shaping': 'Shaping',
+        'polishing': 'Polishing', 'sanding': 'Sanding', 'carving': 'Carving', 'etching': 'Etching',
+        # 组织/存储
+        'for organizing': 'Organizing', 'for storage': 'Storage',
+        'for display': 'Display', 'for presentation': 'Presentation',
+        'organizing': 'Organizing', 'storage': 'Storage', 'display': 'Display', 'presentation': 'Presentation',
+        # Arts & Crafts
+        'applique': 'Applique', 'stamping': 'Stamping', 'beading': 'Beading',
+        'jewelry making': 'Jewelry Making', 'yarn': 'Yarn', 'quilt': 'Quilting',
+        'papercraft': 'Paper Craft', 'calligraphy': 'Calligraphy', 'coloring': 'Coloring',
+        'sculpting': 'Sculpting', 'molding': 'Molding', 'casting': 'Casting',
+        'floral': 'Floral', 'arrangement': 'Arrangement',
+        # 补充常见词
+        'paper': 'Paper Craft', 'card': 'Card Making', 'cards': 'Card Making',
+        'scrapbook': 'Scrapbooking', 'stamp': 'Stamping', 'die cut': 'Die Cutting',
+        'vinyl': 'Vinyl Craft', 'fabric': 'Fabric Craft', 'leather': 'Leather Craft',
+        'wood': 'Woodworking', 'metal': 'Metal Work', 'clay': 'Clay Craft',
+        'candle': 'Candle Making', 'soap': 'Soap Making', 'resin': 'Resin Craft',
+        'glitter': 'Glitter Craft', 'ribbon': 'Ribbon Craft', 'bow': 'Bow Making',
+        'frame': 'Framing', 'photo': 'Photo Craft', 'picture': 'Picture Craft',
+        'sign': 'Sign Making', 'label': 'Label Making', 'tag': 'Tag Making',
+        'party': 'Party', 'wedding': 'Wedding', 'bridal': 'Bridal', 'baby': 'Baby',
+        'shower': 'Shower',
+        'christmas': 'Christmas', 'holiday': 'Holiday', 'easter': 'Easter',
+        'halloween': 'Halloween', 'thanksgiving': 'Thanksgiving',
+        'beads': 'Beading', 'jewelry': 'Jewelry Making', 'bracelet': 'Jewelry Making',
+        'necklace': 'Jewelry Making', 'earring': 'Jewelry Making',
+        'keychain': 'Keychain Making', 'pendant': 'Jewelry Making',
+        'charm': 'Charm Making',
+        'felt': 'Felt Craft', 'foam': 'Foam Craft', 'rubber': 'Rubber Craft',
+        'plastic': 'Plastic Craft', 'ceramic': 'Ceramic Craft', 'glass': 'Glass Craft',
     }
-    
-    found_sentiments = set()
-    for sentiment, keywords in sentiment_keywords.items():
-        for keyword in keywords:
-            if keyword in review_lower:
-                found_sentiments.add(sentiment)
-    
-    # 规则3: 提取基本方面
-    aspect_keywords = {
-        'quality': ['good', 'bad', 'excellent', 'poor', 'quality'],
-        'durability': ['durable', 'break', 'last', 'broke'],
-        'price': ['expensive', 'cheap', 'price', 'cost'],
-        'design': ['design', 'color', 'style', 'look'],
-        'ease_of_use': ['easy', 'difficult', 'simple', 'complex'],
-    }
-    
-    for aspect_name, keywords in aspect_keywords.items():
-        for keyword in keywords:
-            if keyword in review_lower:
-                sentiment = 'positive' if any(s in review_lower for s in sentiment_keywords.get('positive', [])) else 'negative'
-                aspects.append({
-                    'aspect': aspect_name,
-                    'aspect_sentiment': sentiment,
-                    'confidence': 0.5,
-                    'is_implicit': True
-                })
-                break
-    
-    # 如果没有任何方面，至少添加一个通用方面
-    if not aspects:
-        aspects.append({
-            'aspect': 'overall',
-            'aspect_sentiment': 'neutral',
-            'confidence': 0.5,
-            'is_implicit': True
-        })
-    
-    return {
-        'dimensions': dimensions,
-        'aspects': aspects,
-        'metadata': {
-            'extraction_method': 'rule_based_fallback',
-            'is_fallback': True
-        }
-    }
 
+    # 清理文本
+    text = f"{title} {description}".lower()
+    if isinstance(feature, list):
+        text = f"{text} {' '.join(str(f) for f in feature)}"
 
-# ============================================================================
-# Phase 1 改进 2.8: JSON 格式验证与修复（新增）
-# ============================================================================
+    # 清理 HTML 标签
+    text = re.sub(r'<[^>]+>', ' ', text)
 
-def validate_dimensions_format(dimensions: Dict) -> Tuple[bool, Optional[str]]:
-    """
-    验证维度JSON格式是否正确
-    
-    返回：(is_valid, error_message)
-    """
-    if not isinstance(dimensions, dict):
-        return False, f"Dimensions must be dict, got {type(dimensions).__name__}"
-    
-    # 检查是否包含非法的顶级键
-    illegal_keys = {'extraction_metadata', 'overall_confidence', 'entity_count', 'dimensions_found'}
-    found_illegal = dimensions.keys() & illegal_keys
-    if found_illegal:
-        return False, f"Found illegal top-level keys in dimensions: {found_illegal}. These should be in metadata, not dimensions."
-    
-    # 验证每个维度类别
-    valid_categories = {
-        'Product_Attributes', 'Quality_Attributes', 'Appearance_Design',
-        'User_Experience', 'Usage_Scenarios', 'Price_Value', 'Special_Requirements'
-    }
-    
-    for category, category_data in dimensions.items():
-        if not isinstance(category_data, dict):
-            return False, f"Category '{category}' should be dict, got {type(category_data).__name__}"
-        
-        for dimension, entities in category_data.items():
-            if isinstance(entities, float) and math.isnan(entities):
-                continue  # NaN is allowed
-            if not isinstance(entities, list):
-                return False, f"Dimension '{category}.{dimension}' should be list, got {type(entities).__name__}"
-    
-    return True, None
+    # 快速字符串匹配 - 按长度降序排列优先匹配更长的词
+    for keyword in sorted(scene_keywords, key=len, reverse=True):
+        if keyword in text:
+            result = keyword
+            # 去掉 "for " 前缀（如果有）
+            if result.startswith('for '):
+                result = result[4:]
+            return result.capitalize()
 
-
-def generate_format_fix_prompt(original_response: str, error_message: str) -> str:
-    """
-    生成修复格式错误的重试提示
-    """
-    return f"""Your previous response had a JSON format error:
-ERROR: {error_message}
-
-Please fix the format and output ONLY the corrected JSON. Remember:
-- 'dimensions' must be a dict with categories (Product_Attributes, Quality_Attributes, etc.) as keys
-- Each category must contain dimensions with entity LISTS as values
-- 'extraction_metadata', 'overall_confidence', etc. should NOT appear as top-level keys in dimensions
-- Put metadata fields in the 'metadata' or 'extraction_metadata' key OUTSIDE of dimensions
-
-Output corrected JSON now:"""
-
-
-# ============================================================================
-# Phase 1 改进 3: 隐式方面检测（新增）
-# ============================================================================
-
-def detect_implicit_aspects(review_text: str) -> List[Dict]:
-    """
-    基于规则和LLM联合检测隐式方面
-    
-    隐式方面：评论中没有直接提到但可推理出来的方面
-    例如："It's so expensive" → implicit price aspect
-    """
-    
-    implicit_aspects = []
-    
-    # 基于规则的隐式方面检测模式
-    implicit_patterns = {
-        "Price": {
-            "keywords": ["expensive", "costly", "pricey", "broke the bank", "overpriced", "cheap", "affordable"],
-            "dimension": "Price",
-            "examples": ["太贵了", "很便宜", "不值这个价"]
-        },
-        "Durability": {
-            "keywords": ["broke", "stopped working", "fell apart", "lasted only", "broke after", "failed", "defective"],
-            "dimension": "Quality_Craftsmanship",
-            "examples": ["一周后坏了", "很快就坏了", "耐用性差"]
-        },
-        "Value": {
-            "keywords": ["deal", "bargain", "value", "worth", "worth the money", "bang for buck"],
-            "dimension": "Value",
-            "examples": ["物有所值", "超值", "不划算"]
-        },
-        "Functionality": {
-            "keywords": ["doesn't work", "failed to", "unable to", "can't", "wouldn't", "broken"],
-            "dimension": "Functionality",
-            "examples": ["不能用", "功能不工作", "坏掉了"]
-        }
-    }
-    
-    review_lower = review_text.lower()
-    
-    for aspect_name, pattern_info in implicit_patterns.items():
-        for keyword in pattern_info["keywords"]:
-            if keyword.lower() in review_lower:
-                # 找到隐式方面的证据
-                match_position = review_lower.find(keyword.lower())
-                # 提取周围的上下文（前后20个单词）
-                words = review_lower.split()
-                keyword_word_idx = len(review_lower[:match_position].split())
-                context_start = max(0, keyword_word_idx - 5)
-                context_end = min(len(words), keyword_word_idx + 5)
-                evidence = " ".join(words[context_start:context_end])
-                
-                implicit_aspects.append({
-                    "aspect": aspect_name.lower(),
-                    "aspect_sentiment": "NEGATIVE" if "broke" in keyword or "fail" in keyword else "MIXED",
-                    "confidence": 0.6,  # 隐式方面置信度通常较低
-                    "is_implicit": True,
-                    "evidence_spans": [evidence],
-                    "dimension_mapping": pattern_info["dimension"],
-                    "detection_method": "rule-based",
-                    "keyword_matched": keyword
-                })
-                break  # 每个aspect只添加一次
-    
-    return implicit_aspects
-
-
-# ============================================================================
-# Phase 1 核心改进：统一的提取函数
-# ============================================================================
-
-def extract_preferences_from_review_v2(review, product_title: str, user_type: str, asin: str = "UNKNOWN") -> Dict:
-    client = LLMClient()
-    
-    log_with_timestamp(f"[{asin}] 🔄 开始提取偏好 (user_type={user_type})")
-    
-    if isinstance(review, str):
-        reviewer_id = ''
-        review_text = review
-        rating = 0
-        review_len = safe_str_len(review_text, f'string_review_{asin}')
-        log_with_timestamp(f"[{asin}] 📝 评论来自字符串，长度: {review_len} 字符")
-    else:
-        if not isinstance(review, dict):
-            raise TypeError(f"[{asin}] Expected review to be str or dict, got {type(review).__name__}")
-        reviewer_id = review.get('reviewerID', '')
-        review_text = review.get('reviewText', '')
-        rating = review.get('overall', 0)
-        review_len = safe_str_len(review_text, f'dict_review_text_{asin}')
-        log_with_timestamp(f"[{asin}] 📝 评论来自字典，长度: {review_len} 字符，评分: {rating}")
-    
-    review_len = safe_str_len(review_text, f'review_for_validation_{asin}')
-    if review_len == 0:
-        log_with_timestamp(f"[{asin}] ⚠️  评论为空")
-        return {'dimensions': {}, 'aspects': []}
-    
-    review_text_strip_len = safe_str_len(review_text.strip(), f'review_text_strip_{asin}')
-    if review_text_strip_len < 10:
-        log_with_timestamp(f"[{asin}] ⚠️  评论过短: {review_text_strip_len} 字符")
-        return {'dimensions': {}, 'aspects': []}
-    
-    dimensions_schema, output_format = get_fixed_dimension_prompt()
-    aspect_prompt = get_aspect_extraction_prompt()
-    
-    combined_prompt = f"""Extract user preferences from this product review using BOTH dimension schema AND aspect extraction.
-
-**Product**: {product_title}
-**Rating**: {rating}/5
-**Review**: {review_text}
-
-{dimensions_schema}
-{output_format}
-
-{aspect_prompt}
-
-Output format: You MUST output JSON with BOTH dimensions and aspects sections.
-{{
-  "dimensions": {{ ... }},  # 21维度提取结果
-  "aspects": [ ... ]         # 方面提取结果
-}}
-
-Extract now. Output ONLY valid JSON, no explanation."""
-    
-    max_retries = 5
-    last_error = None
-    
-    for attempt in range(max_retries):
-        try:
-            if attempt == 0:
-                prompt_to_send = combined_prompt
-                log_with_timestamp(f"[{asin}] 🌐 调用 LLM API (prompt_len={len(combined_prompt)})")
-            else:
-                prompt_to_send = last_error if last_error else combined_prompt
-                log_with_timestamp(f"[{asin}] 🔄 重试 LLM 调用 (第 {attempt}/{max_retries - 1} 次重试)")
-            
-            response = client.call(prompt_to_send, max_tokens=4096)
-            
-            if not response or len(response.strip()) == 0:
-                log_with_timestamp(f"[{asin}] ⚠️  LLM 返回空响应")
-                last_error = combined_prompt
-                continue
-            
-            log_with_timestamp(f"[{asin}] ✅ LLM 响应收到 (len={len(response)})")
-            result = parse_response(response, asin)
-            
-            if not result:
-                log_with_timestamp(f"[{asin}] ⚠️  JSON 解析失败，重试 LLM")
-                last_error = combined_prompt
-                continue
-            
-            if "dimensions" not in result:
-                result["dimensions"] = {}
-            if "aspects" not in result:
-                result["aspects"] = []
-            
-            is_valid, error_msg = validate_dimensions_format(result.get("dimensions", {}))
-            if not is_valid:
-                log_with_timestamp(f"[{asin}] ⚠️  维度格式错误: {error_msg}")
-                last_error = generate_format_fix_prompt(response, error_msg or "unknown format error")
-                continue
-            
-            for category, category_data in result.get("dimensions", {}).items():
-                if not isinstance(category_data, dict):
-                    continue
-                for dimension, entities in category_data.items():
-                    if not isinstance(entities, list):
-                        continue
-                    for entity in entities:
-                        if not isinstance(entity, dict):
-                            continue
-                        entity['reviewer_id'] = reviewer_id
-                        entity['user_type'] = user_type
-            
-            for aspect in result.get("aspects", []):
-                aspect['reviewer_id'] = reviewer_id
-                aspect['user_type'] = user_type
-            
-            implicit_detected = detect_implicit_aspects(review_text)
-            explicit_aspects = {a.get('aspect'): a for a in result.get('aspects', [])}
-            for implicit_aspect in implicit_detected:
-                if implicit_aspect.get('aspect') not in explicit_aspects:
-                    result['aspects'].append(implicit_aspect)
-            
-            review_length = safe_str_len(review_text, f'metadata_review_length_{asin}')
-            result['metadata'] = {
-                'extraction_version': '2.0',
-                'reviewer_id': reviewer_id,
-                'user_type': user_type,
-                'review_length': review_length,
-                'rating': rating,
-                'explicit_aspects_count': len([a for a in result.get('aspects', []) if not a.get('is_implicit', False)]),
-                'implicit_aspects_count': len([a for a in result.get('aspects', []) if a.get('is_implicit', False)]),
-                'attempts': attempt + 1,
-                'timestamp': datetime.now().isoformat()
+    # 匹配 "used for" 或 "be used for" 模式，提取后面的内容作为场景
+    import re
+    # 匹配 "used for XXX" 或 "be used for XXX"
+    used_for_match = re.search(r'(?:be\s+)?used\s+for\s+([a-zA-Z][a-zA-Z\s]+?)(?:\s|,|\.|$)', text)
+    if used_for_match:
+        activity = used_for_match.group(1).strip()
+        # 清理并标准化
+        activity = re.sub(r'\s+', ' ', activity).strip()
+        if activity and len(activity) >= 3 and len(activity) <= 30:
+            # 标准化一些常见活动名称
+            activity_map = {
+                'doing': None, 'making': 'Making', 'creating': 'Creating',
+                'decorating': 'Decorating', 'decoration': 'Decorating',
+                'cutting': 'Cutting', 'shaping': 'Shaping', 'carving': 'Carving',
+                'painting': 'Painting', 'drawing': 'Drawing', 'sewing': 'Sewing',
+                'crafting': 'Crafting', 'scrapbooking': 'Scrapbooking',
+                'candle': 'Candle Making', 'soap': 'Soap Making',
+                'cake': 'Cake Decorating', 'clay': 'Clay Craft',
+                'all kinds of': None, 'various': None,
             }
-            
-            return result
-        
-        except Exception as e:
-            log_with_timestamp(f"[{asin}] ⚠️  LLM 调用异常 (attempt {attempt + 1}/{max_retries}): {type(e).__name__}: {str(e)[:80]}")
-            last_error = combined_prompt
-            continue
-    
-    log_with_timestamp(f"[{asin}] ❌ {max_retries} 次尝试全部失败，返回空结果")
-    return {
-        'dimensions': {},
-        'aspects': [],
-        'metadata': {
-            'error': f'All {max_retries} LLM attempts failed',
-            'extraction_version': '2.0',
-            'attempts': max_retries
-        }
+            if activity in activity_map:
+                return activity_map[activity]
+            # 返回首字母大写的结果
+            return activity.capitalize()
+
+    return None
+
+
+def extract_features(title: str, feature: List, tech1: str) -> List[str]:
+    """提取产品特性"""
+    features = []
+
+    if isinstance(feature, list):
+        for f in feature:
+            f_str = str(f).strip()
+            if f_str and len(f_str) > 3 and len(f_str) < 200:
+                # 清理 HTML 标签
+                f_str = re.sub(r'<[^>]+>', '', f_str).strip()
+                if f_str:
+                    features.append(f_str)
+
+    return features[:5]
+
+
+# ============ 预编译的关键词（只保留A4需要的）============
+import re as re_module
+
+# 表面特性
+SURFACE_SINGLE = {
+    'smooth', 'polished', 'glossy', 'matte', 'textured', 'grooved',
+    'non-slip', 'anti-slip', 'soft', 'shiny', 'bright', 'opaque',
+    'sheen', 'glow', 'silky', 'luster', 'lustrous', 'rough', 'slick',
+    'fleecy', 'fuzzy', 'sheer', 'gloss', 'dull', 'frosted',
+}
+SURFACE_MULTI = [re_module.compile(k) for k in ['non-stick', 'nonstick']]
+
+# 颜色
+COLOR_SINGLE = {
+    'black', 'white', 'red', 'blue', 'green', 'yellow', 'orange', 'purple',
+    'pink', 'brown', 'gray', 'grey', 'silver', 'gold', 'clear', 'transparent',
+    'ivory', 'cream', 'tan', 'coral', 'lavender', 'mint', 'turquoise',
+    'burgundy', 'maroon', 'olive', 'khaki', 'navy', 'jet', 'ruby', 'emerald',
+    'crystal', 'pearl', 'amber', 'bronze', 'copper', 'brass',
+}
+COLOR_MULTI_RE = re_module.compile(r'\b(rose gold|antique silver|antiqued brass|antique bronze|antiqued silver|crystal clear|royal blue|light blue|antique gold|emerald green|charcoal grey|jet black|ruby red|aqua blue|silver tone|golden yellow|antique copper|silver plated|gold plated|navy blue|sky blue|sea green|forest green|lime green|hot pink|bright red|dark blue|pale pink|midnight blue|pastel blue|pastel pink|pastel green|neon yellow|neon pink|neon green|neon orange|neon blue|military green|army green|pearl white|pearl pink)\b')
+
+# 形状/款式
+STYLE_SINGLE = {
+    'vintage', 'retro', 'antique', 'modern', 'classic', 'rustic',
+    'bohemian', 'minimalist', 'elegant', 'glamorous', 'sleek', 'cute',
+    'adorable', 'delicate', 'exquisite', 'handmade', 'craftsman',
+    'long', 'short', 'mini', 'tiny', 'large', 'small', 'big', 'thick', 'thin',
+    'round', 'square', 'oval', 'flat', 'curved', 'slim', 'compact', 'portable',
+}
+STYLE_MULTI_RE = re_module.compile(r'\b(heart-shaped|heart shape|star-shaped|star shape|round|l-shaped| u-shaped| o-shaped| t-shaped)\b')
+
+
+def _extract_keyword_set(single_set: set, multi_re_list: list, text: str) -> List[str]:
+    """从文本中提取关键词 - 单个词用集合匹配，多个词用正则匹配"""
+    found = []
+    # 单个词匹配（直接用集合操作，速度快）
+    text_lower = text.lower()
+    words = set(text_lower.split())
+    for kw in single_set:
+        if kw in words:
+            found.append(kw.capitalize())
+    # 多词匹配用正则
+    for re_pat in multi_re_list:
+        match = re_pat.search(text)
+        if match:
+            found.append(match.group(0).capitalize())
+    return list(dict.fromkeys(found))
+
+
+def extract_structured_features(feature: List, title: str = "") -> Dict[str, List[str]]:
+    """从 features 中拆分出结构化属性（只提取A4：颜色+表面特性）"""
+    # 合并所有 feature 文本
+    all_text = ' '.join(str(f) for f in feature) if isinstance(feature, list) else str(feature)
+    all_text = re_module.sub(r'<[^>]+>', ' ', all_text)
+
+    # 加入 title 到提取来源
+    if title:
+        all_text = title + ' ' + all_text
+
+    text_lower = all_text.lower()
+
+    # A4_appearance：只保留真正的颜色词，表面特性和复合颜色
+    appearance_vals = []
+
+    # 无效词列表（不能作为外观属性值的词）
+    # 注意：vintage, elegant, cute, delicate, exquisite 等现在是有效的款式关键词，不再过滤
+    invalid_appearance_words = {
+        'color', 'colour', 'colors', 'colours', 'mixed', 'assorted',
+        'beautiful', 'simple', 'decorative', 'pretty', 'lovely', 'charming',
+        'stylish', 'fancy', 'ornamental', 'random', 'picture', 'show',
+        'none', 'all', 'various', 'different', 'multiple', 'set',
+        'photo', 'per', 'see', 'like', 'exactly', 'actual', 'match', 'display',
     }
 
-
-# ============================================================================
-# 质量检查和验证
-# ============================================================================
-
-def validate_extraction_quality(extraction_result: Dict) -> Dict:
-    """
-    验证提取结果的质量
-    
-    返回：
-    {
-      "is_valid": True/False,
-      "quality_score": 0-1,
-      "issues": [...],
-      "warnings": [...]
-    }
-    """
-    
-    issues = []
-    warnings = []
-    
-    # 检查维度数据
-    dimensions = extraction_result.get("dimensions", {})
-    aspect_count = 0
-    for category in dimensions.values():
-        if isinstance(category, dict):
-            for entities in category.values():
-                if isinstance(entities, float) and math.isnan(entities):
-                    continue
-                if isinstance(entities, (list, tuple)):
-                    aspect_count += len(entities)
-    
-    if aspect_count == 0:
-        warnings.append("No entities extracted from dimensions")
-    
-    # 检查方面数据
-    aspects = extraction_result.get("aspects", [])
-    if len(aspects) == 0:
-        warnings.append("No aspects extracted")
-    
-    # 检查置信度
-    low_confidence_count = sum(
-        1 for aspect in aspects 
-        if aspect.get('confidence', 1.0) < 0.5
-    )
-    if low_confidence_count > 0:
-        warnings.append(f"{low_confidence_count} aspects have low confidence (<0.5)")
-    
-    # 检查sentiment值的有效性
-    valid_sentiments = {'positive', 'negative', 'neutral', 'mixed', 'POSITIVE', 'NEGATIVE', 'NEUTRAL', 'MIXED'}
-    for aspect in aspects:
-        sentiment = aspect.get('aspect_sentiment', '')
-        if sentiment and sentiment not in valid_sentiments:
-            issues.append(f"Invalid sentiment value: {sentiment}")
-    
-    issues_len = safe_list_len(issues, f'validate_issues')
-    warnings_len = safe_list_len(warnings, f'validate_warnings')
-    aspects_len = safe_list_len(aspects, f'validate_aspects')
-    
-    quality_score = 1.0
-    if issues_len > 0:
-        quality_score -= 0.3 * issues_len
-    if warnings_len > 0:
-        quality_score -= 0.1 * warnings_len
-    quality_score = max(0, min(1, quality_score))
-    
-    return {
-        "is_valid": issues_len == 0,
-        "quality_score": quality_score,
-        "issues": issues,
-        "warnings": warnings,
-        "entity_count": aspect_count,
-        "aspect_count": aspects_len
-    }
-
-
-# ============================================================================
-# 处理产品（并发）
-# ============================================================================
-
-def process_product(product_data: Dict) -> Dict:
-    """处理单个产品"""
-    
-    asin = product_data['asin']
-    title = product_data['product_title']
-    
-    target_review = product_data.get('target_review')
-    if not target_review:
-        target_reviews = product_data.get('target_reviews', [])
-        if isinstance(target_reviews, list) and len(target_reviews) > 0:
-            target_review = target_reviews[0]
-        else:
-            target_review = None
-    
-    # 固定维度类别
-    fixed_categories = [
-        'Product_Attributes', 'Quality_Attributes', 'Appearance_Design',
-        'User_Experience', 'Usage_Scenarios', 'Price_Value', 'Special_Requirements'
+    # 排除包含这些模式的颜色值
+    invalid_patterns = [
+        'as photo', 'as the picture', 'as per', 'as shown', 'as your',
+        'as i', 'not ', 'not-', '-not', 'please', 'review',
+        'pack', 'pc ', ' pc', 'set of', 'one pack', 'each', 'approx',
+        ':', ';', 'main material', 'thickness',
     ]
-    
-    result = {
+
+    # 1. 从 feature 的结构化 Color: 字段提取
+    if isinstance(feature, list):
+        for feat in feature:
+            feat_str = str(feat)
+            # 匹配 Color: 或 Colour: 开头的内容
+            match = re_module.search(r'[Cc]olor:\s*([^<,]+)', feat_str)
+            if match:
+                color_str = match.group(1).strip()
+                # 按 / 分割成多个颜色
+                color_parts = [c.strip() for c in color_str.split('/')]
+                for color in color_parts:
+                    # 过滤掉不合适的内容
+                    if color and len(color) >= 2 and len(color) < 50:
+                        # 转小写检查是否包含无效词
+                        color_lower = color.lower()
+                        if not any(inv in color_lower for inv in invalid_appearance_words):
+                            # 检查是否包含无效模式
+                            if any(pat in color_lower for pat in invalid_patterns):
+                                continue
+                            # 去除括号及其内容，如 "Purple (amethyst)" -> "Purple"
+                            color = re_module.sub(r'\s*\([^)]*\)', '', color).strip()
+                            if not color:
+                                continue
+                            # 简化复合颜色词
+                            color = color.replace('Antique ', 'Antique ').replace('Bright ', '').replace('Dull ', '')
+                            appearance_vals.append(color.capitalize())
+
+    # 2. 从关键词匹配颜色（用预编译正则）
+    color_found = _extract_keyword_set(COLOR_SINGLE, [COLOR_MULTI_RE], text_lower)
+    appearance_vals = list(dict.fromkeys(appearance_vals + color_found))
+
+    # 3. 合并表面特性
+    surface_found = _extract_keyword_set(SURFACE_SINGLE, SURFACE_MULTI, text_lower)
+    appearance_vals = list(dict.fromkeys(appearance_vals + surface_found))
+
+    # 4. 合并形状/款式关键词
+    style_found = _extract_keyword_set(STYLE_SINGLE, [STYLE_MULTI_RE], text_lower)
+    appearance_vals = list(dict.fromkeys(appearance_vals + style_found))
+
+    # 4. 如果有复合颜色词包含基础颜色词（作为独立词），则过滤掉那个基础颜色词
+    # 例如：已有 "Royal blue"，则过滤掉 "Blue"；已有 "Silver plated"，则过滤掉 "Silver"
+    basic_colors = {
+        'black', 'white', 'red', 'blue', 'green', 'yellow', 'orange', 'purple',
+        'pink', 'brown', 'gray', 'grey', 'silver', 'gold', 'clear', 'transparent',
+        'ivory', 'cream', 'tan', 'coral', 'lavender', 'mint',
+        'turquoise', 'burgundy', 'maroon', 'olive', 'khaki', 'navy',
+        'jet', 'ruby', 'emerald', 'sapphire', 'amethyst', 'pearl', 'brass', 'copper', 'bronze',
+    }
+    compound_words = [v for v in appearance_vals if ' ' in v]  # 复合词（包含空格）
+
+    # 提取所有复合词中的单词
+    compound_parts = set()
+    for compound in compound_words:
+        for word in compound.lower().split():
+            compound_parts.add(word)
+
+    # 如果 appearance_vals 中的词是某个复合词的组成部分（但不是那个复合词本身），则去掉它
+    to_remove = set()
+    for val in appearance_vals:
+        val_lower = val.lower()
+        # 如果这个词是复合词的组成部分但不是复合词本身，且是基础颜色词或金属词
+        if val_lower in compound_parts and val_lower not in [cw.lower() for cw in compound_words]:
+            if val_lower in basic_colors:
+                to_remove.add(val)
+        # 如果同时有 Bright 和 Bright red，只保留 Bright red（去掉 Bright）
+        if val_lower == 'bright' and any('bright ' in cw.lower() for cw in compound_words):
+            to_remove.add(val)
+
+    for val in to_remove:
+        if val in appearance_vals:
+            appearance_vals.remove(val)
+
+    # 5. 如果有多个属性值，只保留最长的那个
+    if len(appearance_vals) > 1:
+        appearance_vals = [max(appearance_vals, key=len)]
+
+    # 6. 清理末尾标点符号
+    appearance_vals = [re_module.sub(r'[,，。.!?;：;]+$', '', v).strip() for v in appearance_vals]
+    appearance_vals = [v for v in appearance_vals if v]  # 过滤空值
+
+    return {
+        'A4_appearance': appearance_vals,  # 颜色+表面特性
+    }
+
+
+def extract_description_attributes(description) -> Dict[str, List[str]]:
+    """从 description 中提取结构化属性"""
+    import re
+
+    # 如果 description 是列表，合并
+    if isinstance(description, list):
+        description = ' '.join(str(d) for d in description)
+
+    # 清理 HTML 标签
+    text = re.sub(r'<[^>]+>', ' ', str(description))
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    if len(text) < 20:
+        return {
+            'A18_quality': [],
+        }
+
+    # 按句子拆分（用句号、问号、感叹号分隔）
+    sentences = re.split(r'[.!?]+', text)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
+    sentences = sentences[:5]  # 最多5个句子
+
+    # 质量相关关键词
+    quality_keywords = [
+        'high quality', 'premium', 'professional', 'durable', 'sturdy',
+        'excellent', 'superior', 'top quality', 'best', 'fine', 'perfect',
+        'reliable', 'solid', 'heavy duty', 'industrial',
+    ]
+
+    # 外观相关（颜色+风格）
+    appearance_keywords = [
+        # 颜色
+        'black', 'white', 'red', 'blue', 'green', 'yellow', 'orange', 'purple',
+        'pink', 'brown', 'gray', 'grey', 'silver', 'gold', 'clear', 'transparent',
+        'neon', 'pastel', 'vibrant', 'multicolor', 'assorted',
+        # 风格
+        'beautiful', 'elegant', 'stylish', 'modern', 'classic', 'vintage',
+        'decorative', 'ornamental', 'cute', 'pretty', 'lovely', 'charming',
+        'minimalist', 'simple', 'fancy', 'delicate', 'exquisite',
+    ]
+
+    # 提取函数
+    def extract_keywords(keywords: List[str], text: str) -> List[str]:
+        found = []
+        text_lower = text.lower()
+        for kw in keywords:
+            if kw.lower() in text_lower:
+                found.append(kw.capitalize())
+        return list(dict.fromkeys(found))
+
+    # 检测品牌提及（首字母大写的连续单词，可能是品牌）
+    brand_mentions = re.findall(r'\b[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2}\b', text)
+    # 过滤掉常见非品牌词
+    common_words = {'The', 'This', 'With', 'That', 'Your', 'Also', 'From', 'Have', 'Will', 'Would', 'Could', 'Should', 'There', 'Here', 'What', 'When', 'Where', 'Which', 'Who', 'Why', 'How', 'All', 'For', 'And', 'But', 'Not', 'You', 'Are', 'Can', 'May', 'Has', 'Was', ' Were', 'One', 'Two', 'Three', 'Four', 'Five'}
+    brand_mentions = [b for b in brand_mentions if b not in common_words][:3]
+
+    # 提取外观和风格
+    appearance_found = extract_keywords(appearance_keywords, text)
+
+    return {
+        'A4_appearance': appearance_found,  # 包含颜色+风格
+        'A18_quality': extract_keywords(quality_keywords, text),
+    }
+
+
+def extract_attributes(item: Dict) -> Dict:
+    """从商品元数据提取多个槽位"""
+    asin = item.get('asin', '')
+    title = item.get('title', '')
+    brand = item.get('brand', '')
+    price = item.get('price', '')
+    description = item.get('description', '')
+    if isinstance(description, list):
+        description = ' '.join(str(d) for d in description)
+    feature = item.get('feature', [])
+    category = item.get('category', [])
+    tech1 = item.get('tech1', '')
+
+    # 提取结构化特征
+    structured = extract_structured_features(feature, title)
+
+    # 从 description 中提取关键属性
+    desc_structured = extract_description_attributes(description)
+
+    # 合并 A4_appearance（避免 desc_structured 覆盖 structured 的值）
+    # 但desc_structured中包含很多无效词，只使用structured的值
+    # structured_a4 = structured.get('A4_appearance', [])
+    # desc_a4 = desc_structured.get('A4_appearance', [])
+    # if desc_a4:
+    #     # 合并去重
+    #     combined_a4 = list(dict.fromkeys(structured_a4 + desc_a4))
+    #     structured['A4_appearance'] = combined_a4
+    pass  # 不再从description合并A4，因为其中包含大量无效词
+
+    # 合并 A18_quality（同样避免覆盖）
+    structured_a18 = structured.get('A18_quality', [])
+    desc_a18 = desc_structured.get('A18_quality', [])
+    if desc_a18:
+        combined_a18 = list(dict.fromkeys(structured_a18 + desc_a18))
+        structured['A18_quality'] = combined_a18
+
+    return {
         'asin': asin,
-        'product_title': title,
-        'target_user_id': product_data['target_user_id'],
-        'target_user_preferences': {},
-        'target_user_aspects': [],
-        'quality_check': None,
-        'other_users_preferences': {}
+        'A1_product_type': extract_product_type(category),
+        'A2_brand': brand if brand and isinstance(brand, str) and len(str(brand).strip()) > 0 else None,
+        'A3_price': extract_price(price),
+        'A4_appearance': structured.get('A4_appearance', []),
+        'A5_use_case': extract_use_case(title, description, feature),
     }
-    
-    # 初始化维度结构
-    for cat in fixed_categories:
-        result['target_user_preferences'][cat] = {}
-    
-    log_with_timestamp(f"[{asin}] 🚀 开始处理产品")
-    log_with_timestamp(f"[{asin}] 📌 ASIN: {asin}")
-    log_with_timestamp(f"[{asin}] 📌 标题: {title[:60]}")
-    log_with_timestamp(f"[{asin}] 📌 用户: {product_data['target_user_id']}")
-    
-    if not target_review:
-        log_with_timestamp(f"[{asin}] ❌ 错误: 无目标评论数据")
-        result['quality_check'] = {
-            'is_valid': False,
-            'quality_score': 0,
-            'issues': ['no_target_review']
-        }
-        return result
-    
-    # 安全地计算评论长度，处理浮点数等异常值
-    if isinstance(target_review, str):
-        review_len = safe_str_len(target_review, f'target_review_str_{asin}')
-    elif isinstance(target_review, dict):
-        review_text = safe_dict_get(target_review, 'reviewText', f'target_review_dict_{asin}')
-        review_len = safe_str_len(review_text, f'target_review_text_{asin}')
-    else:
-        review_len = 0
-    
-    log_with_timestamp(f"[{asin}] 📝 目标评论长度: {review_len} 字符")
-    
-    # 直接提取，不使用fallback - 任何错误都会立即抛出
-    extraction = extract_preferences_from_review_v2(target_review, title, 'target', asin)
-    result['target_user_preferences'] = extraction.get('dimensions', {})
-    result['target_user_aspects'] = extraction.get('aspects', [])
-    result['extraction_method'] = extraction.get('metadata', {}).get('extraction_method', 'llm_based')
-    
-    aspects_len = safe_list_len(result.get('target_user_aspects', []), f'target_aspects_count_{asin}')
-    log_with_timestamp(f"[{asin}] ✅ 提取完成: {aspects_len} 个方面")
-    
-    result['quality_check'] = validate_extraction_quality(extraction)
-    
-    # 计算统计信息 - 允许NaN并统计缺失维度
-    def count_entities(prefs_dict):
-        if not isinstance(prefs_dict, dict):
-            raise TypeError(f"[{asin}] Expected dict for preferences, got {type(prefs_dict).__name__}")
-        
-        total = 0
-        for category, category_data in prefs_dict.items():
-            if isinstance(category_data, dict):
-                for dimension, entities in category_data.items():
-                    if isinstance(entities, float) and math.isnan(entities):
-                        log_with_timestamp(f"[{asin}] 📌 缺失维度: {category} → {dimension}")
-                        continue
-                    if not isinstance(entities, list):
-                        raise TypeError(f"[{asin}] Category '{category}', dimension '{dimension}': "
-                                      f"expected list of entities, got {type(entities).__name__}. "
-                                      f"Value: {repr(entities)[:100]}")
-                    total += safe_list_len(entities, f'entities_{asin}_{category}_{dimension}')
-            elif isinstance(category_data, list):
-                total += safe_list_len(category_data, f'category_data_{asin}_{category}')
-            else:
-                raise TypeError(f"[{asin}] Category '{category}': expected dict or list, "
-                              f"got {type(category_data).__name__}")
-        return total
-    
-    def count_missing_dimensions(prefs_dict):
-        """统计缺失维度（值为NaN的维度）"""
-        missing = []
-        if not isinstance(prefs_dict, dict):
-            return missing
-        
-        for category, category_data in prefs_dict.items():
-            if isinstance(category_data, dict):
-                for dimension, entities in category_data.items():
-                    if isinstance(entities, float) and math.isnan(entities):
-                        missing.append({
-                            'category': category,
-                            'dimension': dimension
-                        })
-        return missing
-    
-    def count_categories(prefs_dict):
-        if not isinstance(prefs_dict, dict):
-            raise TypeError(f"[{asin}] Expected dict for preferences, got {type(prefs_dict).__name__}")
-        
-        count = 0
-        for category, category_data in prefs_dict.items():
-            if isinstance(category_data, dict):
-                for v in category_data.values():
-                    if isinstance(v, float) and math.isnan(v):
-                        continue
-                    if not isinstance(v, list):
-                        raise TypeError(f"[{asin}] Category '{category}' value: "
-                                      f"expected list, got {type(v).__name__}. "
-                                      f"Value: {repr(v)[:100]}")
-                count += 1
-            elif isinstance(category_data, list):
-                list_len = safe_list_len(category_data, f'category_list_{asin}_{category}')
-                if list_len > 0:
-                    count += 1
-            else:
-                raise TypeError(f"[{asin}] Category '{category}': expected dict or list, "
-                              f"got {type(category_data).__name__}")
-        return count
-    
-    target_count = count_entities(result['target_user_preferences'])
-    categories_count = count_categories(result['target_user_preferences'])
-    missing_dimensions = count_missing_dimensions(result['target_user_preferences'])
-    
-    result['preference_breakdown'] = {
-        'target_user': {
-            'categories': int(categories_count) if isinstance(categories_count, (int, float)) else 0,
-            'entities': int(target_count) if isinstance(target_count, (int, float)) else 0
-        },
-        'target_user_aspects': aspects_len,
-        'other_users': {
-            'categories': 0,
-            'entities': 0
-        }
-    }
-    
-    result['missing_dimensions'] = missing_dimensions
-    result['missing_dimensions_count'] = len(missing_dimensions)
-    
-    return result
 
 
-# ============================================================================
-# 主函数
-# ============================================================================
+def process_item(item: Dict) -> Optional[Dict]:
+    """处理单个商品，返回属性字典或None（如果不满足条件）"""
+    asin = item.get('asin', '')
+    brand = item.get('brand', '')
+    category = item.get('category', [])
+    price = item.get('price', '')
+
+    # 跳过 brand 或 category 为空的商品
+    if not asin or not brand or not category:
+        return None
+
+    # 过滤无效品牌
+    invalid_brands = {'unknown', 'generic', 'n/a', 'na', 'none', 'null', ''}
+    if brand.lower().strip() in invalid_brands:
+        return None
+
+    # 如果 price 为空，尝试从 title/description/feature 中提取
+    if not price:
+        title = item.get('title', '')
+        desc = str(item.get('description', ''))
+        feature = ' '.join(str(f) for f in item.get('feature', []))
+        text_for_price = title + ' ' + desc + ' ' + feature
+        price = extract_price_from_text(text_for_price)
+        if price:
+            item['price'] = price  # 把提取到的价格设置回 item，供 extract_attributes 使用
+
+    # 如果 price 仍为空，跳过（需要价格信息）
+    if not price:
+        return None
+
+    attrs = extract_attributes(item)
+
+    # 只保留 A1_product_type、A4_appearance 和 A5_use_case 都不为空的商品
+    if not attrs.get('A1_product_type') or not attrs.get('A4_appearance') or not attrs.get('A5_use_case'):
+        return None
+
+    return attrs
+
+
+def process_chunk(items: List) -> Tuple[List[Dict], Dict]:
+    """处理一批数据（字典列表或字符串列表），返回结果列表和统计信息"""
+    import ujson
+    results = []
+    stats = {
+        'json_error': 0,
+        'missing_asin': 0,
+        'missing_brand': 0,
+        'missing_category': 0,
+        'missing_price': 0,
+        'filtered_no_a4_a5': 0,
+    }
+    for slot in ['A1', 'A2', 'A3', 'A4', 'A5']:
+        stats[f'has_{slot}'] = 0
+
+    for item_or_line in items:
+        # 支持字典列表（缓存）或字符串列表（原始文件）
+        if isinstance(item_or_line, dict):
+            item = item_or_line
+        else:
+            line = item_or_line.strip()
+            if not line:
+                continue
+            try:
+                item = ujson.loads(line)
+            except Exception:
+                stats['json_error'] += 1
+                continue
+
+        attrs = process_item(item)
+        if attrs is None:
+            # 统计被过滤的原因
+            asin = item.get('asin', '')
+            brand = item.get('brand', '')
+            category = item.get('category', [])
+            price = item.get('price', '')
+            if not asin:
+                stats['missing_asin'] += 1
+            if not brand:
+                stats['missing_brand'] += 1
+            if not category:
+                stats['missing_category'] = stats.get('missing_category', 0) + 1
+            if not price:
+                stats['missing_price'] = stats.get('missing_price', 0) + 1
+            if asin and brand and category and price:
+                stats['filtered_no_a4_a5'] += 1
+            continue
+
+        results.append(attrs)
+
+        # 统计每个槽位的非空数量
+        if attrs.get('A1_product_type'):
+            stats['has_A1'] += 1
+        if attrs.get('A2_brand'):
+            stats['has_A2'] += 1
+        if attrs.get('A3_price'):
+            stats['has_A3'] += 1
+        if attrs.get('A4_appearance'):
+            stats['has_A4'] += 1
+        if attrs.get('A5_use_case'):
+            stats['has_A5'] += 1
+
+    return results, stats
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Stage 1 v2: Preference Extraction + Aspects")
-    parser.add_argument("--input-file", required=True)
-    parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--max-workers", type=int, default=5)
-    args = parser.parse_args()
-    
-    os.makedirs(args.output_dir, exist_ok=True)
-    
+    INPUT_FILE = "/fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz"
+    OUTPUT_FILE = "/fs04/ar57/wenyu/result/personal_query/01_preference_extraction/attributes_Arts_Crafts_and_Sewing.json"
+
+    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
+
+    # 多进程配置 - 使用更多worker和更大chunk
+    num_workers = 16
+    chunk_size = 50000  # 减小块大小增加并行度
+
     log_with_timestamp("=" * 80)
-    log_with_timestamp("Stage 1 v2: Preference Extraction + Aspect-Level Analysis")
+    log_with_timestamp("Stage 1 v5: 5-Slot Product Attribute Extraction (多进程版)")
     log_with_timestamp("=" * 80)
-    
-    # 加载数据
-    with open(args.input_file, 'r') as f:
-        data = json.load(f)
-    
-    user_id = data['user_id']
-    products = data['results']
-    
-    log_with_timestamp(f"User: {user_id}")
-    log_with_timestamp(f"Products: {len(products)}")
-    log_with_timestamp(f"Concurrency: {args.max_workers} products in parallel")
+    log_with_timestamp(f"输入文件: {INPUT_FILE}")
+    log_with_timestamp(f"输出文件: {OUTPUT_FILE}")
+    log_with_timestamp(f"使用进程数: {num_workers}")
+    log_with_timestamp(f"分块大小: {chunk_size}")
     log_with_timestamp("")
-    
-    # 并发处理产品 - 添加错误产品追踪
-    results = []
-    completed_count = [0]
-    error_products = []
-    
-    with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
-        future_to_product = {
-            executor.submit(process_product, product): product
-            for product in products
-        }
-        
-        for future in as_completed(future_to_product):
-            product = future_to_product[future]
-            try:
-                # 首先获取ASIN用于标识产品
-                asin = product.get('asin', 'UNKNOWN')  # Fail-fast之前需要能识别产品
-                
-                result = future.result(timeout=30)
-                results.append(result)
-                completed_count[0] += 1
-                
-                # 记录错误产品用于后续分析
-                if result.get('error_info'):
-                    error_products.append({
-                        'asin': asin,
-                        'error': result.get('error_info', {})
-                    })
-                
-                # 每10个产品输出一次进度
-                if completed_count[0] % 10 == 0 or completed_count[0] == len(products):
-                    log_with_timestamp(f"Progress: {completed_count[0]}/{len(products)} completed")
-                    
-                    # 统计维度和方面
-                    dimension_stats = defaultdict(lambda: {'target': 0, 'explicit_aspects': 0, 'implicit_aspects': 0})
-                    
-                    for r in results:
-                        for category, dims in r['target_user_preferences'].items():
-                            if isinstance(dims, dict):
-                                for dim, entities in dims.items():
-                                    if isinstance(entities, list):
-                                        dimension_stats[dim]['target'] += len(entities)
-                        
-                        # 统计方面
-                        for aspect in r.get('target_user_aspects', []):
-                            if aspect.get('is_implicit'):
-                                dimension_stats[aspect.get('aspect', 'unknown')]['implicit_aspects'] += 1
-                            else:
-                                dimension_stats[aspect.get('aspect', 'unknown')]['explicit_aspects'] += 1
-                    
-                    log_with_timestamp(f"  Dimension extraction (top 5):")
-                    sorted_dims = sorted(dimension_stats.items(),
-                                       key=lambda x: x[1]['target'],
-                                       reverse=True)[:5]
-                    for dim, counts in sorted_dims:
-                        log_with_timestamp(f"    {dim:<30} target={counts['target']:>3} aspects(E:{counts['explicit_aspects']:>2}/I:{counts['implicit_aspects']:>2})")
-                    
-                    total_prefs = sum(c['target'] for c in dimension_stats.values())
-                    total_explicit = sum(c['explicit_aspects'] for c in dimension_stats.values())
-                    total_implicit = sum(c['implicit_aspects'] for c in dimension_stats.values())
-                    log_with_timestamp(f"  TOTALS: dimensions={total_prefs} explicit_aspects={total_explicit} implicit_aspects={total_implicit}")
-                    log_with_timestamp("")
-            
-            except Exception as e:
-                log_with_timestamp(f"[{asin}] ❌ 产品处理异常: {type(e).__name__}: {str(e)}")
-                import traceback
-                log_with_timestamp(f"[{asin}] 堆栈跟踪:")
-                for line in traceback.format_exc().split('\n')[:10]:
-                    if line.strip():
-                        log_with_timestamp(f"[{asin}] {line}")
-                # 记录错误产品用于统计
-                error_products.append({
-                    'asin': asin,
-                    'error': {
-                        'error_type': type(e).__name__,
-                        'error_message': str(e)
-                    }
-                })
-                completed_count[0] += 1
-    
-    success_count = sum(1 for r in results if r.get('target_user_aspects') and r.get('quality_check', {}).get('is_valid', False))
-    
-    # 统计缺失维度
-    products_with_missing = 0
-    total_missing_dimensions = 0
-    missing_by_category = defaultdict(int)
-    
-    for r in results:
-        missing_dims = r.get('missing_dimensions', [])
-        if missing_dims:
-            products_with_missing += 1
-            total_missing_dimensions += len(missing_dims)
-            for miss in missing_dims:
-                missing_by_category[miss.get('category', 'unknown')] += 1
-    
+    log_with_timestamp("槽位定义:")
+    log_with_timestamp("  A1: Category (产品类型)")
+    log_with_timestamp("  A2: Brand (品牌)")
+    log_with_timestamp("  A3: Price (价格)")
+    log_with_timestamp("  A4: Appearance (外观：颜色+风格)")
+    log_with_timestamp("  A5: Usage (使用场景：for X)")
+    log_with_timestamp("  A7: Material (材料)")
+    log_with_timestamp("  A8: Safety (安全/环保)")
+    log_with_timestamp("  A9: Durability (耐用性)")
+    log_with_timestamp("  A10: Ease_of_use (易用性)")
+    log_with_timestamp("  A11: Temperature_resistance (耐温性)")
+    log_with_timestamp("  A12: Surface (表面特性)")
+    log_with_timestamp("  A13: Reusability (可重复使用)")
+    log_with_timestamp("  A14: Size (尺寸规格)")
+    log_with_timestamp("  A16: Compatibility (兼容性)")
+    log_with_timestamp("  A18: Quality (质量描述)")
     log_with_timestamp("")
-    log_with_timestamp("=" * 80)
-    log_with_timestamp("🎯 最终统计")
-    log_with_timestamp("=" * 80)
-    log_with_timestamp(f"总产品数: {safe_list_len(products, 'final_products_len')}")
-    log_with_timestamp(f"处理完成: {safe_list_len(results, 'final_results_len')}")
-    log_with_timestamp(f"成功提取: {success_count} (成功率: {100*success_count/max(1, safe_list_len(results, 'final_success_rate')):.1f}%)")
-    log_with_timestamp(f"失败产品: {safe_list_len(error_products, 'final_error_products_len')}")
-    
-    if safe_list_len(results, 'final_results_count') > 0:
-        total_aspects = sum(safe_list_len(r.get('target_user_aspects', []), f"result_aspects_{r.get('asin', 'UNKNOWN')}") for r in results)
-        avg_aspects = total_aspects / success_count if success_count > 0 else 0
-        log_with_timestamp(f"总方面数: {total_aspects}")
-        log_with_timestamp(f"平均方面数/产品: {avg_aspects:.1f}")
-    
+
+    log_with_timestamp("📂 开始读取商品数据...")
+
+    # 读取所有行
+    with gzip.open(INPUT_FILE, 'rt', encoding='utf-8') as f:
+        all_lines = f.readlines()
+
+    total_lines = len(all_lines)
+    log_with_timestamp(f"总行数: {total_lines}")
+
+    # 分块
+    chunks = []
+    for i in range(0, total_lines, chunk_size):
+        chunks.append(all_lines[i:i+chunk_size])
+
+    log_with_timestamp(f"分为 {len(chunks)} 个块进行处理...")
     log_with_timestamp("")
-    log_with_timestamp("📌 缺失维度统计（NaN值）")
-    log_with_timestamp(f"含有缺失维度的产品: {products_with_missing}/{safe_list_len(results, 'final_missing_products')} ({100*products_with_missing/max(1, safe_list_len(results, 'final_missing_rate')):.1f}%)")
-    log_with_timestamp(f"总缺失维度数: {total_missing_dimensions}")
-    if missing_by_category:
-        log_with_timestamp(f"按Category统计缺失维度:")
-        for category in sorted(missing_by_category.keys()):
-            count = missing_by_category[category]
-            log_with_timestamp(f"  {category}: {count}")
-    
+
+    # 多进程处理
+    all_results = []
+    all_stats = []
+
+    # 使用 imap_unordered 提高并行效率
+    log_with_timestamp("🚀 开始多进程处理...")
+    import sys
+    sys.stdout.flush()
+    with Pool(processes=num_workers) as pool:
+        results_iter = pool.imap_unordered(process_chunk, chunks, chunksize=1)
+        processed = 0
+        for chunk_results, chunk_stats in results_iter:
+            all_results.extend(chunk_results)
+            all_stats.append(chunk_stats)
+            processed += 1
+            if processed % 2 == 0 or processed == len(chunks):
+                log_with_timestamp(f"  已处理 {processed}/{len(chunks)} 块, 结果数: {len(all_results)}")
+                sys.stdout.flush()
+    log_with_timestamp(f"  处理完成, 结果数: {len(all_results)}")
+
+    # ========== 新增：根据 Stage 0 用户评论过滤 ==========
+    STAGE0_DIR = "/fs04/ar57/wenyu/result/personal_query/00_data_preparation"
+
     log_with_timestamp("")
-    
-    output_data = {
-        'user_id': user_id,
-        'timestamp': datetime.now().isoformat(),
-        'total_products': len(results),
-        'version': '2.1',
-        'improvements': [
-            'aspect-level extraction with confidence scores',
-            'implicit aspect detection',
-            'quality validation',
-            'missing dimensions tracking (NaN values)'
-        ],
-        'statistics': {
-            'products_with_missing_dimensions': products_with_missing,
-            'total_missing_dimensions': total_missing_dimensions,
-            'missing_rate_by_product': f"{100*products_with_missing/max(1, len(results)):.1f}%",
-            'missing_by_category': dict(missing_by_category)
-        },
-        'results': results
+    log_with_timestamp("🔍 读取 Stage 0 用户评论数据...")
+
+    # 读取所有 Stage 0 用户评论文件
+    reviewed_asins = set()
+    asin_to_users = {}  # asin -> list of user_ids
+    user_review_files = [f for f in os.listdir(STAGE0_DIR) if f.startswith('reviews_') and f.endswith('.json')]
+
+    for filename in user_review_files:
+        filepath = os.path.join(STAGE0_DIR, filename)
+        with open(filepath, 'r', encoding='utf-8') as f:
+            user_data = json.load(f)
+            user_id = user_data['user_id']
+            for product in user_data.get('results', []):
+                asin = product.get('asin', '')
+                if asin:
+                    reviewed_asins.add(asin)
+                    if asin not in asin_to_users:
+                        asin_to_users[asin] = []
+                    asin_to_users[asin].append(user_id)
+
+    log_with_timestamp(f"  Stage 0 用户评论过的商品数: {len(reviewed_asins)}")
+
+    # 过滤：只保留评论过的商品
+    original_count = len(all_results)
+    all_results = [r for r in all_results if r.get('asin') in reviewed_asins]
+
+    # 为每个商品添加评论用户信息
+    for r in all_results:
+        asin = r.get('asin', '')
+        if asin in asin_to_users:
+            r['reviewed_by_users'] = asin_to_users[asin]
+        else:
+            r['reviewed_by_users'] = []
+
+    filtered_count = len(all_results)
+
+    log_with_timestamp(f"  Stage 0 过滤后商品数: {filtered_count} (过滤掉 {original_count - filtered_count} 个)")
+
+    # 找出被评论过但不在结果中的商品
+    result_asins = set(r.get('asin') for r in all_results)
+    missing_asins = reviewed_asins - result_asins
+    if missing_asins:
+        log_with_timestamp(f"  ⚠️ 评论过但未在结果中的商品数: {len(missing_asins)}")
+        log_with_timestamp("  未找到的商品 ASIN (前10个):")
+        for asin in sorted(list(missing_asins))[:10]:
+            log_with_timestamp(f"    - {asin}")
+    # ========== 过滤结束 ==========
+
+    # 合并统计
+    stats = {
+        'total': len(all_results),
+        'json_error': sum(s.get('json_error', 0) for s in all_stats),
+        'missing_asin': sum(s.get('missing_asin', 0) for s in all_stats),
+        'missing_brand': sum(s.get('missing_brand', 0) for s in all_stats),
+        'missing_category': sum(s.get('missing_category', 0) for s in all_stats),
+        'missing_price': sum(s.get('missing_price', 0) for s in all_stats),
+        'filtered_no_a4_a5': sum(s.get('filtered_no_a4_a5', 0) for s in all_stats),
     }
-    
-    output_file = os.path.join(args.output_dir, f'preferences_{user_id}.json')
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(output_data, f, indent=2, ensure_ascii=False)
-    
-    log_with_timestamp(f"✅ 输出文件: {output_file}")
+
+    # 重新计算每个槽位的非空数量（基于过滤后的结果）
+    for slot in ['A1', 'A2', 'A3', 'A4', 'A5']:
+        slot_key = f'{slot}_product_type' if slot in ['A1'] else f'{slot}_' + {
+            'A2': 'brand', 'A3': 'price', 'A4': 'appearance', 'A5': 'use_case'
+        }[slot]
+        stats[f'has_{slot}'] = sum(1 for r in all_results if r.get(slot_key))
+
+    log_with_timestamp(f"✅ 处理完成，总计 {stats['total']} 个有效商品")
+
+    # ========== 每个用户只保留一个商品（优先选择唯一评论的商品）==========
+    log_with_timestamp("")
+    log_with_timestamp("🔍 为每个用户只保留一个商品（优先选择只有该用户评论过的商品）...")
+
+    def calc_total_length(p):
+        """计算商品 A1-A5 字段值的总长度"""
+        length = 0
+        for key in ['A1_product_type', 'A2_brand', 'A3_price', 'A4_appearance', 'A5_use_case']:
+            val = p.get(key)
+            if val is not None:
+                if isinstance(val, list):
+                    length += sum(len(str(v)) for v in val)
+                else:
+                    length += len(str(val))
+        return length
+
+    # 构建 asin -> 评论用户列表
+    asin_to_users = defaultdict(list)
+    for p in all_results:
+        asin = p.get('asin', '')
+        for user_id in p.get('reviewed_by_users', []):
+            asin_to_users[asin].append(user_id)
+
+    # 按用户分组
+    user_products = {}
+    for p in all_results:
+        users = p.get('reviewed_by_users', [])
+        for user_id in users:
+            if user_id not in user_products:
+                user_products[user_id] = []
+            user_products[user_id].append(p)
+
+    # 为每个用户选择商品（优先选择只有该用户评论过的商品）
+    per_user_results = []
+    stats['unique_only'] = 0  # 唯一评论的商品数
+    stats['multi_users'] = 0  # 多人评论的商品数
+
+    for user_id, prods in user_products.items():
+        if not prods:
+            continue
+
+        # 先找只有该用户评论过的商品
+        unique_prods = [p for p in prods if len(asin_to_users.get(p.get('asin'), [])) == 1]
+
+        if unique_prods:
+            # 优先从唯一评论中选择 A1-A5 最长的
+            best = max(unique_prods, key=calc_total_length)
+            stats['unique_only'] += 1
+        else:
+            # 没有唯一评论，从多人评论中选择 A1-A5 最长的
+            best = max(prods, key=calc_total_length)
+            stats['multi_users'] += 1
+
+        per_user_results.append(best)
+
+    original_count = len(all_results)
+    all_results = per_user_results
+    log_with_timestamp(f"  每用户一个后商品数: {len(all_results)}")
+    log_with_timestamp(f"  其中唯一评论商品: {stats['unique_only']}, 多人评论商品: {stats['multi_users']}")
+
+    # 更新统计
+    stats['total'] = len(all_results)
+    for slot in ['A1', 'A2', 'A3', 'A4', 'A5']:
+        slot_key = f'{slot}_product_type' if slot in ['A1'] else f'{slot}_' + {
+            'A2': 'brand', 'A3': 'price', 'A4': 'appearance', 'A5': 'use_case'
+        }[slot]
+        stats[f'has_{slot}'] = sum(1 for r in all_results if r.get(slot_key))
+    # ========== 每用户一个过滤结束 ==========
+
+    # 保存结果
+    log_with_timestamp(f"💾 保存结果到: {OUTPUT_FILE}")
+    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+        json.dump({
+            'metadata': {
+                'source': 'meta_Arts_Crafts_and_Sewing.json.gz',
+                'total_products': stats['total'],
+                'extraction_time': datetime.now().isoformat(),
+                'slots': {
+                    'A1': 'Category - 产品类型',
+                    'A2': 'Brand - 品牌',
+                    'A3': 'Price - 价格',
+                    'A4': 'Appearance - 外观（颜色+风格+表面）',
+                    'A5': 'Usage - 使用场景',
+                    'A7': 'Material - 材料',
+                    'A8': 'Safety - 安全/环保',
+                    'A9': 'Durability - 耐用性',
+                    'A10': 'Ease_of_use - 易用性',
+                    'A11': 'Temperature_resistance - 耐温性',
+                    'A13': 'Reusability - 可重复使用',
+                    'A14': 'Size - 尺寸规格',
+                    'A16': 'Compatibility - 兼容性',
+                    'A18': 'Quality - 质量描述',
+                }
+            },
+            'stats': stats,
+            'products': all_results
+        }, f, indent=2, ensure_ascii=False)
+
+    # 打印统计
+    log_with_timestamp("")
     log_with_timestamp("=" * 80)
-    log_with_timestamp("✅ Stage 1 v2 完成!")
+    log_with_timestamp("📊 属性提取统计")
     log_with_timestamp("=" * 80)
+    log_with_timestamp(f"总有效商品数: {stats['total']}")
+    log_with_timestamp(f"JSON 错误: {stats.get('json_error', 0)}")
+    log_with_timestamp(f"缺失 ASIN: {stats.get('missing_asin', 0)}")
+    log_with_timestamp(f"缺失 Brand: {stats.get('missing_brand', 0)}")
+    log_with_timestamp(f"缺失 Category: {stats.get('missing_category', 0)}")
+    log_with_timestamp(f"缺失 Price: {stats.get('missing_price', 0)}")
+    log_with_timestamp(f"无 A4/A5 (过滤): {stats.get('filtered_no_a4_a5', 0)}")
+    log_with_timestamp("")
+    log_with_timestamp("各槽位非空数量:")
+    for slot in ['A1', 'A2', 'A3', 'A4', 'A5']:
+        count = stats.get(f'has_{slot}', 0)
+        pct = 100 * count / max(1, stats['total'])
+        log_with_timestamp(f"  {slot}: {count} ({pct:.1f}%)")
+    log_with_timestamp("=" * 80)
+
+    # 显示示例
+    log_with_timestamp("")
+    log_with_timestamp("📋 示例输出 (前3个):")
+    for i, p in enumerate(all_results[:3]):
+        print(f"  {i+1}. asin={p['asin']}, A1={p['A1_product_type']}, A2={p['A2_brand']}, A3={p['A3_price']}, A5={p['A5_use_case']}, A7={len(p.get('A7_material', []))} mat, A18={len(p.get('A18_quality', []))} qual")
 
 
 if __name__ == "__main__":

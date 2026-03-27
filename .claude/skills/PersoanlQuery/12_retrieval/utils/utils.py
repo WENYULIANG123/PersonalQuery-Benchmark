@@ -14,6 +14,7 @@ import json
 import os
 import gzip
 import re
+import sys
 from datetime import datetime
 from typing import List, Dict, Tuple, Set, Optional
 
@@ -34,6 +35,12 @@ def log_with_timestamp(message):
     """Log message with timestamp"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}", flush=True)
+
+
+def log_progress(message):
+    """Log message with timestamp to stderr (for detailed progress logs)"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}", flush=True, file=sys.stderr)
 
 
 def compact_text(text: str) -> str:
@@ -432,6 +439,7 @@ def load_product_metadata(meta_file: str, asins: Set[str]) -> Tuple[Dict[str, Di
                         'feature': feature,
                         'description': description,
                         'rank': rank,
+                        'price': item.get('price', ''),
                         'also_buy': item.get('also_buy', []),
                         'also_view': item.get('also_view', []),
                     }
@@ -445,6 +453,7 @@ def load_product_metadata(meta_file: str, asins: Set[str]) -> Tuple[Dict[str, Di
                             'feature': feature,
                             'description': description,
                             'rank': rank,
+                            'price': item.get('price', ''),
                             'also_buy': item.get('also_buy', []),
                             'also_view': item.get('also_view', []),
                             'reviews': [],
@@ -959,7 +968,7 @@ def evaluate_retriever(
     import time
     
     retriever_type = type(retriever).__name__
-    log_with_timestamp(f"[EVAL_RETRIEVER_START] Starting evaluation with {retriever_type} ({len(queries)} queries)")
+    log_progress(f"[EVAL_RETRIEVER_START] Starting evaluation with {retriever_type} ({len(queries)} queries)")
     
     all_metrics = {k: [] for k in k_values}
     all_candidates = []
@@ -986,7 +995,6 @@ def evaluate_retriever(
         retrieved_asins = [r[0] for r in results]
         
         mode_tag = f"[{mode}]" if mode else ""
-        log_with_timestamp(f"  Processed query {idx + 1}/{len(queries)} {mode_tag}: {query_text[:50]}... -> {len(results)} results ({search_time:.2f}s)")
         
         if save_candidates_path:
             all_candidates.append({
@@ -1022,14 +1030,8 @@ def evaluate_retriever(
     if save_candidates_path and all_candidates:
         with open(save_candidates_path, 'w') as f:
             json.dump({'candidates': all_candidates, 'retriever': 'bm25'}, f)
-        log_with_timestamp(f"  Saved candidates to: {save_candidates_path}")
-    
+
     aggregated = compute_aggregate_metrics(all_metrics, k_values)
-    
-    if search_times:
-        avg_search_time = np.mean(search_times)
-        log_with_timestamp(f"[EVAL_RETRIEVER_DONE] {retriever_type} evaluation complete")
-        log_with_timestamp(f"  → {len(queries)} queries, avg search time: {avg_search_time:.3f}s/query")
     
     # 返回结果
     if return_query_results:

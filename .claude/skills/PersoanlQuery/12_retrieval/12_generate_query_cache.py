@@ -43,7 +43,8 @@ from utils.retrievers import (
 
 STAGE9_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/09_targeted_noisy_query"
 STAGE7_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/07_iterative_refinement"
-CACHE_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/12_retrieval/query_cache"
+STAGE6_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query"
+CACHE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/12_retrieval/query_cache"
 
 AVAILABLE_RETRIEVERS = {
     'ANCE': ANCERetriever,
@@ -62,6 +63,14 @@ def find_all_users() -> Set[str]:
     """查找所有用户"""
     users = set()
 
+    # 从Stage6查找
+    if os.path.isdir(STAGE6_DIR):
+        for filename in os.listdir(STAGE6_DIR):
+            if filename.startswith('queries_') and filename.endswith('.json'):
+                user_id = filename.replace('queries_', '').replace('.json', '')
+                users.add(user_id)
+
+    # 从Stage9查找
     if os.path.isdir(STAGE9_DIR):
         for filename in os.listdir(STAGE9_DIR):
             if filename.startswith('noisy_queries_') and filename.endswith('.json'):
@@ -109,6 +118,50 @@ def load_stage9_queries(user_id: str) -> Dict[str, List[Dict]]:
                 'query': noisy_query,
                 'is_noisy': True,
                 'source': 'stage9_noisy'
+            })
+
+    return result
+
+
+def load_stage6_queries(user_id: str) -> List[Dict]:
+    """从Stage6加载查询（兼容新旧两种格式）"""
+    query_file = os.path.join(STAGE6_DIR, f"queries_{user_id}.json")
+
+    if not os.path.exists(query_file):
+        return []
+
+    with open(query_file, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    result = []
+
+    # 新格式：直接是顶层对象，target_user_query 是字符串
+    if 'target_user_query' in data and isinstance(data.get('target_user_query'), str):
+        query_text = data.get('target_user_query', '')
+        asin = data.get('asin', '')
+        if query_text:
+            result.append({
+                'asin': asin,
+                'query': query_text,
+                'is_noisy': False,
+                'source': 'stage6'
+            })
+        return result
+
+    # 旧格式：results 数组
+    for q in data.get('results', []):
+        target = q.get('target_user_query', {})
+        if isinstance(target, dict):
+            query_text = target.get('query', '')
+        else:
+            query_text = str(target)
+        asin = q.get('asin', '')
+        if query_text:
+            result.append({
+                'asin': asin,
+                'query': query_text,
+                'is_noisy': False,
+                'source': 'stage6'
             })
 
     return result
@@ -173,9 +226,13 @@ def load_stage7_noisy_queries(user_id: str) -> List[Dict]:
 
 
 def load_user_queries(user_id: str, modes: Optional[List[str]] = None) -> Dict[str, List[Dict]]:
-    """加载用户查询，支持 stage6/7 的 clean/noisy 模式。"""
+    """加载用户查询，支持 stage6/7/9 的 clean/noisy 模式。"""
     requested_modes = set(modes or ['clean', 'noisy'])
     result = {mode: [] for mode in requested_modes}
+
+    # Stage6 查询
+    if 'stage6' in requested_modes:
+        result['stage6'] = load_stage6_queries(user_id)
 
     if 'clean' in requested_modes or 'noisy' in requested_modes:
         stage9_result = load_stage9_queries(user_id)
@@ -246,8 +303,29 @@ def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str 
     
     return cache
 
+def clear_cache() -> int:
+    """删除旧的查询缓存文件"""
+    if not os.path.exists(CACHE_DIR):
+        return 0
+
+    deleted_count = 0
+    for root, _, files in os.walk(CACHE_DIR):
+        for name in files:
+            if name.endswith('.pkl') or name.endswith('.json'):
+                filepath = os.path.join(root, name)
+                try:
+                    os.remove(filepath)
+                    deleted_count += 1
+                except Exception as e:
+                    log_with_timestamp(f"  ⚠️  删除失败: {filepath} - {e}")
+
+    if deleted_count > 0:
+        log_with_timestamp(f"✓ 已清理旧缓存: {deleted_count} 个文件")
+    return deleted_count
+
 def initialize_cache_dir():
     os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs(os.path.join(CACHE_DIR, "stage6_query"), exist_ok=True)
     os.makedirs(os.path.join(CACHE_DIR, "stage6_clean_query"), exist_ok=True)
     os.makedirs(os.path.join(CACHE_DIR, "stage6_noisy_query"), exist_ok=True)
     os.makedirs(os.path.join(CACHE_DIR, "stage7_clean_query"), exist_ok=True)
@@ -256,6 +334,8 @@ def initialize_cache_dir():
 
 
 def get_cache_subdir(mode: str) -> str:
+    if mode == 'stage6':
+        return os.path.join(CACHE_DIR, "stage6_query")
     if mode == 'clean':
         return os.path.join(CACHE_DIR, "stage6_clean_query")
     if mode == 'noisy':
@@ -268,6 +348,8 @@ def get_cache_subdir(mode: str) -> str:
 
 
 def get_mode_suffix(mode: str) -> str:
+    if mode == 'stage6':
+        return 'stage6'
     if mode in {'clean', 'stage7_clean'}:
         return 'clean'
     if mode in {'noisy', 'stage7_noisy', 'stage7'}:
@@ -310,7 +392,7 @@ def generate_cache_for_all_retrievers(
     if user_ids is None:
         user_ids = list(find_all_users())
     if modes is None:
-        modes = ['clean', 'noisy']
+        modes = ['stage6']
     
     log_with_timestamp("=" * 80)
     log_with_timestamp("🚀 开始生成查询缓存系统")
@@ -324,6 +406,7 @@ def generate_cache_for_all_retrievers(
     log_with_timestamp(f"  • 缓存目录: {CACHE_DIR}")
     log_with_timestamp(f"")
     
+    clear_cache()
     initialize_cache_dir()
     
     start_time = time.time()
@@ -339,31 +422,34 @@ def generate_cache_for_all_retrievers(
         if retriever_name not in AVAILABLE_RETRIEVERS:
             log_with_timestamp(f"⚠️  检索器不存在: {retriever_name}")
             continue
-        
+
         log_with_timestamp(f"\n{'='*80}")
         log_with_timestamp(f"【{stats['retrievers_processed'] + 1}/{len(retriever_names)}】正在处理检索器: {retriever_name}")
         log_with_timestamp(f"{'='*80}")
-        
+
         retriever_class = AVAILABLE_RETRIEVERS[retriever_name]
-        
+
+        # ⚡ 性能优化：在用户循环外初始化检索器，每个检索器只加载一次模型
+        log_with_timestamp(f"  初始化检索器 {retriever_name}...")
+        retriever = retriever_class()
+        log_with_timestamp(f"  ✓ 检索器初始化完成，模型已加载")
+
         for user_idx, user_id in enumerate(user_ids):
             log_with_timestamp(f"  【用户 {user_idx + 1}/{len(user_ids)}】{user_id}")
-            
+
             user_queries = load_user_queries(user_id, modes)
             if not any(user_queries.get(m, []) for m in modes):
                 log_with_timestamp(f"    ⚠️  用户 {user_id} 没有查询数据，跳过")
                 continue
-            
-            retriever = None
-            
+
             for mode_idx, mode in enumerate(modes):
                 queries = user_queries.get(mode, [])
                 if not queries:
                     log_with_timestamp(f"    ⚠️  {mode} 模式无查询，跳过")
                     continue
-                
+
                 log_with_timestamp(f"    【模式 {mode_idx + 1}/{len(modes)}】{mode.upper()}: {len(queries)} 个查询")
-                
+
                 if cache_exists_for_query(retriever_name, user_id, mode):
                     cache_file = get_cache_file_path(retriever_name, user_id, mode)
                     file_size_mb = os.path.getsize(cache_file) / (1024 * 1024)
@@ -374,15 +460,10 @@ def generate_cache_for_all_retrievers(
                     stats['total_cached'] += len(queries)
                     stats['total_queries'] += len(queries)
                     continue
-                
-                if retriever is None:
-                    log_with_timestamp(f"      初始化检索器 {retriever_name}...")
-                    retriever = retriever_class()
-                    log_with_timestamp(f"      ✓ 检索器初始化完成")
-                
+
                 log_with_timestamp(f"      开始编码查询...")
                 cache = encode_queries(retriever, queries, retriever_name, user_id, mode)
-                
+
                 if cache:
                     log_with_timestamp(f"      成功编码 {len(cache)} 个查询，开始保存...")
                     save_cache_for_retriever(retriever_name, user_id, mode, cache)
@@ -390,9 +471,9 @@ def generate_cache_for_all_retrievers(
                     log_with_timestamp(f"      ✓ {retriever_name}|{user_id}|{mode} 处理完成")
                 else:
                     log_with_timestamp(f"      ⚠️  未生成任何缓存")
-                
+
                 stats['total_queries'] += len(queries)
-        
+
         log_with_timestamp(f"✓ 检索器 {retriever_name} 全部用户处理完成\n")
         stats['retrievers_processed'] += 1
     
@@ -450,8 +531,8 @@ def main():
     parser.add_argument(
         '--modes',
         nargs='+',
-        default=['clean', 'noisy'],
-        help='查询模式 (默认: clean noisy). 可选: clean noisy stage7_clean stage7_noisy stage7'
+        default=['stage6'],
+        help='查询模式 (默认: stage6). 可选: stage6 clean noisy stage7_clean stage7_noisy stage7'
     )
     parser.add_argument(
         '--include-stage7',
@@ -468,7 +549,12 @@ def main():
         action='store_true',
         help='列出所有可用检索器并退出'
     )
-    
+    parser.add_argument(
+        '--clear-cache',
+        action='store_true',
+        help='运行前先清理旧的查询缓存'
+    )
+
     args = parser.parse_args()
     
     if args.list_users:
@@ -484,13 +570,17 @@ def main():
             log_with_timestamp(f"  - {name}")
         return
     
-    valid_modes = {'clean', 'noisy', 'stage7', 'stage7_clean', 'stage7_noisy'}
+    valid_modes = {'stage6', 'clean', 'noisy', 'stage7', 'stage7_clean', 'stage7_noisy'}
     invalid_modes = [m for m in args.modes if m not in valid_modes]
     if invalid_modes:
         raise ValueError(f"不支持的查询模式: {invalid_modes}. 可选: {sorted(valid_modes)}")
 
     extra_modes = ['stage7_clean', 'stage7_noisy'] if args.include_stage7 else []
     final_modes = list(dict.fromkeys(args.modes + extra_modes))
+
+    # 清理旧缓存
+    if args.clear_cache:
+        clear_cache()
 
     stats = generate_cache_for_all_retrievers(
         retriever_names=args.retrievers,

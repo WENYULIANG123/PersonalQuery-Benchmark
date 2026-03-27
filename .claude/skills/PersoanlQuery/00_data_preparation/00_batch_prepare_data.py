@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-import argparse
 import gzip
 import json
 import os
 import shutil
+import re
 from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Set
@@ -14,16 +14,33 @@ def log_with_timestamp(message: str) -> None:
     print(f"[{timestamp}] {message}", flush=True)
 
 
-def count_words(text: str) -> int:
+def has_long_sentence(text: str, min_words: int) -> bool:
+    """Check if text contains at least one sentence with >= min_words words."""
+    if not text:
+        return False
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    for sent in sentences:
+        if len(sent.split()) >= min_words:
+            return True
+    return False
+
+
+def count_long_sentences(text: str, min_words: int) -> int:
+    """Count how many sentences have >= min_words words."""
     if not text:
         return 0
-    return len(text.split())
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    return sum(1 for sent in sentences if len(sent.split()) >= min_words)
 
 
-def select_users_by_long_reviews(review_file: str, min_words: int, min_long_reviews: int) -> Dict[str, int]:
-    long_review_counts: Dict[str, int] = defaultdict(int)
+def select_users_by_long_reviews(review_file: str, min_words: int, min_long_sentences: int) -> Dict[str, int]:
+    """
+    统计每个用户有多少个长句子（词数 >= min_words）。
+    返回满足 min_long_sentences 条件的用户及其长句子总数。
+    """
+    user_long_sentence_counts: Dict[str, int] = defaultdict(int)
 
-    log_with_timestamp("Scanning reviews for long-review user filtering...")
+    log_with_timestamp("Scanning reviews for long-sentence user filtering...")
     with gzip.open(review_file, "rt", encoding="utf-8") as f:
         for line in f:
             try:
@@ -36,16 +53,17 @@ def select_users_by_long_reviews(review_file: str, min_words: int, min_long_revi
             if not user_id:
                 continue
 
-            if count_words(review_text) >= min_words:
-                long_review_counts[user_id] += 1
+            # Count how many sentences in this review have >= min_words words
+            num_long_sents = count_long_sentences(review_text, min_words)
+            user_long_sentence_counts[user_id] += num_long_sents
 
     selected = {
         user_id: count
-        for user_id, count in long_review_counts.items()
-        if count >= min_long_reviews
+        for user_id, count in user_long_sentence_counts.items()
+        if count >= min_long_sentences
     }
 
-    log_with_timestamp(f"Users with >= {min_long_reviews} reviews of >= {min_words} words: {len(selected)}")
+    log_with_timestamp(f"Users with >= {min_long_sentences} long sentences (>= {min_words} words each): {len(selected)}")
     return selected
 
 
@@ -83,7 +101,12 @@ def build_user_output(
     user_product_titles: Dict[str, str],
     asin_reviews: Dict[str, List[Dict]],
     output_dir: str,
+    min_words: int = 25,
 ) -> None:
+    """
+    收集用户的所有长句子（词数 >= min_words），按商品组织输出。
+    输出格式兼容 Stage 5：使用 target_reviews 字段存储完整评论文本。
+    """
     results = []
     for asin in sorted(user_asins):
         target_reviews = []
@@ -95,7 +118,9 @@ def build_user_output(
                 continue
 
             if reviewer_id == user_id:
-                target_reviews.append(text)
+                # Check if this review has at least one sentence with >= min_words
+                if has_long_sentence(text, min_words):
+                    target_reviews.append(text)
 
         if not target_reviews:
             continue
@@ -124,27 +149,31 @@ def build_user_output(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Stage 0: User selection by long-review count")
-    parser.add_argument("--review-file", required=True, help="Path to Amazon review JSON.GZ")
-    parser.add_argument("--output-dir", required=True, help="Output directory")
-    parser.add_argument("--min-words", type=int, default=25, help="Min words per review")
-    parser.add_argument("--min-long-reviews", type=int, default=20, help="Min long-review count per user")
-    parser.add_argument("--max-other-reviews", type=int, default=20, help="Deprecated and ignored; other-user reviews are not saved")
-    args = parser.parse_args()
+    # ============ 硬编码参数 ============
+    REVIEW_FILE = "/fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/Arts_Crafts_and_Sewing.json.gz"
+    OUTPUT_DIR = "/fs04/ar57/wenyu/result/personal_query/00_data_preparation"
+    MIN_WORDS = 25            # 每句话最少词数
+    MIN_LONG_SENTENCES = 20  # 每个用户最少长句子数（词数 >= MIN_WORDS）
+    MAX_USERS = 10000         # 最大用户数（0表示不限制）
 
-    if os.path.isdir(args.output_dir):
-        log_with_timestamp(f"Removing existing output directory: {args.output_dir}")
-        shutil.rmtree(args.output_dir)
-    os.makedirs(args.output_dir, exist_ok=True)
+    if os.path.isdir(OUTPUT_DIR):
+        log_with_timestamp(f"Removing existing output directory: {OUTPUT_DIR}")
+        shutil.rmtree(OUTPUT_DIR)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     log_with_timestamp("=" * 80)
-    log_with_timestamp("Stage 0: Batch Data Preparation (Long-Review User Filtering)")
+    log_with_timestamp("Stage 0: Batch Data Preparation (Long-Sentence User Filtering)")
     log_with_timestamp("=" * 80)
+    log_with_timestamp(f"Review file: {REVIEW_FILE}")
+    log_with_timestamp(f"Output directory: {OUTPUT_DIR}")
+    log_with_timestamp(f"Min words per sentence: {MIN_WORDS}")
+    log_with_timestamp(f"Min long-sentence count per user: {MIN_LONG_SENTENCES}")
+    log_with_timestamp(f"Max users: {MAX_USERS if MAX_USERS > 0 else 'unlimited'}")
 
     selected_user_counts = select_users_by_long_reviews(
-        args.review_file,
-        args.min_words,
-        args.min_long_reviews,
+        REVIEW_FILE,
+        MIN_WORDS,
+        MIN_LONG_SENTENCES,
     )
 
     selected_user_ids = set(selected_user_counts.keys())
@@ -152,8 +181,13 @@ def main() -> None:
         log_with_timestamp("No users matched criteria. Exiting.")
         return
 
+    # Limit to MAX_USERS if specified
+    if MAX_USERS > 0 and len(selected_user_ids) > MAX_USERS:
+        selected_user_ids = set(list(sorted(selected_user_ids))[:MAX_USERS])
+        log_with_timestamp(f"Limited to {MAX_USERS} users")
+
     user_products, user_product_titles, asin_reviews = collect_reviews_for_selected_users(
-        args.review_file,
+        REVIEW_FILE,
         selected_user_ids,
     )
 
@@ -165,14 +199,15 @@ def main() -> None:
             user_asins=user_products.get(user_id, set()),
             user_product_titles=user_product_titles.get(user_id, {}),
             asin_reviews=asin_reviews,
-            output_dir=args.output_dir,
+            output_dir=OUTPUT_DIR,
+            min_words=MIN_WORDS,
         )
 
-    selected_users_file = os.path.join(args.output_dir, "selected_users.json")
+    selected_users_file = os.path.join(OUTPUT_DIR, "selected_users.json")
     selected_users = [
         {
             "user_id": user_id,
-            "long_review_count": selected_user_counts[user_id],
+            "long_sentence_count": selected_user_counts[user_id],
             "product_count": len(user_products.get(user_id, set())),
         }
         for user_id in sorted(selected_user_ids)
@@ -182,10 +217,9 @@ def main() -> None:
             {
                 "timestamp": datetime.now().isoformat(),
                 "selection_criteria": {
-                    "min_words": args.min_words,
-                    "min_long_reviews": args.min_long_reviews,
-                    "max_other_reviews": args.max_other_reviews,
-                    "save_other_reviews": False,
+                    "min_words": MIN_WORDS,
+                    "min_long_sentences": MIN_LONG_SENTENCES,
+                    "max_users": MAX_USERS,
                 },
                 "total_selected": len(selected_users),
                 "selected_users": selected_users,
@@ -198,7 +232,7 @@ def main() -> None:
     log_with_timestamp("=" * 80)
     log_with_timestamp("Stage 0 Complete")
     log_with_timestamp(f"Selected users: {len(selected_users)}")
-    log_with_timestamp(f"Output directory: {args.output_dir}")
+    log_with_timestamp(f"Output directory: {OUTPUT_DIR}")
     log_with_timestamp(f"User list: {selected_users_file}")
     log_with_timestamp("=" * 80)
 

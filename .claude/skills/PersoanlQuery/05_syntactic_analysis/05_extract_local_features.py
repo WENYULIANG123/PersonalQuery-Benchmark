@@ -12,6 +12,7 @@ import os
 import sys
 import json
 import logging
+import sys
 from datetime import datetime
 from typing import Dict, List, Optional
 from pathlib import Path
@@ -47,7 +48,8 @@ LocalFeatureExtractor = SentenceLevelFeatureExtractor
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
 
@@ -151,28 +153,84 @@ def load_user_reviews(reviews_file: str) -> Dict[str, List[Dict]]:
     return user_reviews
 
 
-def extract_dependency_structures_from_doc(doc) -> Dict:
+# ============ Multiprocessing worker for dependency extraction ============
+import re
+import multiprocessing as mp
+
+# Global variables for worker processes
+_worker_nlp = None
+
+def _init_worker():
+    """Initialize spaCy model in each worker process."""
+    global _worker_nlp
+    import spacy
+    _worker_nlp = spacy.load('en_core_web_sm')
+
+def _process_user_mp(item):
+    """Process a single user's reviews (for multiprocessing)."""
+    user_id, reviews = item
+    global _worker_nlp
+    # Create a simple extractor-like object
+    class SimpleExtractor:
+        nlp = _worker_nlp
+    simple_extractor = SimpleExtractor()
+    profile = extract_user_profile(user_id, reviews, simple_extractor, None, spacy_n_process=1, spacy_batch_size=32)
+    return user_id, profile
+
+
+def filter_long_sentences(text: str, min_words: int = 25) -> str:
     """
-    Extract dependency relation structures from a single text.
+    Pre-filter sentences by word count before spaCy parsing.
+    Only keep sentences with >= min_words words.
+    This avoids parsing short sentences that won't be used.
+    """
+    # Simple sentence splitting using regex (faster than spaCy for this task)
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    long_sents = [s for s in sentences if len(s.split()) >= min_words]
+    return ' '.join(long_sents)
+
+
+def extract_dependency_structures_from_doc(doc, min_token_length: int = 25) -> Dict:
+    """
+    Extract comprehensive linguistic features from a single text.
+    Only considers sentences with >= min_token_length tokens.
+
+    Features extracted:
+    1. Length features: avg sentence length, token count, review length
+    2. Syntactic complexity: dependency depth, subordinate clause count/ratio
+    3. Structure type: relative clause, passive, participial, infinitive, appositive, parenthetical, PP ratios
+    4. Modifier density: adjective, adverb, noun modifier densities
+    5. Organization: coordination, clause chaining, insertion frequency, linearity
 
     Returns:
-        Dict with dep_rel distribution, tree depth stats, and dep patterns.
+        Dict with all linguistic features.
     """
     if len(doc) == 0:
         return {}
 
+    # Token-level tokenization for length features
     n_tokens = len(doc)
 
-    # 1. Dependency relation distribution
+    # Dependency relation distribution (for complexity_score compatibility)
     dep_counts = defaultdict(int)
     for token in doc:
         dep_counts[token.dep_] += 1
-    dep_dist = {f"dep_{k}": v / n_tokens for k, v in dep_counts.items()}
-
-    # Raw counts for complexity scoring
     dep_raw_counts = dict(dep_counts)
 
-    # 2. Dependency tree depth per sentence
+    # Dependency relation types
+    RELATIVE_CLAUSE_DEPS = {"relcl", "acl:relcl", "rcmod"}
+    PASSIVE_DEPS = {"nsubjpass", "auxpass", "agent"}
+    PARTICIPIAL_DEPS = {"vbg", "vbn"}  # gerund and past participle
+    INFINITIVE_DEPS = {"aux", "auxpass", "inf"}  # infinitive markers
+    APPOSITIVE_DEPS = {"appos", "parataxis"}
+    PARENTHETICAL_DEPS = {"cc", "prep"}
+    PREP_PHRASE_DEPS = {"prep", "pobj", "pcomp"}
+    COORDINATION_DEPS = {"cc", "conj"}
+    NOUN_MODIFIER_DEPS = {"compound", "nn", "amod", "nummod"}
+
+    # Deps for depth calculation
+    CLAUSAL_DEPS = {"ccomp", "xcomp", "advcl", "acl", "acl:relcl", "relcl", "csubj", "csubjpass", "ccomp"}
+
     def token_depth(token):
         depth = 0
         current = token
@@ -181,52 +239,246 @@ def extract_dependency_structures_from_doc(doc) -> Dict:
             current = current.head
         return depth
 
-    sent_depths = []
-    for sent in doc.sents:
-        max_depth = max((token_depth(tok) for tok in sent), default=0)
-        sent_depths.append(max_depth)
+    # ========================================
+    # Filter sentences by minimum token length
+    # ========================================
+    all_sents = list(doc.sents)
+    total_sents = len(all_sents)
+    long_sents = [sent for sent in all_sents if len(sent) >= min_token_length]
 
-    avg_tree_depth = sum(sent_depths) / len(sent_depths) if sent_depths else 0.0
-    max_tree_depth = max(sent_depths) if sent_depths else 0
+    if not long_sents:
+        # No sentences meet the threshold - return minimal features
+        return {
+            "n_tokens": n_tokens,
+            "n_long_sentences": 0,
+            "long_sent_ratio": 0.0,
+            "mean_sent_length": 0.0,
+            "mean_token_count": 0.0,
+            "mean_review_length": 0.0,
+            "avg_dependency_depth": 0.0,
+            "max_dependency_depth": 0,
+            "avg_subordinate_clause_count": 0.0,
+            "subordinate_ratio": 0.0,
+            "relative_clause_ratio": 0.0,
+            "passive_ratio": 0.0,
+            "participial_ratio": 0.0,
+            "infinitive_ratio": 0.0,
+            "appositive_ratio": 0.0,
+            "parenthetical_ratio": 0.0,
+            "prep_phrase_ratio": 0.0,
+            "adj_density": 0.0,
+            "adv_density": 0.0,
+            "noun_modifier_density": 0.0,
+            "coordination_ratio": 0.0,
+            "clause_chaining_ratio": 0.0,
+            "insertion_frequency": 0.0,
+            "linearity_degree": 0.0,
+            "_dep_raw_counts": dep_raw_counts,
+        }
 
-    # 3. Average number of dependents per token
-    dependents_per_token = [len(list(tok.children)) for tok in doc]
-    avg_dependents = sum(dependents_per_token) / len(dependents_per_token) if dependents_per_token else 0.0
+    # ========================================
+    # 1. LENGTH FEATURES (from long sentences only)
+    # ========================================
+    sent_lengths = [len(sent) for sent in long_sents]
+    mean_sent_length = sum(sent_lengths) / len(sent_lengths)
+    mean_token_count = n_tokens  # total tokens in doc
+    mean_review_length = n_tokens / len(long_sents) if long_sents else 0.0
 
-    # 4. Head-direction features (left vs right dependents)
-    left_deps = sum(1 for tok in doc if tok.head.i > tok.i and tok.dep_ != "ROOT")
-    right_deps = sum(1 for tok in doc if tok.head.i < tok.i and tok.dep_ != "ROOT")
-    total_non_root = left_deps + right_deps
-    left_dep_ratio = left_deps / total_non_root if total_non_root > 0 else 0.5
-    right_dep_ratio = right_deps / total_non_root if total_non_root > 0 else 0.5
+    # ========================================
+    # 2. SYNTACTIC COMPLEXITY FEATURES
+    # ========================================
+    all_depths = []
+    all_subordinate_counts = []
+    total_subordinate = 0
 
-    # 5. Dependency distance (average absolute distance between token and its head)
-    dep_distances = [abs(tok.i - tok.head.i) for tok in doc if tok.dep_ != "ROOT"]
-    avg_dep_distance = sum(dep_distances) / len(dep_distances) if dep_distances else 0.0
+    for sent in long_sents:
+        sent_depths = [token_depth(tok) for tok in sent]
+        all_depths.extend(sent_depths)
 
-    # 6. Subordination ratio (clausal deps / total deps)
-    clausal_deps = {"ccomp", "xcomp", "advcl", "acl", "acl:relcl", "relcl", "csubj"}
-    n_clausal = sum(1 for tok in doc if tok.dep_ in clausal_deps)
-    subordination_ratio = n_clausal / n_tokens if n_tokens > 0 else 0.0
+        # Count subordinate clauses in this sentence
+        sub_count = sum(1 for tok in sent if tok.dep_ in CLAUSAL_DEPS)
+        all_subordinate_counts.append(sub_count)
+        total_subordinate += sub_count
 
+    avg_dependency_depth = sum(all_depths) / len(all_depths) if all_depths else 0.0
+    max_dependency_depth = max(all_depths) if all_depths else 0
+    avg_subordinate_clause_count = sum(all_subordinate_counts) / len(all_subordinate_counts) if all_subordinate_counts else 0.0
+    subordinate_ratio = total_subordinate / n_tokens if n_tokens > 0 else 0.0
+
+    # ========================================
+    # 3. STRUCTURE TYPE FEATURES (ratios)
+    # ========================================
+    n_relative = sum(1 for tok in doc if tok.dep_ in RELATIVE_CLAUSE_DEPS)
+    n_passive = sum(1 for tok in doc if tok.dep_ in PASSIVE_DEPS)
+    n_participial = sum(1 for tok in doc if tok.dep_ in PARTICIPIAL_DEPS or tok.tag_ in {"VBG", "VBN"})
+    n_infinitive = sum(1 for tok in doc if tok.dep_ in INFINITIVE_DEPS or tok.tag_ in {"VB", "TO"})
+    n_appositive = sum(1 for tok in doc if tok.dep_ in APPOSITIVE_DEPS)
+    n_parenthetical = sum(1 for tok in doc if tok.dep_ in PARENTHETICAL_DEPS)
+    n_prep_phrase = sum(1 for tok in doc if tok.dep_ in PREP_PHRASE_DEPS)
+
+    relative_clause_ratio = n_relative / n_tokens if n_tokens > 0 else 0.0
+    passive_ratio = n_passive / n_tokens if n_tokens > 0 else 0.0
+    participial_ratio = n_participial / n_tokens if n_tokens > 0 else 0.0
+    infinitive_ratio = n_infinitive / n_tokens if n_tokens > 0 else 0.0
+    appositive_ratio = n_appositive / n_tokens if n_tokens > 0 else 0.0
+    parenthetical_ratio = n_parenthetical / n_tokens if n_tokens > 0 else 0.0
+    prep_phrase_ratio = n_prep_phrase / n_tokens if n_tokens > 0 else 0.0
+
+    # ========================================
+    # 4. MODIFIER DENSITY FEATURES
+    # ========================================
+    n_adjectives = sum(1 for tok in doc if tok.pos_ == "ADJ")
+    n_adverbs = sum(1 for tok in doc if tok.pos_ == "ADV")
+    n_noun_modifiers = sum(1 for tok in doc if tok.dep_ in NOUN_MODIFIER_DEPS)
+
+    adj_density = n_adjectives / n_tokens if n_tokens > 0 else 0.0
+    adv_density = n_adverbs / n_tokens if n_tokens > 0 else 0.0
+    noun_modifier_density = n_noun_modifiers / n_tokens if n_tokens > 0 else 0.0
+
+    # ========================================
+    # 5. ORGANIZATION FEATURES
+    # ========================================
+    n_coordination = sum(1 for tok in doc if tok.dep_ in COORDINATION_DEPS)
+    coordination_ratio = n_coordination / n_tokens if n_tokens > 0 else 0.0
+
+    # Clause chaining: sequences of clauses connected by conj
+    clause_chaining_count = 0
+    for sent in long_sents:
+        clause_tags = [tok.dep_ for tok in sent]
+        for i in range(len(clause_tags) - 1):
+            if clause_tags[i] == "conj" and clause_tags[i+1] == "conj":
+                clause_chaining_count += 1
+    clause_chaining_ratio = clause_chaining_count / len(long_sents) if long_sents else 0.0
+
+    # Insertion frequency: adverbial clauses (advcl)
+    n_insertions = sum(1 for tok in doc if tok.dep_ == "advcl")
+    insertion_frequency = n_insertions / len(long_sents) if long_sents else 0.0
+
+    # Linearity degree: average distance between related tokens / expected distance
+    # High linearity = tokens are close to their heads
+    dep_distances = [abs(tok.i - tok.head.i) for tok in doc if tok.dep_ != "ROOT" and tok.dep_ != "punct"]
+    avg_linearity = sum(dep_distances) / len(dep_distances) if dep_distances else 0.0
+    # Normalize: lower distance = higher linearity
+    linearity_degree = 1.0 / (1.0 + avg_linearity) if avg_linearity >= 0 else 1.0
+
+    # ========================================
+    # PRECOMPUTE for complexity_score (avoid re-traversal in complexity_score)
+    # ========================================
+    # Max clause nesting depth
+    clausal_set = {"advcl", "acl", "acl:relcl", "relcl", "ccomp", "xcomp", "csubj"}
+    clause_nesting = 0
+    for tok in doc:
+        if tok.dep_ not in clausal_set:
+            continue
+        cur = tok
+        depth = 0
+        while cur.head != cur:
+            if cur.dep_ in clausal_set:
+                depth += 1
+            cur = cur.head
+        if depth > clause_nesting:
+            clause_nesting = depth
+
+    # Clausal count
+    clausal_count = sum(1 for t in doc if t.dep_ in clausal_set)
+
+    # Max conj chain depth
+    conj_chain = 0
+    for tok in doc:
+        if tok.dep_ != "conj":
+            continue
+        cur = tok
+        depth = 0
+        while cur.head != cur:
+            if cur.dep_ == "conj":
+                depth += 1
+            cur = cur.head
+        if depth > conj_chain:
+            conj_chain = depth
+
+    # Double negation count
+    double_neg = 0
+    for tok in doc:
+        if tok.dep_ == "neg":
+            neg_children = sum(1 for ch in tok.head.children if ch.dep_ == "neg")
+            if neg_children > 1:
+                double_neg += (neg_children - 1)
+
+    # Max negation scope depth
+    neg_scope = 0
+    for tok in doc:
+        if tok.dep_ != "neg":
+            continue
+        cur = tok.head
+        depth = 0
+        while cur.dep_ != "ROOT" and cur.dep_ != "punct":
+            depth += 1
+            cur = cur.head
+        if depth > neg_scope:
+            neg_scope = depth
+
+    # Max token depth
+    max_depth = max(all_depths) if all_depths else 0
+
+    # Sentence count and non-punct tokens
+    n_sent = len(all_sents)
+    non_punct_tokens = sum(1 for t in doc if t.dep_ != "punct")
+
+    # ========================================
+    # Aggregate features
+    # ========================================
     features = {
         "n_tokens": n_tokens,
-        "avg_tree_depth": avg_tree_depth,
-        "max_tree_depth": max_tree_depth,
-        "avg_dependents_per_token": avg_dependents,
-        "left_dep_ratio": left_dep_ratio,
-        "right_dep_ratio": right_dep_ratio,
-        "avg_dep_distance": avg_dep_distance,
-        "subordination_ratio": subordination_ratio,
-        **dep_dist,
+        "n_long_sentences": len(long_sents),
+        "long_sent_ratio": len(long_sents) / total_sents if total_sents > 0 else 0.0,
+        # Length features
+        "mean_sent_length": mean_sent_length,
+        "mean_token_count": mean_token_count,
+        "mean_review_length": mean_review_length,
+        # Syntactic complexity
+        "avg_dependency_depth": avg_dependency_depth,
+        "max_dependency_depth": max_dependency_depth,
+        "avg_subordinate_clause_count": avg_subordinate_clause_count,
+        "subordinate_ratio": subordinate_ratio,
+        # Structure types
+        "relative_clause_ratio": relative_clause_ratio,
+        "passive_ratio": passive_ratio,
+        "participial_ratio": participial_ratio,
+        "infinitive_ratio": infinitive_ratio,
+        "appositive_ratio": appositive_ratio,
+        "parenthetical_ratio": parenthetical_ratio,
+        "prep_phrase_ratio": prep_phrase_ratio,
+        # Modifier density
+        "adj_density": adj_density,
+        "adv_density": adv_density,
+        "noun_modifier_density": noun_modifier_density,
+        # Organization
+        "coordination_ratio": coordination_ratio,
+        "clause_chaining_ratio": clause_chaining_ratio,
+        "insertion_frequency": insertion_frequency,
+        "linearity_degree": linearity_degree,
+        # Raw dep counts for complexity_score
         "_dep_raw_counts": dep_raw_counts,
+        # Precomputed values for complexity_score (to avoid re-traversal)
+        "_precomputed": {
+            "clause_nesting": clause_nesting,
+            "clausal_count": clausal_count,
+            "conj_chain": conj_chain,
+            "double_neg": double_neg,
+            "neg_scope": neg_scope,
+            "max_depth": max_depth,
+            "n_tokens": n_tokens,
+            "n_sent": n_sent,
+            "non_punct_tokens": non_punct_tokens,
+        },
     }
+
     return features
 
 
-def extract_dependency_structures(nlp, text: str) -> Dict:
+def extract_dependency_structures(nlp, text: str, min_token_length: int = 25) -> Dict:
     doc = nlp(text)
-    return extract_dependency_structures_from_doc(doc)
+    return extract_dependency_structures_from_doc(doc, min_token_length=min_token_length)
 
 
 def complexity_level(doc) -> str:
@@ -368,15 +620,19 @@ def extract_user_profile(
     if max_reviews:
         reviews = reviews[:max_reviews]
 
-    # Extract review texts
+    # Extract review texts and pre-filter to keep only long sentences (>=25 words)
+    # This avoids parsing short sentences that won't be used for features
     texts = []
     for review in reviews:
         text = review.get("reviewText", "")
         if text and text.strip():
-            texts.append(text.strip())
+            filtered_text = filter_long_sentences(text.strip(), min_words=25)
+            # Only add if it has content after filtering
+            if filtered_text.strip():
+                texts.append(filtered_text)
 
     if not texts:
-        logger.warning(f"No valid texts found for user {user_id}")
+        logger.warning(f"No valid texts with >=25 word sentences found for user {user_id}")
         return {}
 
     # --- OLD: extract 16 style features ---
@@ -402,7 +658,8 @@ def extract_user_profile(
 
     # --- NEW: extract dependency relation structures ---
     nlp = extractor.nlp  # reuse spaCy model from the extractor
-    docs = list(nlp.pipe(texts, batch_size=spacy_batch_size, n_process=spacy_n_process))
+    # Note: if using multiprocessing, set n_process=1 to avoid nested processes
+    docs = list(nlp.pipe(texts, batch_size=32, n_process=spacy_n_process))
 
     all_dep_features = []
     reviews_with_scores = []
@@ -412,7 +669,8 @@ def extract_user_profile(
         if dep_feats:
             all_dep_features.append(dep_feats)
             dep_counts = dep_feats.get('_dep_raw_counts', {})
-            score_result = complexity_score(dep_counts, doc=doc, return_components=True)
+            precomputed = dep_feats.get('_precomputed', {})
+            score_result = complexity_score(dep_counts, doc=None, return_components=True, precomputed=precomputed)
             if isinstance(score_result, tuple):
                 score, axis_components = score_result
             else:
@@ -611,95 +869,39 @@ def extract_user_abstract_skeletons(
     }
 
 
-def main():
+def main_disentangle():
+    """对已提取的画像进行解耦处理"""
     config = {
-        "reviews_file": "/fs04/ar57/wenyu/result/personal_query/00_data_preparation/all_user_reviews.json",
-        "output_dir": "/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis",
-        "max_reviews": None,
-        "user_ids": None,
-        "mode": "features",
+        "profiles_dir": "/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis",
+        "output_dir": "/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis/disentangled_profiles",
     }
 
-    # Initialize extractor
-    logger.info("Initializing local feature extractor...")
-    extractor = LocalFeatureExtractor()
+    import spacy
+    nlp = spacy.load('en_core_web_sm')
 
-    # Load reviews
-    logger.info(f"Loading reviews from {config['reviews_file']}")
-    user_reviews = load_user_reviews(config['reviews_file'])
+    profiles_dir = Path(config['profiles_dir'])
+    output_dir = Path(config['output_dir'])
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Filter users if specified
-    if config['user_ids']:
-        user_reviews = {uid: user_reviews[uid] for uid in config['user_ids'] if uid in user_reviews}
-        logger.info(f"Processing {len(user_reviews)} specified users")
+    logger.info(f"Loading profiles from {profiles_dir}")
+    profile_files = list(profiles_dir.glob("linguistic_profile_*.json"))
+    logger.info(f"Found {len(profile_files)} profiles")
 
-    if config['mode'] == "skeletons":
-        logger.info("Mode: Sentence Skeleton Extraction")
-        results = []
-        for user_id, reviews in user_reviews.items():
-            logger.info(f"Processing user {user_id} ({len(reviews)} reviews)")
-            skeleton_profile = extract_user_skeletons(
-                user_id, reviews, extractor, max_reviews=config['max_reviews']
-            )
-            if skeleton_profile:
-                save_skeleton_profile(skeleton_profile, config['output_dir'])
-                results.append(skeleton_profile)
+    for profile_file in profile_files:
+        with open(profile_file, 'r', encoding='utf-8') as f:
+            profile = json.load(f)
 
-        logger.info("=" * 60)
-        logger.info("SKELETON EXTRACTION SUMMARY")
-        logger.info("=" * 60)
-        logger.info(f"Total users processed: {len(results)}")
-        logger.info(f"Output directory: {config['output_dir']}")
-        if results:
-            logger.info(f"Most common skeleton: {results[0]['skeleton']}")
-            logger.info(f"Frequency: {results[0]['skeleton_frequency']}")
-        logger.info("=" * 60)
-    elif config['mode'] == "abstract":
-        logger.info("Mode: Abstract Template Extraction")
-        results = []
-        for user_id, reviews in user_reviews.items():
-            logger.info(f"Processing user {user_id} ({len(reviews)} reviews)")
-            abstract_profile = extract_user_abstract_skeletons(
-                user_id, reviews, extractor, max_reviews=config['max_reviews']
-            )
-            if abstract_profile:
-                save_skeleton_profile(abstract_profile, config['output_dir'])
-                results.append(abstract_profile)
+        # 解耦
+        disentangled = disentangle_user_profile(profile, nlp)
 
-        logger.info("=" * 60)
-        logger.info("ABSTRACT TEMPLATE SUMMARY")
-        logger.info("=" * 60)
-        logger.info(f"Total users processed: {len(results)}")
-        logger.info(f"Output directory: {config['output_dir']}")
-        if results:
-            logger.info(f"Most common template: {results[0]['abstract_template']}")
-            logger.info(f"Frequency: {results[0]['template_frequency']}")
-        logger.info("=" * 60)
-    else:
-        # Extract dependency features (original behavior)
-        results = []
-        for user_id, reviews in user_reviews.items():
-            logger.info(f"Processing user {user_id} ({len(reviews)} reviews)")
-            profile = extract_user_profile(user_id, reviews, extractor, config['max_reviews'])
-            if profile:
-                save_profile(profile, config['output_dir'])
-                results.append(profile)
+        # 保存
+        output_file = output_dir / f"disentangled_{profile_file.name}"
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(disentangled, f, indent=2, ensure_ascii=False)
 
-        logger.info("=" * 60)
-        logger.info("EXTRACTION SUMMARY")
-        logger.info("=" * 60)
-        logger.info(f"Total users processed: {len(results)}")
-        logger.info(f"Output directory: {config['output_dir']}")
+        logger.info(f"Disentangled: {profile_file.name}")
 
-        if results:
-            feature_counts = [r["feature_count"] for r in results]
-            logger.info(f"Features per user: min={min(feature_counts)}, max={max(feature_counts)}, avg={sum(feature_counts)/len(feature_counts):.1f}")
-            sample_features = results[0]["dependency_features"]
-            logger.info(f"Sample dependency features ({len(sample_features)}):")
-            for name, value in list(sample_features.items())[:10]:
-                logger.info(f"  {name}: {value:.4f}")
-
-        logger.info("=" * 60)
+    logger.info(f"Done! Disentangled profiles saved to {output_dir}")
 
 
 # ============================================================================
@@ -779,8 +981,40 @@ def _max_neg_scope_depth(doc) -> int:
     return max_depth
 
 
-def complexity_score(dep_counts: dict, doc=None, return_components: bool = False):
-    if doc is None:
+def complexity_score(dep_counts: dict, doc=None, return_components: bool = False,
+                    precomputed: dict = None):
+    """
+    Compute complexity score for a document.
+
+    Args:
+        dep_counts: Dependency relation counts
+        doc: spaCy doc object (optional, used if precomputed is None)
+        return_components: Whether to return axis components
+        precomputed: Precomputed values from extract_dependency_structures_from_doc to avoid re-traversal
+    """
+    if precomputed is not None:
+        # Use precomputed values to avoid re-traversing doc
+        clause_nesting = precomputed.get("clause_nesting", 0)
+        clausal_count = precomputed.get("clausal_count", 0)
+        conj_chain = precomputed.get("conj_chain", 0)
+        double_neg = precomputed.get("double_neg", 0)
+        neg_scope = precomputed.get("neg_scope", 0)
+        max_depth = precomputed.get("max_depth", 0)
+        n_tokens = max(precomputed.get("n_tokens", 1), 1)
+        n_sent = max(precomputed.get("n_sent", 1), 1)
+        non_punct_tokens = precomputed.get("non_punct_tokens", n_tokens)
+
+        subordination_raw = 3.0 * (clausal_count / n_tokens) + 0.9 * clause_nesting
+
+        conj_count = dep_counts.get("conj", 0)
+        coordination_raw = 1.1 * (conj_count / n_tokens) + 0.8 * conj_chain
+
+        neg_count = dep_counts.get("neg", 0)
+        negation_raw = 2.2 * (neg_count / n_tokens) + 1.4 * double_neg + 0.12 * neg_scope
+
+        avg_sent_len = non_punct_tokens / n_sent if n_sent > 0 else 0.0
+        length_depth_raw = 0.05 * avg_sent_len + 0.08 * max_depth
+    elif doc is None:
         subordination_raw = dep_counts.get("advcl", 0) + dep_counts.get("acl", 0) + dep_counts.get("ccomp", 0)
         coordination_raw = dep_counts.get("conj", 0)
         negation_raw = dep_counts.get("neg", 0)
@@ -1471,5 +1705,1242 @@ def fill_abstract_template(template: str, attributes: List[Dict]) -> str:
     return result
 
 
+# ============================================================================
+# 解耦模块 (Disentanglement Module)
+# ============================================================================
+# 核心思想：将文本分解为风格无关的"内容"表示和风格相关的"属性"表示
+# 生成时，将原始文本的"内容"表示与目标风格的"属性"表示结合
+#
+# 架构选择：Denoising Auto-Encoder (DAE) + 对比学习
+# - 内容编码器：从依存树提取内容向量（骨架 + 语义槽位）
+# - 风格编码器：从风格特征提取风格向量（复杂度轴 + POS分布）
+# - 解码器：结合内容向量与目标风格向量，重构文本
+# ============================================================================
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Dict, List, Tuple, Optional
+import numpy as np
+
+
+class ContentEncoder(nn.Module):
+    """
+    内容编码器：从依存树提取内容表示
+
+    输入：句子依存树结构
+    输出：内容向量 (content_embedding)
+
+    内容表示 = 骨架序列 + 语义槽位类型
+    """
+
+    def __init__(self, vocab_size: int = 100, embedding_dim: int = 64, hidden_dim: int = 128, output_dim: int = 128):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
+        self.lstm = nn.LSTM(embedding_dim, hidden_dim, batch_first=True, bidirectional=True)
+        self.fc = nn.Linear(hidden_dim * 2, output_dim)
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            token_ids: (batch, seq_len) 依存关系标签序列
+        Returns:
+            content_embedding: (batch, output_dim)
+        """
+        emb = self.embedding(token_ids)  # (batch, seq_len, embedding_dim)
+        output, (h_n, _) = self.lstm(emb)  # output: (batch, seq_len, hidden_dim*2)
+        # 双向拼接最后一个隐状态
+        h_combined = torch.cat([h_n[0], h_n[1]], dim=-1)  # (batch, hidden_dim*2)
+        content = F.relu(self.fc(h_combined))  # (batch, output_dim)
+        return content
+
+
+class StyleEncoder(nn.Module):
+    """
+    风格编码器：从风格特征提取风格表示
+
+    输入：16维风格特征向量
+    输出：风格向量 (style_embedding)
+
+    风格表示 = 复杂度轴(4维) + POS分布(11维) + 句法标记密度(8维)
+    """
+
+    def __init__(self, input_dim: int = 23, hidden_dim: int = 64, style_dim: int = 64):
+        super().__init__()
+        self.style_dim = style_dim
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, style_dim)
+        )
+
+    def forward(self, style_features: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            style_features: (batch, input_dim) 风格特征
+        Returns:
+            style_embedding: (batch, style_dim)
+        """
+        return self.net(style_features)
+
+
+class DisentangledDecoder(nn.Module):
+    """
+    解码器：结合内容向量与目标风格向量，生成新文本
+
+    输入：内容向量 + 目标风格向量
+    输出：重构的依存关系序列
+    """
+
+    def __init__(self, content_dim: int = 128, style_dim: int = 64, hidden_dim: int = 128, output_dim: int = 100):
+        super().__init__()
+        self.style_dim = style_dim
+        combined_dim = content_dim + style_dim
+        self.net = nn.Sequential(
+            nn.Linear(combined_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim)
+        )
+
+    def forward(self, content: torch.Tensor, target_style: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            content: (batch, content_dim) 内容向量
+            target_style: (batch, style_dim) 目标风格向量
+        Returns:
+            logits: (batch, output_dim) 预测的token logits
+        """
+        combined = torch.cat([content, target_style], dim=-1)
+        return self.net(combined)
+
+
+class DisentanglementModel(nn.Module):
+    """
+    完整解耦模型：内容编码器 + 风格编码器 + 解码器
+
+    训练目标：
+    1. 重构损失：reconstruct(original_text, decoder(content, original_style))
+    2. 对比损失：相同内容不同风格的距离 < 不同内容相同风格的距离
+    3. 风格解耦：content_vector 应不受 style_vector 影响
+    """
+
+    def __init__(self,
+                 vocab_size: int = 100,
+                 content_dim: int = 128,
+                 style_dim: int = 64,
+                 hidden_dim: int = 128):
+        super().__init__()
+        self.content_encoder = ContentEncoder(vocab_size, content_dim // 2, content_dim // 2, content_dim)
+        self.style_encoder = StyleEncoder(input_dim=23, hidden_dim=64, style_dim=style_dim)
+        self.decoder = DisentangledDecoder(content_dim, style_dim, hidden_dim, vocab_size)
+
+    def forward(self, content_tokens: torch.Tensor, style_features: torch.Tensor,
+                target_style: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        前向传播
+
+        Args:
+            content_tokens: (batch, seq_len) 内容token序列
+            style_features: (batch, 23) 原始风格特征
+            target_style: (batch, style_dim) 目标风格向量（用于风格转换）
+
+        Returns:
+            reconstructed_logits: 重构logits
+            content_embedding: 内容向量
+            style_embedding: 风格向量
+        """
+        content_emb = self.content_encoder(content_tokens)
+        style_emb = self.style_encoder(style_features)
+
+        if target_style is None:
+            target_style = style_emb
+
+        reconstructed = self.decoder(content_emb, target_style)
+
+        return reconstructed, content_emb, style_emb
+
+    def encode_content(self, content_tokens: torch.Tensor) -> torch.Tensor:
+        """仅编码内容"""
+        return self.content_encoder(content_tokens)
+
+    def encode_style(self, style_features: torch.Tensor) -> torch.Tensor:
+        """仅编码风格"""
+        return self.style_encoder(style_features)
+
+    def decode(self, content: torch.Tensor, target_style: torch.Tensor) -> torch.Tensor:
+        """仅解码"""
+        return self.decoder(content, target_style)
+
+
+def disentangle_text(doc, dependency_features: Dict) -> Dict:
+    """
+    将单个文本解耦为内容表示和风格表示
+
+    Args:
+        doc: spaCy Doc对象
+        dependency_features: 依存关系特征字典
+
+    Returns:
+        Dict包含:
+            - content: 内容表示
+                - skeleton: 骨架序列（如 "SUBJ am looking for OBJ"）
+                - dep_sequence: 依存关系序列
+                - semantic_slots: 语义槽位列表
+            - style: 风格表示
+                - complexity_axis: 复杂度四维向量
+                - pos_distribution: POS分布向量
+                - syntactic_markers: 句法标记密度向量
+            - disentangled: 是否成功解耦
+    """
+    # ========== 内容表示提取 ==========
+    skeleton_parts = []
+    dep_sequence = []
+    semantic_slots = []
+
+    DEP_TO_SLOT = {
+        "nsubj": "SUBJ", "nsubj:pass": "SUBJ",
+        "dobj": "OBJ", "pobj": "OBJ", "attr": "OBJ",
+        "ROOT": "ROOT", "amod": "AMOD", "advmod": "ADV",
+        "prep": "PREP", "det": "DET",
+    }
+
+    for token in doc:
+        if token.is_punct:
+            continue
+        dep = token.dep_
+        skeleton_parts.append(DEP_TO_SLOT.get(dep, dep))
+        dep_sequence.append(dep)
+
+        # 语义槽位分类
+        if dep in {"nsubj", "nsubj:pass", "dobj", "pobj", "attr"}:
+            semantic_slots.append("ARG")
+        elif dep in {"amod", "advmod", "det"}:
+            semantic_slots.append("MOD")
+        elif dep == "ROOT":
+            semantic_slots.append("PRED")
+        elif dep in {"prep", "agent"}:
+            semantic_slots.append("LINK")
+        else:
+            semantic_slots.append("OTHER")
+
+    # ========== 风格表示提取 ==========
+    # 1. 复杂度四维轴
+    precomputed = dependency_features.get('_precomputed', {})
+    complexity_axis = {
+        'subordination': dependency_features.get('subordinate_ratio', 0.0) * 10,
+        'coordination': dependency_features.get('coordination_ratio', 0.0) * 10,
+        'negation': dependency_features.get('_dep_raw_counts', {}).get('neg', 0) / max(dependency_features.get('n_tokens', 1), 1),
+        'length_depth': dependency_features.get('avg_dependency_depth', 0.0) / 10,
+    }
+
+    # 2. POS分布向量
+    n_tokens = dependency_features.get('n_tokens', 1)
+    pos_dist = {
+        'NOUN': dependency_features.get('upos_dist_NOUN', 0.0),
+        'VERB': dependency_features.get('upos_dist_VERB', 0.0),
+        'ADJ': dependency_features.get('upos_dist_ADJ', 0.0),
+        'ADV': dependency_features.get('upos_dist_ADV', 0.0),
+        'PRON': dependency_features.get('upos_dist_PRON', 0.0),
+        'DET': dependency_features.get('upos_dist_DET', 0.0),
+        'AUX': dependency_features.get('upos_dist_AUX', 0.0),
+        'PART': dependency_features.get('upos_dist_PART', 0.0),
+        'SCONJ': dependency_features.get('upos_dist_SCONJ', 0.0),
+        'CCONJ': dependency_features.get('upos_dist_CCONJ', 0.0),
+        'ADP': dependency_features.get('upos_dist_ADP', 0.0),
+    }
+
+    # 3. 句法标记密度向量
+    syntactic_markers = {
+        'relative_clause': dependency_features.get('relative_clause_ratio', 0.0),
+        'passive': dependency_features.get('passive_ratio', 0.0),
+        'participial': dependency_features.get('participial_ratio', 0.0),
+        'infinitive': dependency_features.get('infinitive_ratio', 0.0),
+        'appositive': dependency_features.get('appositive_ratio', 0.0),
+        'parenthetical': dependency_features.get('parenthetical_ratio', 0.0),
+        'prep_phrase': dependency_features.get('prep_phrase_ratio', 0.0),
+        'insertion': dependency_features.get('insertion_frequency', 0.0),
+    }
+
+    # ========== 组装解耦结果 ==========
+    content_repr = {
+        'skeleton': ' '.join(skeleton_parts),
+        'dep_sequence': dep_sequence,
+        'semantic_slots': semantic_slots,
+        'n_tokens': n_tokens,
+    }
+
+    style_repr = {
+        'complexity_axis': complexity_axis,
+        'pos_distribution': pos_dist,
+        'syntactic_markers': syntactic_markers,
+        # 展平为向量
+        'vector': [
+            complexity_axis['subordination'],
+            complexity_axis['coordination'],
+            complexity_axis['negation'],
+            complexity_axis['length_depth'],
+            pos_dist['NOUN'], pos_dist['VERB'], pos_dist['ADJ'], pos_dist['ADV'],
+            pos_dist['PRON'], pos_dist['DET'], pos_dist['AUX'], pos_dist['PART'],
+            pos_dist['SCONJ'], pos_dist['CCONJ'], pos_dist['ADP'],
+            syntactic_markers['relative_clause'],
+            syntactic_markers['passive'],
+            syntactic_markers['participial'],
+            syntactic_markers['infinitive'],
+            syntactic_markers['appositive'],
+            syntactic_markers['parenthetical'],
+            syntactic_markers['prep_phrase'],
+            syntactic_markers['insertion'],
+        ],
+    }
+
+    return {
+        'content': content_repr,
+        'style': style_repr,
+        'disentangled': True,
+    }
+
+
+def style_transfer(content_skeleton: str,
+                   source_style: Dict,
+                   target_style: Dict,
+                   attributes: List[Dict],
+                   nlp) -> str:
+    """
+    风格转换：将内容与目标风格结合，生成新文本
+
+    Args:
+        content_skeleton: 内容骨架（如 "SUBJ am looking for OBJ"）
+        source_style: 源风格表示
+        target_style: 目标风格表示
+        attributes: 属性列表
+        nlp: spaCy模型
+
+    Returns:
+        转换后的文本
+    """
+    # 1. 解析骨架
+    skeleton_parts = content_skeleton.split()
+
+    # 2. 计算风格插值系数
+    # 在源风格和目标风格之间进行线性插值
+    interpolation_ratio = 0.7  # 保留70%目标风格
+
+    # 3. 生成填充文本
+    # 根据目标风格的复杂度调整填充方式
+
+    # 解析目标风格的复杂度
+    target_complexity = target_style.get('complexity_axis', {})
+    target_markers = target_style.get('syntactic_markers', {})
+
+    # 高复杂度：使用更长的从句结构
+    high_complexity = (
+        target_complexity.get('subordination', 0) > 0.5 or
+        target_markers.get('relative_clause', 0) > 0.1
+    )
+
+    # 4. 填充属性
+    filled_text = _fill_with_style(content_skeleton, attributes, high_complexity)
+
+    return filled_text
+
+
+def _fill_with_style(skeleton: str, attributes: List[Dict], high_complexity: bool) -> str:
+    """
+    根据风格填充骨架
+
+    Args:
+        skeleton: 内容骨架
+        attributes: 属性列表
+        high_complexity: 是否使用高复杂度句式
+    """
+    import random
+
+    if not attributes:
+        return "I am looking for craft supplies."
+
+    # 按维度组织属性
+    by_dim = {}
+    for a in attributes:
+        dim = a.get('dimension', 'Other')
+        val = a.get('value', '').strip()
+        if val and len(val) > 1:
+            by_dim.setdefault(dim, []).append(val)
+
+    if not by_dim:
+        return "I am looking for craft supplies."
+
+    # 提取关键词
+    product = by_dim.get('Product_Category', [''])[0].split('/')[0]
+    brand = by_dim.get('Brand_Preference', [''])[0]
+    color = by_dim.get('Appearance_Color', [''])[0]
+    style = by_dim.get('Style_Design', [''])[0]
+    material = by_dim.get('Material_Composition', [''])[0]
+
+    # 根据复杂度选择句式模板
+    if high_complexity:
+        # 高复杂度：从句、被动、插入语
+        templates = [
+            "I have been searching for {product} that {brand}, which {style} and {material}.",
+            "The {product} I am looking at, with its {color} {style}, is {material}.",
+            "I need {product} that, despite being {brand}, offers {style} in {material}.",
+            "What I am hoping to find is {product} that {brand} with {color} and {style}.",
+        ]
+    else:
+        # 低复杂度：简单句
+        templates = [
+            "I am looking for {product}.",
+            "I need {product} in {color}.",
+            "I want {product} from {brand}.",
+            "I am searching for {product} that is {style}.",
+        ]
+
+    # 填充模板
+    template = random.choice(templates)
+    result = template.format(
+        product=product or 'craft supplies',
+        brand=brand or '',
+        color=color or '',
+        style=style or '',
+        material=material or '',
+    )
+
+    # 清理空白
+    result = ' '.join(result.split())
+    if not result.endswith('.'):
+        result += '.'
+
+    return result
+
+
+def compute_disentanglement_loss(model: DisentanglementModel,
+                                 content_tokens: torch.Tensor,
+                                 style_features: torch.Tensor,
+                                 target_tokens: torch.Tensor,
+                                 lambda_contrastive: float = 0.1,
+                                 lambda_style: float = 0.1) -> Tuple[torch.Tensor, Dict]:
+    """
+    计算解耦损失
+
+    损失函数组成：
+    1. 重构损失：交叉熵
+    2. 对比损失：相同内容应接近，不同内容应远离
+    3. 风格解耦损失：内容向量应与风格向量无关
+
+    Args:
+        model: 解耦模型
+        content_tokens: 内容token序列
+        style_features: 风格特征
+        target_tokens: 目标token序列
+        lambda_contrastive: 对比损失权重
+        lambda_style: 风格解耦损失权重
+
+    Returns:
+        total_loss, loss_dict
+    """
+    # 前向传播
+    reconstructed, content_emb, style_emb = model(content_tokens, style_features)
+
+    # 1. 重构损失
+    recon_loss = F.cross_entropy(reconstructed, target_tokens)
+
+    # 2. 对比损失（简化的infoNCE）
+    # 正样本：相同内容不同风格
+    # 负样本：不同内容
+    batch_size = content_emb.size(0)
+
+    # 内容相似度矩阵
+    content_sim = torch.matmul(content_emb, content_emb.T)  # (batch, batch)
+    content_sim = content_sim / (content_emb.size(-1) ** 0.5)
+
+    # 对角线为正样本，其余为负样本
+    labels = torch.arange(batch_size, device=content_emb.device)
+    contrastive_loss = F.cross_entropy(content_sim, labels)
+
+    # 3. 风格解耦损失
+    # 内容向量和风格向量的互信息应最小化
+    # 简化：只使用前32维内容与风格向量计算差异
+    content_for_style = content_emb[:, :style_emb.size(1)]  # (batch, 32)
+    style_dep_loss = torch.mean(torch.abs(content_for_style - style_emb))
+
+    # 总损失
+    total_loss = recon_loss + lambda_contrastive * contrastive_loss + lambda_style * style_dep_loss
+
+    loss_dict = {
+        'recon_loss': recon_loss.item(),
+        'contrastive_loss': contrastive_loss.item(),
+        'style_dep_loss': style_dep_loss.item(),
+        'total_loss': total_loss.item(),
+    }
+
+    return total_loss, loss_dict
+
+
+def extract_style_vector(dependency_features: Dict) -> np.ndarray:
+    """
+    从依存关系特征中提取风格向量
+
+    Args:
+        dependency_features: 依存关系特征字典
+
+    Returns:
+        style_vector: (23,) 风格向量
+    """
+    # 复杂度轴 (4维)
+    precomputed = dependency_features.get('_precomputed', {})
+    complexity_axis = [
+        dependency_features.get('subordinate_ratio', 0.0) * 10,
+        dependency_features.get('coordination_ratio', 0.0) * 10,
+        dependency_features.get('_dep_raw_counts', {}).get('neg', 0) / max(dependency_features.get('n_tokens', 1), 1),
+        dependency_features.get('avg_dependency_depth', 0.0) / 10,
+    ]
+
+    # POS分布 (11维)
+    pos_dist = [
+        dependency_features.get('upos_dist_NOUN', 0.0),
+        dependency_features.get('upos_dist_VERB', 0.0),
+        dependency_features.get('upos_dist_ADJ', 0.0),
+        dependency_features.get('upos_dist_ADV', 0.0),
+        dependency_features.get('upos_dist_PRON', 0.0),
+        dependency_features.get('upos_dist_DET', 0.0),
+        dependency_features.get('upos_dist_AUX', 0.0),
+        dependency_features.get('upos_dist_PART', 0.0),
+        dependency_features.get('upos_dist_SCONJ', 0.0),
+        dependency_features.get('upos_dist_CCONJ', 0.0),
+        dependency_features.get('upos_dist_ADP', 0.0),
+    ]
+
+    # 句法标记密度 (8维)
+    syntactic_markers = [
+        dependency_features.get('relative_clause_ratio', 0.0),
+        dependency_features.get('passive_ratio', 0.0),
+        dependency_features.get('participial_ratio', 0.0),
+        dependency_features.get('infinitive_ratio', 0.0),
+        dependency_features.get('appositive_ratio', 0.0),
+        dependency_features.get('parenthetical_ratio', 0.0),
+        dependency_features.get('prep_phrase_ratio', 0.0),
+        dependency_features.get('insertion_frequency', 0.0),
+    ]
+
+    return np.array(complexity_axis + pos_dist + syntactic_markers, dtype=np.float32)
+
+
+def compute_style_similarity(style1: np.ndarray, style2: np.ndarray) -> float:
+    """
+    计算两个风格向量之间的相似度
+
+    Args:
+        style1: (23,) 风格向量1
+        style2: (23,) 风格向量2
+
+    Returns:
+        cosine_similarity: 余弦相似度
+    """
+    from numpy.linalg import norm
+
+    if norm(style1) == 0 or norm(style2) == 0:
+        return 0.0
+
+    return np.dot(style1, style2) / (norm(style1) * norm(style2))
+
+
+def interpolate_style(source_style: np.ndarray, target_style: np.ndarray,
+                      alpha: float = 0.7) -> np.ndarray:
+    """
+    在源风格和目标风格之间进行插值
+
+    Args:
+        source_style: 源风格向量
+        target_style: 目标风格向量
+        alpha: 插值系数，0=完全源风格，1=完全目标风格
+
+    Returns:
+        interpolated_style: 插值后的风格向量
+    """
+    return (1 - alpha) * source_style + alpha * target_style
+
+
+def apply_style_transfer(content_skeleton: str,
+                        source_style: np.ndarray,
+                        target_style: np.ndarray,
+                        attributes: List[Dict],
+                        nlp,
+                        alpha: float = 0.7) -> str:
+    """
+    应用风格转换
+
+    将内容骨架从源风格转换到目标风格
+
+    Args:
+        content_skeleton: 内容骨架
+        source_style: 源风格向量
+        target_style: 目标风格向量
+        attributes: 属性列表
+        nlp: spaCy模型
+        alpha: 风格强度，0=保持原风格，1=完全目标风格
+
+    Returns:
+        转换后的文本
+    """
+    # 判断目标风格是否高复杂度
+    # 目标风格的subordination维度
+    target_subordination = target_style[0]
+    target_relative_clause = target_style[15]  # relative_clause_ratio
+
+    high_complexity = target_subordination > 0.5 or target_relative_clause > 0.1
+
+    # 填充骨架
+    filled = _fill_with_style(content_skeleton, attributes, high_complexity)
+
+    return filled
+
+
+# ============================================================================
+# 便捷函数：批量处理用户文本的解耦
+# ============================================================================
+
+def disentangle_user_profile(profile: Dict, nlp) -> Dict:
+    """
+    对用户画像进行解耦处理
+
+    Args:
+        profile: 用户画像字典（包含dependency_features）
+        nlp: spaCy模型
+
+    Returns:
+        解耦后的用户画像
+    """
+    user_id = profile.get('user_id', 'unknown')
+    dependency_features = profile.get('dependency_features', {})
+
+    if not dependency_features:
+        return profile
+
+    # 提取风格向量
+    style_vector = extract_style_vector(dependency_features)
+
+    # 解析复杂度模板
+    complexity_templates = profile.get('complexity_templates', {})
+
+    # 解耦各复杂度等级的内容
+    disentangled_templates = {}
+    for level in ['low', 'medium', 'high']:
+        template_info = complexity_templates.get(level, {})
+        skeleton = template_info.get('raw_skeleton', '')
+
+        if skeleton:
+            # 提取骨架的依存关系序列
+            doc = nlp(skeleton)
+            dep_seq = [token.dep_ for token in doc if not token.is_punct]
+            dep_sequence = ' '.join(dep_seq) if dep_seq else ''
+
+            disentangled_templates[level] = {
+                'skeleton': skeleton,
+                'dep_sequence': dep_sequence,
+                'style_vector': style_vector.tolist(),
+            }
+
+    return {
+        **profile,
+        'disentangled_style': style_vector.tolist(),
+        'disentangled_templates': disentangled_templates,
+        'disentanglement_method': 'dae_contrastive',
+    }
+
+
+# ============================================================================
+# 训练脚本：Disentanglement Model
+# ============================================================================
+# 使用 DAE + 对比学习训练解耦模型
+# ============================================================================
+
+class DisentanglementTrainer:
+    """
+    解耦模型训练器
+
+    功能：
+    1. 数据准备：从用户评论生成训练数据
+    2. 对比学习：同一内容不同风格的正样本对
+    3. 去噪自编码：重构原始文本
+    4. 风格解耦：确保内容向量与风格向量分离
+    """
+
+    def __init__(self,
+                 content_vocab: Dict[str, int] = None,
+                 content_dim: int = 128,
+                 style_dim: int = 64,
+                 hidden_dim: int = 128,
+                 learning_rate: float = 1e-3,
+                 device: str = None):
+        """
+        初始化训练器
+
+        Args:
+            content_vocab: 内容词汇表（依存关系标签 → index）
+            content_dim: 内容向量维度
+            style_dim: 风格向量维度
+            hidden_dim: 隐藏层维度
+            learning_rate: 学习率
+            device: 训练设备（cuda/cpu）
+        """
+        if device is None:
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        else:
+            self.device = device
+
+        # 默认词汇表
+        if content_vocab is None:
+            self.content_vocab = self._build_default_vocab()
+        else:
+            self.content_vocab = content_vocab
+
+        self.vocab_size = len(self.content_vocab)
+
+        # 创建模型
+        self.model = DisentanglementModel(
+            vocab_size=self.vocab_size,
+            content_dim=content_dim,
+            style_dim=style_dim,
+            hidden_dim=hidden_dim
+        ).to(self.device)
+
+        # 优化器
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
+
+        # 训练历史
+        self.train_history = {
+            'recon_loss': [],
+            'contrastive_loss': [],
+            'style_dep_loss': [],
+            'total_loss': [],
+        }
+
+    def _build_default_vocab(self) -> Dict[str, int]:
+        """构建默认的依存关系词汇表"""
+        vocab = {
+            '<PAD>': 0,
+            'nsubj': 1, 'nsubj:pass': 2, 'dobj': 3, 'pobj': 4, 'attr': 5,
+            'ROOT': 6, 'amod': 7, 'advmod': 8, 'prep': 9, 'det': 10,
+            'acl:relcl': 11, 'relcl': 12, 'acl': 13, 'advcl': 14, 'ccomp': 15,
+            'xcomp': 16, 'cc': 17, 'conj': 18, 'neg': 19, 'aux': 20,
+            'auxpass': 21, 'agent': 22, 'appos': 23, 'parataxis': 24,
+            'vbg': 25, 'vbn': 26, 'compound': 27, 'nummod': 28,
+            'mark': 29, 'relcl': 30, 'oprd': 31, 'acomp': 32, 'attr': 33,
+        }
+        return vocab
+
+    def tokens_to_ids(self, tokens: List[str]) -> List[int]:
+        """将token序列转换为ID序列"""
+        return [self.content_vocab.get(t, 0) for t in tokens]
+
+    def ids_to_tokens(self, ids: List[int]) -> List[str]:
+        """将ID序列转换回token序列"""
+        id_to_token = {v: k for k, v in self.content_vocab.items()}
+        return [id_to_token.get(i, '<PAD>') for i in ids]
+
+    def prepare_batch(self,
+                     texts: List[str],
+                     style_vectors: np.ndarray,
+                     nlp) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        准备训练批次
+
+        Args:
+            texts: 文本列表
+            style_vectors: (batch, 23) 风格向量数组
+            nlp: spaCy模型
+
+        Returns:
+            content_tokens: (batch, seq_len) 内容token ID
+            style_features: (batch, 23) 风格特征
+            target_tokens: (batch, seq_len) 目标token ID
+        """
+        batch_size = len(texts)
+        content_token_ids = []
+        target_token_ids = []
+
+        max_len = 0
+
+        # 解析每个文本
+        for text in texts:
+            doc = nlp(text)
+            tokens = []
+            for token in doc:
+                if not token.is_punct:
+                    dep = token.dep_
+                    tokens.append(dep)
+
+            if not tokens:
+                tokens = ['nsubj']
+
+            token_ids = self.tokens_to_ids(tokens)
+            content_token_ids.append(token_ids)
+            target_token_ids.append(token_ids)  # 自编码目标
+
+            max_len = max(max_len, len(token_ids))
+
+        # Padding
+        content_tokens = torch.zeros(batch_size, max_len, dtype=torch.long, device=self.device)
+        target_tokens = torch.zeros(batch_size, max_len, dtype=torch.long, device=self.device)
+
+        for i, (ct, tt) in enumerate(zip(content_token_ids, target_token_ids)):
+            content_tokens[i, :len(ct)] = torch.tensor(ct, device=self.device)
+            target_tokens[i, :len(tt)] = torch.tensor(tt, device=self.device)
+
+        style_features = torch.tensor(style_vectors, dtype=torch.float32, device=self.device)
+
+        return content_tokens, style_features, target_tokens
+
+    def train_step(self,
+                  content_tokens: torch.Tensor,
+                  style_features: torch.Tensor,
+                  target_tokens: torch.Tensor,
+                  lambda_contrastive: float = 0.1,
+                  lambda_style: float = 0.1) -> Dict:
+        """
+        单步训练
+
+        Returns:
+            loss_dict: 损失字典
+        """
+        self.optimizer.zero_grad()
+
+        # 前向传播
+        reconstructed, content_emb, style_emb = self.model(
+            content_tokens, style_features
+        )
+
+        # 计算损失
+        loss, loss_dict = compute_disentanglement_loss(
+            self.model,
+            content_tokens,
+            style_features,
+            target_tokens[:, 0],  # 使用第一个token作为目标
+            lambda_contrastive,
+            lambda_style
+        )
+
+        # 反向传播
+        loss.backward()
+        self.optimizer.step()
+
+        return loss_dict
+
+    def train(self,
+              texts: List[str],
+              style_vectors: np.ndarray,
+              nlp,
+              epochs: int = 10,
+              batch_size: int = 32,
+              lambda_contrastive: float = 0.1,
+              lambda_style: float = 0.1,
+              val_texts: List[str] = None,
+              val_style_vectors: np.ndarray = None,
+              log_every: int = 100) -> Dict:
+        """
+        训练模型
+
+        Args:
+            texts: 训练文本列表
+            style_vectors: (N, 23) 训练风格向量
+            nlp: spaCy模型
+            epochs: 训练轮数
+            batch_size: 批大小
+            lambda_contrastive: 对比损失权重
+            lambda_style: 风格解耦损失权重
+            val_texts: 验证文本（可选）
+            val_style_vectors: 验证风格向量（可选）
+            log_every: 日志打印频率
+
+        Returns:
+            train_history: 训练历史
+        """
+        n_samples = len(texts)
+        n_batches = (n_samples + batch_size - 1) // batch_size
+
+        self.model.train()
+
+        for epoch in range(epochs):
+            epoch_losses = {
+                'recon_loss': 0.0,
+                'contrastive_loss': 0.0,
+                'style_dep_loss': 0.0,
+                'total_loss': 0.0,
+            }
+
+            # 打乱数据
+            indices = np.random.permutation(n_samples)
+
+            for batch_idx in range(n_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, n_samples)
+                batch_indices = indices[start_idx:end_idx]
+
+                batch_texts = [texts[i] for i in batch_indices]
+                batch_styles = style_vectors[batch_indices]
+
+                # 准备数据
+                content_tokens, style_features, target_tokens = self.prepare_batch(
+                    batch_texts, batch_styles, nlp
+                )
+
+                # 训练
+                loss_dict = self.train_step(
+                    content_tokens,
+                    style_features,
+                    target_tokens,
+                    lambda_contrastive,
+                    lambda_style
+                )
+
+                # 累计损失
+                for k, v in loss_dict.items():
+                    epoch_losses[k] += v
+
+                # 日志
+                if (batch_idx + 1) % log_every == 0:
+                    avg_loss = {k: v / log_every for k, v in epoch_losses.items()}
+                    print(f"Epoch {epoch+1}/{epochs} | Batch {batch_idx+1}/{n_batches} | "
+                          f"Loss: {avg_loss['total_loss']:.4f} | "
+                          f"Recon: {avg_loss['recon_loss']:.4f} | "
+                          f"Contrastive: {avg_loss['contrastive_loss']:.4f}")
+
+                    # 重置累计
+                    for k in epoch_losses:
+                        epoch_losses[k] = 0.0
+
+            # Epoch结束
+            avg_epoch_loss = {k: v / n_batches for k, v in epoch_losses.items()}
+            print(f"\n=== Epoch {epoch+1}/{epochs} Summary ===")
+            print(f"  Recon Loss: {avg_epoch_loss['recon_loss']:.4f}")
+            print(f"  Contrastive Loss: {avg_epoch_loss['contrastive_loss']:.4f}")
+            print(f"  Style Dep Loss: {avg_epoch_loss['style_dep_loss']:.4f}")
+            print(f"  Total Loss: {avg_epoch_loss['total_loss']:.4f}\n")
+
+            # 更新历史
+            for k, v in avg_epoch_loss.items():
+                self.train_history[k].append(v)
+
+            # 验证
+            if val_texts is not None and val_style_vectors is not None:
+                val_loss = self.evaluate(val_texts, val_style_vectors, nlp)
+                print(f"  Validation Loss: {val_loss:.4f}\n")
+
+        return self.train_history
+
+    def evaluate(self,
+                texts: List[str],
+                style_vectors: np.ndarray,
+                nlp,
+                batch_size: int = 32) -> float:
+        """评估模型"""
+        self.model.eval()
+
+        n_samples = len(texts)
+        n_batches = (n_samples + batch_size - 1) // batch_size
+        total_loss = 0.0
+
+        with torch.no_grad():
+            for batch_idx in range(n_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, n_samples)
+
+                batch_texts = texts[start_idx:end_idx]
+                batch_styles = style_vectors[start_idx:end_idx]
+
+                content_tokens, style_features, target_tokens = self.prepare_batch(
+                    batch_texts, batch_styles, nlp
+                )
+
+                reconstructed, content_emb, style_emb = self.model(
+                    content_tokens, style_features
+                )
+
+                loss, _ = compute_disentanglement_loss(
+                    self.model,
+                    content_tokens,
+                    style_features,
+                    target_tokens[:, 0],
+                    lambda_contrastive=0.0,
+                    lambda_style=0.0
+                )
+
+                total_loss += loss.item()
+
+        avg_loss = total_loss / n_batches
+        self.model.train()
+        return avg_loss
+
+    def save_model(self, path: str):
+        """保存模型"""
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'train_history': self.train_history,
+            'content_vocab': self.content_vocab,
+        }, path)
+        print(f"Model saved to {path}")
+
+    def load_model(self, path: str):
+        """加载模型"""
+        checkpoint = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.train_history = checkpoint['train_history']
+        self.content_vocab = checkpoint['content_vocab']
+        print(f"Model loaded from {path}")
+
+    def extract_content_embedding(self, text: str, nlp) -> np.ndarray:
+        """提取文本的内容向量"""
+        self.model.eval()
+
+        doc = nlp(text)
+        tokens = [token.dep_ for token in doc if not token.is_punct]
+        if not tokens:
+            tokens = ['nsubj']
+
+        token_ids = torch.tensor(
+            [self.tokens_to_ids(tokens)],
+            dtype=torch.long,
+            device=self.device
+        )
+
+        with torch.no_grad():
+            content_emb = self.model.encode_content(token_ids)
+
+        return content_emb.cpu().numpy()[0]
+
+    def extract_style_embedding(self, style_vector: np.ndarray) -> np.ndarray:
+        """提取风格向量"""
+        self.model.eval()
+
+        style_tensor = torch.tensor(
+            [style_vector],
+            dtype=torch.float32,
+            device=self.device
+        )
+
+        with torch.no_grad():
+            style_emb = self.model.encode_style(style_tensor)
+
+        return style_emb.cpu().numpy()[0]
+
+
+def run_training(config: Dict = None):
+    """
+    运行训练流程
+
+    Args:
+        config: 训练配置字典
+    """
+    if config is None:
+        config = {
+            # 数据路径
+            'reviews_file': '/fs04/ar57/wenyu/result/personal_query/00_data_preparation',
+            'profiles_dir': '/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis',
+            'output_dir': '/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis/disentanglement_model',
+
+            # 模型参数
+            'content_dim': 128,
+            'style_dim': 32,
+            'hidden_dim': 128,
+            'learning_rate': 1e-3,
+
+            # 训练参数
+            'epochs': 10,
+            'batch_size': 32,
+            'lambda_contrastive': 0.1,
+            'lambda_style': 0.1,
+
+            # 损失权重
+            'contrastive_weight': 0.1,
+            'style_dep_weight': 0.1,
+
+            # 其他
+            'log_every': 100,
+            'device': None,
+        }
+
+    import os
+    os.makedirs(config['output_dir'], exist_ok=True)
+
+    print("=" * 60)
+    print("Disentanglement Model Training")
+    print("=" * 60)
+
+    # 1. 加载数据
+    print("\n[1/5] Loading data...")
+    from collections import defaultdict
+
+    # 加载用户评论
+    user_reviews = load_user_reviews(config['reviews_file'])
+    print(f"  Loaded {len(user_reviews)} users' reviews")
+
+    # 加载用户画像
+    profiles_dir = Path(config['profiles_dir'])
+    user_profiles = {}
+    for profile_file in profiles_dir.glob("linguistic_profile_*.json"):
+        with open(profile_file, 'r', encoding='utf-8') as f:
+            profile = json.load(f)
+            user_id = profile.get('user_id')
+            if user_id:
+                user_profiles[user_id] = profile
+    print(f"  Loaded {len(user_profiles)} user profiles")
+
+    # 2. 准备训练数据
+    print("\n[2/5] Preparing training data...")
+
+    texts = []
+    style_vectors = []
+
+    for user_id, reviews in user_reviews.items():
+        if user_id not in user_profiles:
+            continue
+
+        profile = user_profiles[user_id]
+        dep_features = profile.get('dependency_features', {})
+
+        if not dep_features:
+            continue
+
+        # 提取风格向量
+        style_vec = extract_style_vector(dep_features)
+
+        # 提取评论文本
+        for review in reviews[:5]:  # 每个用户最多5条评论
+            text = review.get('reviewText', '')
+            if text and len(text.split()) >= 25:
+                texts.append(text)
+                style_vectors.append(style_vec)
+
+    print(f"  Prepared {len(texts)} training samples")
+
+    if len(texts) == 0:
+        print("  ERROR: No training samples available!")
+        return
+
+    style_vectors = np.array(style_vectors)
+
+    # 2.5 扫描所有依存关系标签，构建完整词汇表
+    print("\n[2.5/5] Building vocabulary from actual data...")
+    import spacy
+    nlp = spacy.load('en_core_web_sm')
+
+    all_deps = set()
+    total_texts = len(texts)
+    for i, text in enumerate(texts):
+        if i % 1000 == 0 or i == total_texts - 1:
+            print(f"    Scanning texts: {i+1}/{total_texts} ({(i+1)*100//total_texts}%)", flush=True)
+        doc = nlp(text)
+        for token in doc:
+            if not token.is_punct:
+                all_deps.add(token.dep_)
+    print(f"  Found {len(all_deps)} unique dependency labels")
+
+    # 构建词汇表：PAD=0, 然后是所有依存关系标签
+    content_vocab = {'<PAD>': 0}
+    for i, dep in enumerate(sorted(all_deps), start=1):
+        content_vocab[dep] = i
+    print(f"  Vocabulary size: {len(content_vocab)}")
+
+    # 3. 初始化训练器
+    print("\n[3/5] Initializing trainer...")
+    trainer = DisentanglementTrainer(
+        content_dim=config['content_dim'],
+        style_dim=config['style_dim'],
+        hidden_dim=config['hidden_dim'],
+        learning_rate=config['learning_rate'],
+        device=config.get('device'),
+        content_vocab=content_vocab
+    )
+    print(f"  Device: {trainer.device}")
+    print(f"  Model params: {sum(p.numel() for p in trainer.model.parameters()):,}")
+    print(f"  Vocab size: {trainer.vocab_size}")
+
+    # 4. 训练
+    print("\n[4/5] Training...")
+
+    history = trainer.train(
+        texts=texts,
+        style_vectors=style_vectors,
+        nlp=nlp,
+        epochs=config['epochs'],
+        batch_size=config['batch_size'],
+        lambda_contrastive=config['lambda_contrastive'],
+        lambda_style=config['lambda_style'],
+        log_every=config['log_every']
+    )
+
+    # 5. 保存模型
+    print("\n[5/5] Saving model...")
+    model_path = os.path.join(config['output_dir'], 'disentanglement_model.pt')
+    trainer.save_model(model_path)
+
+    # 保存词汇表
+    vocab_path = os.path.join(config['output_dir'], 'content_vocab.json')
+    with open(vocab_path, 'w') as f:
+        json.dump(trainer.content_vocab, f, indent=2)
+    print(f"  Vocab saved to {vocab_path}")
+
+    print("\n" + "=" * 60)
+    print("Training Complete!")
+    print("=" * 60)
+
+    # 保存训练历史
+    history_path = os.path.join(config['output_dir'], 'training_history.json')
+    with open(history_path, 'w') as f:
+        json.dump(history, f, indent=2)
+    print(f"  History saved to {history_path}")
+
+
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Stage 5: Disentanglement Model Training & Application')
+    parser.add_argument('--mode', type=str, default='train',
+                       choices=['train', 'disentangle'],
+                       help='运行模式: train=训练解耦模型, disentangle=解耦画像')
+    parser.add_argument('--reviews-file', type=str,
+                       default='/fs04/ar57/wenyu/result/personal_query/00_data_preparation',
+                       help='评论数据路径')
+    parser.add_argument('--profiles-dir', type=str,
+                       default='/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis',
+                       help='用户画像目录')
+    parser.add_argument('--output-dir', type=str,
+                       default='/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis',
+                       help='输出目录')
+    parser.add_argument('--epochs', type=int, default=10, help='训练轮数')
+    parser.add_argument('--batch-size', type=int, default=32, help='批大小')
+    parser.add_argument('--lr', type=float, default=1e-3, help='学习率')
+    parser.add_argument('--content-dim', type=int, default=128, help='内容向量维度')
+    parser.add_argument('--style-dim', type=int, default=32, help='风格向量维度')
+    parser.add_argument('--lambda-contrastive', type=float, default=0.1, help='对比损失权重')
+    parser.add_argument('--lambda-style', type=float, default=0.1, help='风格解耦损失权重')
+    parser.add_argument('--device', type=str, default=None, help='设备 (cuda/cpu)')
+
+    args = parser.parse_args()
+
+    if args.mode == 'train':
+        # 训练解耦模型
+        config = {
+            'reviews_file': args.reviews_file,
+            'profiles_dir': args.profiles_dir,
+            'output_dir': args.output_dir,
+            'content_dim': args.content_dim,
+            'style_dim': args.style_dim,
+            'hidden_dim': 128,
+            'learning_rate': args.lr,
+            'epochs': args.epochs,
+            'batch_size': args.batch_size,
+            'lambda_contrastive': args.lambda_contrastive,
+            'lambda_style': args.lambda_style,
+            'log_every': 100,
+            'device': args.device,
+        }
+        run_training(config)
+    elif args.mode == 'disentangle':
+        # 解耦用户画像
+        main_disentangle()

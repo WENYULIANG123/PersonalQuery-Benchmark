@@ -158,7 +158,7 @@ python -u .claude/skills/PersoanlQuery/00_data_preparation/00_batch_prepare_data
 source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
 conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
 cd /home/wlia0047/ar57/wenyu && \
-python -u .claude/skills/PersoanlQuery/01_preference_extraction/01_batch_extract_preferences_all.py \
+python -u .claude/skills/PersoanlQuery/01_preference_extraction/01_extract_preferences.py \
     --output-dir result/personal_query/01_preference_extraction \
     --max-workers 10
 ```
