@@ -1109,82 +1109,106 @@ def main():
         precomputed_features = None
 
     if precomputed_features is None:
-        log_with_timestamp("Precomputing user style features...")
-        import spacy as spacy_module
-        try:
-            nlp_precompute = spacy_module.load("en_core_web_sm")
-        except OSError:
-            import subprocess
-            subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"], check=True)
-            nlp_precompute = spacy_module.load("en_core_web_sm")
+        log_with_timestamp("Precomputing user style features (parallel)...")
 
-        def _extract_style_features_precompute(text: str):
-            words = [w for w in text.split() if w.strip()]
-            if len(words) < 25:
-                return None
-            doc = nlp_precompute(text)
-            n_tokens = max(len([t for t in doc if not t.is_punct]), 1)
-            n_subj = sum(1 for t in doc if t.dep_ in {'nsubj', 'nsubj:pass'})
-            n_dobj = sum(1 for t in doc if t.dep_ in {'dobj', 'pobj', 'attr'})
-            n_amod = sum(1 for t in doc if t.dep_ == 'amod')
-            n_advmod = sum(1 for t in doc if t.dep_ == 'advmod')
-            n_prep = sum(1 for t in doc if t.dep_ == 'prep')
-            n_conj = sum(1 for t in doc if t.dep_ == 'conj')
-            n_neg = sum(1 for t in doc if t.dep_ == 'neg')
-            n_relcl = sum(1 for t in doc if t.dep_ == 'relcl')
-            n_pass = sum(1 for t in doc if t.dep_ in {'nsubj:pass', 'aux:pass'} or (t.tag_ == 'VBN' and t.dep_ not in {'amod', 'conj'}))
-            n_part = sum(1 for t in doc if t.tag_ in {'VBG', 'VBN'} and t.dep_ in {'amod', 'advcl', 'relcl'})
-            n_inf = sum(1 for t in doc if t.tag_ == 'VB' and t.dep_ in {'xcomp', 'ccomp', 'advcl'})
-            n_det = sum(1 for t in doc if t.dep_ == 'det')
-            n_cc = sum(1 for t in doc if t.dep_ == 'cc')
-            n_intj = sum(1 for t in doc if t.dep_ == 'intj')
-            pos_counts = {}
-            for token in doc:
-                if not token.is_punct:
-                    pos = token.pos_
-                    pos_counts[pos] = pos_counts.get(pos, 0) + 1
-            def get_depth(token):
-                depth = 0
-                while token.head != token:
-                    depth += 1
-                    token = token.head
-                    if depth > 20:
-                        break
-                return depth
-            depths = [get_depth(t) for t in doc if not t.is_punct]
-            avg_depth = sum(depths) / max(len(depths), 1)
-            subordinate_ratio = n_subj / n_tokens
-            coordination_ratio = n_conj / n_tokens
-            negation_ratio = n_neg / n_tokens
-            length_depth = avg_depth / 10.0
-            upos_order = ['NOUN', 'VERB', 'ADJ', 'ADV', 'PRON', 'DET', 'AUX', 'PART', 'SCONJ', 'CCONJ', 'ADP']
-            pos_dist = [pos_counts.get(p, 0) / n_tokens for p in upos_order]
-            relative_clause_ratio = n_relcl / n_tokens
-            passive_ratio = n_pass / n_tokens
-            participial_ratio = n_part / n_tokens
-            infinitive_ratio = n_inf / n_tokens
-            appositive_ratio = n_intj / n_tokens
-            parenthetical_ratio = n_det / n_tokens
-            prep_phrase_ratio = n_prep / n_tokens
-            insertion_frequency = n_amod / n_tokens
-            features = [
-                subordinate_ratio * 10, coordination_ratio * 10, negation_ratio * 10, length_depth,
-                *pos_dist, relative_clause_ratio, passive_ratio, participial_ratio,
-                infinitive_ratio, appositive_ratio, parenthetical_ratio, prep_phrase_ratio, insertion_frequency,
-            ]
-            return np.array(features, dtype=np.float32)
+        # 获取CPU核心数，用于并行
+        num_workers = min(mp.cpu_count(), 16)
 
-        precomputed_features = {}
-        total_precompute = len(validated_users)
-        for idx, (user_id, user_data) in enumerate(validated_users.items()):
-            if (idx + 1) % 1000 == 0:
-                log_with_timestamp(f"  Precomputing: {idx + 1}/{total_precompute} users")
+        # Worker函数：处理单个用户
+        def _precompute_user_features(args):
+            user_id, user_data = args
+            import spacy
+            import numpy as np
+            import json as json_module
+
+            try:
+                nlp = spacy.load("en_core_web_sm")
+            except OSError:
+                import subprocess
+                subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"], check=True, capture_output=True)
+                nlp = spacy.load("en_core_web_sm")
+
+            def _extract_30dim_features(text: str):
+                """提取30维特征（23维基础 + 7维开头特征）"""
+                words = [w for w in text.split() if w.strip()]
+                if len(words) < 25:
+                    return None
+                doc = nlp(text)
+                n_tokens = max(len([t for t in doc if not t.is_punct]), 1)
+                n_subj = sum(1 for t in doc if t.dep_ in {'nsubj', 'nsubj:pass'})
+                n_dobj = sum(1 for t in doc if t.dep_ in {'dobj', 'pobj', 'attr'})
+                n_amod = sum(1 for t in doc if t.dep_ == 'amod')
+                n_advmod = sum(1 for t in doc if t.dep_ == 'advmod')
+                n_prep = sum(1 for t in doc if t.dep_ == 'prep')
+                n_conj = sum(1 for t in doc if t.dep_ == 'conj')
+                n_neg = sum(1 for t in doc if t.dep_ == 'neg')
+                n_relcl = sum(1 for t in doc if t.dep_ == 'relcl')
+                n_pass = sum(1 for t in doc if t.dep_ in {'nsubj:pass', 'aux:pass'} or (t.tag_ == 'VBN' and t.dep_ not in {'amod', 'conj'}))
+                n_part = sum(1 for t in doc if t.tag_ in {'VBG', 'VBN'} and t.dep_ in {'amod', 'advcl', 'relcl'})
+                n_inf = sum(1 for t in doc if t.tag_ == 'VB' and t.dep_ in {'xcomp', 'ccomp', 'advcl'})
+                n_det = sum(1 for t in doc if t.dep_ == 'det')
+                n_cc = sum(1 for t in doc if t.dep_ == 'cc')
+                n_intj = sum(1 for t in doc if t.dep_ == 'intj')
+                pos_counts = {}
+                for token in doc:
+                    if not token.is_punct:
+                        pos = token.pos_
+                        pos_counts[pos] = pos_counts.get(pos, 0) + 1
+
+                def get_depth(token):
+                    depth = 0
+                    while token.head != token:
+                        depth += 1
+                        token = token.head
+                        if depth > 20:
+                            break
+                    return depth
+                depths = [get_depth(t) for t in doc if not t.is_punct]
+                avg_depth = sum(depths) / max(len(depths), 1)
+
+                # 23维基础特征
+                subordinate_ratio = n_subj / n_tokens
+                coordination_ratio = n_conj / n_tokens
+                negation_ratio = n_neg / n_tokens
+                length_depth = avg_depth / 10.0
+                upos_order = ['NOUN', 'VERB', 'ADJ', 'ADV', 'PRON', 'DET', 'AUX', 'PART', 'SCONJ', 'CCONJ', 'ADP']
+                pos_dist = [pos_counts.get(p, 0) / n_tokens for p in upos_order]
+                relative_clause_ratio = n_relcl / n_tokens
+                passive_ratio = n_pass / n_tokens
+                participial_ratio = n_part / n_tokens
+                infinitive_ratio = n_inf / n_tokens
+                appositive_ratio = n_intj / n_tokens
+                parenthetical_ratio = n_det / n_tokens
+                prep_phrase_ratio = n_prep / n_tokens
+                insertion_frequency = n_amod / n_tokens
+
+                base_features = [
+                    subordinate_ratio * 10, coordination_ratio * 10, negation_ratio * 10, length_depth,
+                    *pos_dist, relative_clause_ratio, passive_ratio, participial_ratio,
+                    infinitive_ratio, appositive_ratio, parenthetical_ratio, prep_phrase_ratio, insertion_frequency,
+                ]
+
+                # 7维开头特征
+                text_lower = text.lower().strip()
+                first_words = ' '.join(text_lower.split()[:5])
+                opening_features = [
+                    1.0 if text_lower.startswith('i am looking for') else 0.0,
+                    1.0 if text_lower.startswith('it is') or text_lower.startswith("it's") else 0.0,
+                    1.0 if text_lower.startswith('as for') else 0.0,
+                    1.0 if text_lower.startswith('there is') or text_lower.startswith("there's") or text_lower.startswith('there are') else 0.0,
+                    1.0 if text_lower.startswith('the requirement') else 0.0,
+                    1.0 if 'looking for is' in first_words else 0.0,
+                    1.0 if 'as it happens' in text_lower else 0.0,
+                ]
+
+                return np.array(base_features + opening_features, dtype=np.float32)
+
             reviews = []
             review_file = os.path.join(STAGE0_REVIEWS_DIR, f"reviews_{user_id}.json")
             if os.path.exists(review_file):
                 try:
                     with open(review_file, 'r', encoding='utf-8') as f:
-                        review_data = json.load(f)
+                        review_data = json_module.load(f)
                     for item in review_data.get("results", []):
                         for review in item.get("target_reviews", []):
                             if isinstance(review, str):
@@ -1206,18 +1230,31 @@ def main():
                                 reviews.append(text)
                 except Exception:
                     pass
+
             all_style_feats = []
             for review in reviews:
                 try:
-                    feat = _extract_style_features_precompute(review)
+                    feat = _extract_30dim_features(review)
                     if feat is not None:
                         all_style_feats.append(feat)
                 except Exception:
                     continue
+
             if all_style_feats:
-                precomputed_features[user_id] = np.mean(all_style_feats, axis=0)
+                return (user_id, np.mean(all_style_feats, axis=0))
             else:
-                precomputed_features[user_id] = np.zeros(23, dtype=np.float32)
+                return (user_id, np.zeros(30, dtype=np.float32))
+
+        # 并行处理所有用户
+        log_with_timestamp(f"  Using {num_workers} parallel workers for {len(validated_users)} users")
+        precomputed_features = {}
+
+        with mp.Pool(num_workers) as pool:
+            results = pool.map(_precompute_user_features, validated_users.items())
+            for user_id, feat in results:
+                precomputed_features[user_id] = feat
+
+        log_with_timestamp(f"  Processed {len(precomputed_features)} users")
 
         # 保存预计算结果到文件，供所有 worker 共享
         precompute_output = {}
@@ -1225,7 +1262,6 @@ def main():
             precompute_output[uid] = feat.tolist()
         with open(_PRECOMPUTED_FEATURES_FILE, 'w') as f:
             json.dump(precompute_output, f)
-        del nlp_precompute
         log_with_timestamp(f"Precomputed {len(precomputed_features)} user style features, saved to {_PRECOMPUTED_FEATURES_FILE}")
 
     log_with_timestamp("=" * 80)
