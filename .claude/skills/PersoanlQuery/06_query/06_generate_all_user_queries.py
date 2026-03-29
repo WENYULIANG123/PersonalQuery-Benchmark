@@ -60,57 +60,77 @@ SEMANTIC_DEFAULTS: Dict[str, str] = {
 }
 
 TEMPLATES: Dict[str, List[Tuple[List[str], str]]] = {
-    # ============================================================
-    # 新设计的8个有区分度的模板
-    # 每个模板有唯一专属特征，无重叠
-    # ============================================================
-
-    # STD-1: 标准句 - "that is... that is... that is..." 从句链
-    "STD-1": [
+    "HIGH-1": [
         (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for {ARTICLE} {STYLE} {CAT} that is from the {BRAND} brand that is priced around {PRICE} and that is suitable for {USE} in my current project."),
+         "I am looking for {ARTICLE} {STYLE} {CAT} that is from the {BRAND} brand, that is priced around {PRICE}, and that is suitable for {USE} in my current project."),
     ],
-
-    # STD-2: 标准句 - "with... with... with..." 多with结构 (H17风格)
-    "STD-2": [
+    "HIGH-2": [
         (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for {ARTICLE} {STYLE} {CAT} from the {BRAND} brand with a price around {PRICE} with suitability for {USE} with application in my current project."),
+         "I am looking for {ARTICLE} {STYLE} {CAT} that is from the {BRAND} brand, which offers products that are priced around {PRICE}, and that are suitable for {USE} in my current project."),
     ],
-
-    # STD-3: 标准句 - "a product from... priced... and suitable" 逗号分隔
-    "STD-3": [
+    "HIGH-3": [
+        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
+         "I am looking for {ARTICLE} {STYLE} {CAT} that, being from the {BRAND} brand and being priced around {PRICE}, is suitable for {USE} in my current project."),
+    ],
+    "HIGH-4": [
         (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
          "I am looking for {ARTICLE} {STYLE} {CAT}, a product from the {BRAND} brand, priced around {PRICE}, and suitable for {USE} in my current project."),
     ],
-
-    # INV-1: 倒装句 - "It is... that I am looking for"
-    "INV-1": [
+    "HIGH-5": [
+        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
+         "I am looking for {ARTICLE} {STYLE} {CAT} from the {BRAND} brand, with a price around {PRICE}, for use in {USE}, in my current project."),
+    ],
+    "HIGH-6": [
+        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
+         "I am looking for {ARTICLE} {STYLE} {CAT} to be used in {USE}, to be priced around {PRICE}, and to be from the {BRAND} brand in my current project."),
+    ],
+    "HIGH-7": [
+        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
+         "I am looking for {ARTICLE} {STYLE} {CAT} that is designed by the {BRAND} brand, that is priced around {PRICE}, and that is used for {USE} in my current project."),
+    ],
+    "HIGH-8": [
         (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
          "It is {ARTICLE} {STYLE} {CAT} from the {BRAND} brand that I am looking for, which is priced around {PRICE} and suitable for {USE} in my current project."),
     ],
-
-    # Q-1: 疑问句 - "How should I choose..."
-    "Q-1": [
+    "HIGH-9": [
         (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "How should I choose {ARTICLE} {STYLE} {CAT} from the {BRAND} brand, priced around {PRICE}? Any recommendations for {USE} in my current project?"),
+         "I am looking for {ARTICLE} {STYLE} {CAT} from the {BRAND} brand and priced around {PRICE} and suitable for {USE} and appropriate for my current project needs."),
     ],
-
-    # EX-1: 存在句 - "there is" / "there are"
-    "EX-1": [
+    "HIGH-10": [
         (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for {ARTICLE} {STYLE} {CAT}, there is no specific preference for the {BRAND} brand, priced around {PRICE}, suitable for {USE} in my current project."),
+         "I am looking for {ARTICLE} {STYLE} {CAT} from the {BRAND} brand priced around {PRICE} suitable for {USE} in my current project."),
     ],
-
-    # EMP-1: 强调句/插入语 - "as it happens"
-    "EMP-1": [
+    "HIGH-11": [
         (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for {ARTICLE} {STYLE} {CAT}, from the {BRAND} brand, as it happens, priced around {PRICE}, suitable for {USE} in my current project."),
+         "I am looking for {ARTICLE} {STYLE} {CAT} that is from the {BRAND} brand that provides products that are priced around {PRICE} that are suitable for {USE} in my current project."),
     ],
-
-    # COND-1: 条件句 - "What I need... the requirement is"
-    "COND-1": [
+    "HIGH-12": [
         (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "What I need for my current project is {ARTICLE} {STYLE} {CAT} from the {BRAND} brand, the requirement is a price around {PRICE}, suitable for {USE}."),
+         "As for {ARTICLE} {STYLE} {CAT} from the {BRAND} brand, priced around {PRICE} and suitable for {USE}, I am looking for one for my current project."),
+    ],
+    "HIGH-13": [
+        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
+         "There is a need for {ARTICLE} {STYLE} {CAT} from the {BRAND} brand, priced around {PRICE} and suitable for {USE} in my current project."),
+    ],
+    "HIGH-14": [
+        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
+         "The requirement is for {ARTICLE} {STYLE} {CAT} from the {BRAND} brand, with a price around {PRICE} and suitability for {USE} in my current project."),
+    ],
+    "HIGH-15": [
+        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
+         "I am looking for what would be {ARTICLE} {STYLE} {CAT} from the {BRAND} brand, priced around {PRICE} and suitable for {USE} in my current project."),
+    ],
+    "HIGH-16": [
+        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
+         "Looking for is {ARTICLE} {STYLE} {CAT} from the {BRAND} brand, priced around {PRICE} and suitable for {USE} in my current project."),
+    ],
+    "HIGH-17": [
+        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
+         "I am looking for {ARTICLE} {STYLE} {CAT} from the {BRAND} brand with a price around {PRICE} with suitability for {USE} with application in my current project."),
+    ],
+    "HIGH-18": [
+        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
+         "I am looking for {ARTICLE} {STYLE} {CAT}, from the {BRAND} brand, as it happens, priced around {PRICE} and suitable for {USE}, in my current project."),
     ],
 }
 
@@ -237,7 +257,7 @@ def generate_query_from_attributes(
     c = category if category else "craft supplies"
 
     semantic_map = _build_attr_map_by_semantic_type(selected_attrs)
-    templates = TEMPLATES.get(subtype, TEMPLATES["STD-1"])
+    templates = TEMPLATES.get(subtype, TEMPLATES["HIGH-1"])
     template_idx = chooser.randrange(len(templates))
     slots_needed, template_text = templates[template_idx]
 
@@ -403,47 +423,72 @@ def _extract_opening_pattern_features(text: str) -> np.ndarray:
 
 
 def _extract_style_features_from_text(text: str) -> Optional[np.ndarray]:
-    """从文本中提取词汇级风格特征（8维），用于区分8个新模板。
+    """从文本中提取词汇级风格特征（14维），用于区分不同模板。
 
-    每个特征对应一个模板的唯一专属检测模式。
+    基于模板特有的短语模式进行检测，而不是泛化的统计特征。
+    每个特征对应一个模板/模板群组独有的短语模式。
     """
     text_lower = text.lower()
     words = [w for w in text.split() if w.strip()]
+    word_count = max(len(words), 1)
 
     # 少于10词跳过（模板填充后约29-32词）
     if len(words) < 10:
         return None
 
-    # 统计 that is/that are 出现次数
-    that_count = text_lower.count('that is') + text_lower.count('that are')
-
-    # 统计 with 出现次数
-    with_count = text_lower.count(' with ')
-
+    # 使用标准化的介词模式，避免不同词数导致的尺度差异
+    # 所有介词短语都用统一的 with 计数来标准化
     features = [
-        # ========== STD-1: "that is... that is... that is" 从句链 (3个that is) ==========
-        1.0 if that_count >= 3 else 0.0,
+        # ========== HIGH-2 特有: "which ... offers products" ==========
+        1.0 if 'which' in text_lower and 'offers products' in text_lower else 0.0,
 
-        # ========== STD-2: "with... with... with" 多with结构 (2个以上with) ==========
-        1.0 if with_count >= 2 else 0.0,
+        # ========== HIGH-1/HIGH-2 共有: "that is ... and that is" ==========
+        # 至少2个 "that is/are" 模式
+        1.0 if (text_lower.count('that is') + text_lower.count('that are')) >= 2 else 0.0,
 
-        # ========== STD-3: "a product from" 特定短语 ==========
-        1.0 if 'a product from' in text_lower else 0.0,
-
-        # ========== INV-1: "It is" 开头 + "that I am looking for" ==========
-        1.0 if text_lower.startswith('it is') and 'that i am looking for' in text_lower else 0.0,
-
-        # ========== Q-1: "How should" 疑问词开头 ==========
-        1.0 if text_lower.startswith('how should') else 0.0,
-
-        # ========== EX-1: "there is" 或 "there are" 存在句 ==========
-        1.0 if 'there is' in text_lower or 'there are' in text_lower else 0.0,
-
-        # ========== EMP-1: "as it happens" 插入语 ==========
+        # ========== HIGH-18 特有: "as it happens" ==========
         1.0 if 'as it happens' in text_lower else 0.0,
 
-        # ========== COND-1: "What I need" + "the requirement is" ==========
-        1.0 if 'what i need' in text_lower and 'the requirement is' in text_lower else 0.0,
+        # ========== HIGH-17 特有: 多个 "with ... for" 结构 ==========
+        # HIGH-17: "with a price around" + "with suitability for" + "with application"
+        (1.0 if 'with a price' in text_lower else 0.0) +
+        (1.0 if 'with suitability' in text_lower else 0.0) +
+        (1.0 if 'with application' in text_lower else 0.0),
+
+        # ========== HIGH-5/HIGH-17 共有: "with ... with" 结构 ==========
+        # 统计连续 with 结构 (HIGH-5用1个，HIGH-17用多个)
+        min(2.0, text_lower.count(' with ')),
+
+        # ========== HIGH-3 特有: "that, being ... is suitable" ==========
+        1.0 if 'that,' in text_lower and 'being' in text_lower else 0.0,
+
+        # ========== HIGH-6 特有: "to be used ... to be priced" ==========
+        1.0 if text_lower.count('to be') >= 2 else 0.0,
+
+        # ========== HIGH-7 特有: "that is designed by" ==========
+        1.0 if 'that is designed' in text_lower else 0.0,
+
+        # ========== HIGH-8 特有: "It is ... that I am looking for" (倒装) ==========
+        1.0 if text_lower.startswith('it is') else 0.0,
+
+        # ========== HIGH-9/HIGH-4 共有: 逗号分隔的并列结构 ==========
+        # HIGH-4: "a product from ..., priced ..., and suitable"
+        # HIGH-9: "from ... and priced ... and suitable ... and appropriate"
+        text_lower.count(','),
+
+        # ========== HIGH-10/HIGH-14 特有: 句末介词/无动词结构 ==========
+        # HIGH-10: "for ... for ... for"
+        # HIGH-14: "the requirement is"
+        1.0 if 'requirement is' in text_lower else 0.0,
+
+        # ========== HIGH-13 特有: "the need for" ==========
+        1.0 if 'the need for' in text_lower else 0.0,
+
+        # ========== HIGH-15 特有: 疑问句 "what ... how" ==========
+        1.0 if re.search(r'\bwhat\b', text_lower) or re.search(r'\bhow\b', text_lower) else 0.0,
+
+        # ========== HIGH-11/HIGH-12 特有: "there is" 存在句 ==========
+        1.0 if 'there is' in text_lower or 'there are' in text_lower else 0.0,
     ]
 
     return np.array(features, dtype=np.float32)
@@ -453,12 +498,12 @@ _template_style_features = None
 
 
 def _get_template_style_features() -> Dict[str, np.ndarray]:
-    """获取模板的8维词汇级风格特征"""
+    """获取模板的14维词汇级风格特征"""
     global _template_style_features
     if _template_style_features is not None:
         return _template_style_features
 
-    print("[Stage 6] Computing template style features (8-dim lexical)...")
+    print("[Stage 6] Computing template style features (14-dim lexical)...")
     _template_style_features = {}
 
     placeholders_map = {
@@ -620,14 +665,10 @@ def _cluster_templates_mlp(features: np.ndarray, subtype_list: List[str]) -> Dic
     from sklearn.neural_network import MLPClassifier
     from sklearn.preprocessing import StandardScaler
 
-    # 新模板分组：按句型复杂度分组
-    # 简单句: STD-1, STD-2, STD-3
-    # 中等句: INV-1, EX-1, EMP-1
-    # 复杂句: Q-1, COND-1
     desired_groups = {
-        "low": ["STD-1", "STD-2", "STD-3"],
-        "medium": ["INV-1", "EX-1", "EMP-1"],
-        "high": ["Q-1", "COND-1"],
+        "low": ["HIGH-15", "HIGH-17", "HIGH-18", "HIGH-2", "HIGH-3", "HIGH-11", "HIGH-9"],
+        "medium": ["HIGH-1", "HIGH-4", "HIGH-14", "HIGH-8", "HIGH-12", "HIGH-16"],
+        "high": ["HIGH-5", "HIGH-10", "HIGH-13", "HIGH-6", "HIGH-7"],
     }
 
     label_to_id = {"low": 0, "medium": 1, "high": 2}
@@ -850,14 +891,14 @@ def run_generation(
     # 确定使用哪个模板
     if forced_level:
         templates_for_level = _get_templates_for_level(forced_level)
-        subtype = templates_for_level[0] if templates_for_level else "STD-1"
+        subtype = templates_for_level[0] if templates_for_level else "HIGH-1"
         template_similarities = {}
     else:
         if user_reviews:
             best_template, template_similarities = _select_template_by_cached_style(user_id, user_reviews)
             subtype = best_template
         else:
-            best_template, template_similarities = "STD-1", {}
+            best_template, template_similarities = "HIGH-1", {}
             subtype = best_template
 
     subtype_scores = _default_subtype_scores(subtype)
