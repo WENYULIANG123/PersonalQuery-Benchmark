@@ -241,9 +241,6 @@ def build_retriever(retriever_name: str, documents: List[Dict], doc_hash: str, c
         if retriever_name == 'bm25':
             retriever = retrievers.BM25()
             log_with_timestamp(f"[DEBUG] BM25 instance created")
-        elif retriever_name == 'tfidf':
-            retriever = retrievers.TFIDFRetriever()
-            log_with_timestamp(f"[DEBUG] TFIDFRetriever instance created")
         elif retriever_name == 'dense':
             retriever = retrievers.DenseRetriever()
             log_with_timestamp(f"[DEBUG] DenseRetriever instance created")
@@ -344,7 +341,7 @@ def main():
     
     # Define retrievers to build
     DENSE_RETRIEVERS = ['dense', 'ance', 'bge', 'e5', 'minilm', 'multi_qa_minilm', 'mpnet', 'star']
-    SPARSE_RETRIEVERS = ['bm25', 'tfidf']
+    SPARSE_RETRIEVERS = ['bm25']
     ALL_RETRIEVERS = DENSE_RETRIEVERS + SPARSE_RETRIEVERS
     
     log_with_timestamp(f"\nBuilding {len(ALL_RETRIEVERS)} retrievers:")

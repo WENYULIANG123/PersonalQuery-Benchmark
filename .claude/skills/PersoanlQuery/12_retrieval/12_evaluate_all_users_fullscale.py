@@ -1852,7 +1852,15 @@ def get_user_complexity(user_id):
         try:
             with open(query_file, 'r') as f:
                 data = json.load(f)
-            template = data.get('selected_subtype', '')
+
+            # Get template from results array (each result has its own target_subtype)
+            results = data.get('results', [])
+            if results:
+                # Use the first result's target_subtype
+                template = results[0].get('target_subtype', '')
+            else:
+                template = data.get('selected_subtype', '')
+
             # Template to complexity mapping (18 HIGH variants)
             if template in ['HIGH-1']:
                 return 'high1'

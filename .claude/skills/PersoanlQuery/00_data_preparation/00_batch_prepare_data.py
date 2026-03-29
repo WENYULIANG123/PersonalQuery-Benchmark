@@ -152,8 +152,8 @@ def main() -> None:
     # ============ 硬编码参数 ============
     REVIEW_FILE = "/fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/Arts_Crafts_and_Sewing.json.gz"
     OUTPUT_DIR = "/fs04/ar57/wenyu/result/personal_query/00_data_preparation"
-    MIN_WORDS = 25            # 每句话最少词数
-    MIN_LONG_SENTENCES = 20  # 每个用户最少长句子数（词数 >= MIN_WORDS）
+    MIN_WORDS = 20            # 每句话最少词数
+    MIN_LONG_SENTENCES = 10  # 每个用户最少长句子数（词数 >= MIN_WORDS）
     MAX_USERS = 10000         # 最大用户数（0表示不限制）
 
     if os.path.isdir(OUTPUT_DIR):

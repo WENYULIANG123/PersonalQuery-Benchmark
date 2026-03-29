@@ -481,120 +481,6 @@ def extract_dependency_structures(nlp, text: str, min_token_length: int = 25) ->
     return extract_dependency_structures_from_doc(doc, min_token_length=min_token_length)
 
 
-def complexity_level(doc) -> str:
-    """
-    基于规则判断单个句子(SPaCy Span/Doc)的复杂度级别。
-
-    规则:
-    - High: advcl/acl 比例 ≥ 15%, 或 从句嵌套深度 ≥ 2, 或 否定路径深度 ≥ 2, 或 并列层级 ≥ 2
-    - Low:  基本依存占比 ≥ 80% 且 无 mark (无从属连词)
-    - Medium: 其余情况
-    """
-    n = len(doc)
-    if n == 0:
-        return 'Medium'
-
-    BASIC_RELS = {'nsubj', 'obj', 'amod', 'det', 'punct',
-                  'ROOT', 'compound', 'advmod', 'prep', 'pobj'}
-    CLAUSAL_RELS = {'advcl', 'acl', 'acl:relcl', 'relcl'}
-
-    def conj_depth(token):
-        depth = 0
-        cur = token
-        while cur.head != cur:
-            if cur.dep_ == 'conj':
-                depth += 1
-            cur = cur.head
-        return depth
-
-    def neg_depth_from_neg(token):
-        cur = token.head
-        depth = 0
-        while cur.dep_ != 'ROOT' and cur.dep_ != 'ROOT':
-            depth += 1
-            cur = cur.head
-        return depth
-
-    def clause_nesting_depth(token):
-        depth = 0
-        cur = token
-        while cur.head != cur:
-            if cur.dep_ in {'advcl', 'acl', 'acl:relcl', 'ccomp', 'xcomp', 'relcl'}:
-                depth += 1
-            cur = cur.head
-        return depth
-
-    # 指标计算
-    advcl_acl_ratio = sum(1 for t in doc if t.dep_ in CLAUSAL_RELS) / n
-    has_mark = any(t.dep_ == 'mark' for t in doc)
-    max_cd = max((conj_depth(t) for t in doc if t.dep_ == 'conj'), default=0)
-
-    max_clause = 0
-    for t in doc:
-        if t.dep_ in {'advcl', 'acl', 'acl:relcl'}:
-            d = clause_nesting_depth(t)
-            if d > max_clause:
-                max_clause = d
-
-    max_neg = 0
-    for t in doc:
-        if t.dep_ == 'neg':
-            d = neg_depth_from_neg(t)
-            if d > max_neg:
-                max_neg = d
-
-    # High 判断
-    if (advcl_acl_ratio >= 0.15 or
-            max_clause >= 2 or
-            max_neg >= 2 or
-            max_cd >= 2):
-        return 'High'
-
-    # Low 判断
-    total_non_punct = sum(1 for t in doc if t.dep_ != 'punct')
-    basic_count = sum(1 for t in doc if t.dep_ in BASIC_RELS)
-    basic_ratio = basic_count / total_non_punct if total_non_punct > 0 else 0
-
-    if basic_ratio >= 0.8 and not has_mark:
-        return 'Low'
-
-    return 'Medium'
-
-
-def extract_complexity_levels(docs: list) -> dict:
-    """
-    对多段文本逐句计算复杂度级别，统计 Low/Medium/High 分布。
-
-    Returns:
-        dict: {
-            'sentence_counts': {'low': N, 'medium': M, 'high': K},
-            'sentence_levels': [level per sentence],
-            'review_levels': [most_common_level per review],
-        }
-    """
-    from collections import Counter
-    review_levels = []
-    all_sent_levels = []
-
-    for doc in docs:
-        review_sent_levels = []
-        for sent in doc.sents:
-            level = complexity_level(sent)
-            review_sent_levels.append(level)
-            all_sent_levels.append(level)
-        if review_sent_levels:
-            review_levels.append(Counter(review_sent_levels).most_common(1)[0][0])
-
-    counter = Counter(all_sent_levels)
-    return {
-        'sentence_counts': {
-            'low': counter.get('Low', 0),
-            'medium': counter.get('Medium', 0),
-            'high': counter.get('High', 0),
-        },
-        'sentence_levels': all_sent_levels,
-        'review_levels': review_levels,
-    }
 
 
 def extract_user_profile(
@@ -699,14 +585,7 @@ def extract_user_profile(
         if values:
             aggregated_dep[key] = sum(values) / len(values)
 
-    # --- Complexity scoring & binning ---
-    scores = [rws[2] for rws in reviews_with_scores]
-    low_threshold, high_threshold = score_binning(scores)
-    complexity_templates = select_representative_template(reviews_with_scores, low_threshold, high_threshold)
-
-    # --- Rule-based complexity level distribution ---
-    complexity_dist = extract_complexity_levels(docs)
-
+    # --- Complexity axis features ---
     complexity_axis_features = {}
     if axis_components_list:
         axis_keys = axis_components_list[0].keys()
@@ -721,15 +600,6 @@ def extract_user_profile(
         "num_reviews_processed": len(all_dep_features),
         "dependency_features": aggregated_dep,
         "feature_count": len(aggregated_dep),
-        "complexity_thresholds": {
-            "low": low_threshold,
-            "high": high_threshold,
-        },
-        "complexity_templates": complexity_templates,
-        "complexity_rule_based": {
-            "sentence_counts": complexity_dist['sentence_counts'],
-            "total_sentences": sum(complexity_dist['sentence_counts'].values()),
-        },
         "complexity_axis_features": complexity_axis_features,
         "extraction_method": "local_spacy_dependency",
         "extraction_date": datetime.now().isoformat(),
@@ -754,156 +624,6 @@ def save_profile(profile: Dict, output_dir: str):
         json.dump(profile, f, indent=2, ensure_ascii=False)
 
     logger.info(f"Saved profile for {user_id} to {output_file}")
-
-
-def save_skeleton_profile(skeleton_profile: Dict, output_dir: str):
-    """保存骨架提取结果到JSON文件"""
-    os.makedirs(output_dir, exist_ok=True)
-    user_id = skeleton_profile["user_id"]
-    output_file = os.path.join(output_dir, f"skeleton_profile_{user_id}.json")
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(skeleton_profile, f, indent=2, ensure_ascii=False)
-    logger.info(f"Saved skeleton profile for {user_id} to {output_file}")
-
-
-def extract_user_skeletons(
-    user_id: str,
-    reviews: List[Dict],
-    extractor: LocalFeatureExtractor,
-    max_reviews: Optional[int] = None,
-    spacy_n_process: int = 1,
-    spacy_batch_size: int = 32,
-) -> Dict:
-    """提取用户的典型句子骨架"""
-    if max_reviews:
-        reviews = reviews[:max_reviews]
-
-    texts = []
-    for review in reviews:
-        text = review.get("reviewText", "")
-        if text and text.strip():
-            texts.append(text.strip())
-
-    if not texts:
-        logger.warning(f"No valid texts found for user {user_id}")
-        return {}
-
-    nlp = extractor.nlp
-    result = extract_user_sentence_skeletons(
-        nlp,
-        texts,
-        top_k=1,
-        spacy_n_process=spacy_n_process,
-        spacy_batch_size=spacy_batch_size,
-    )
-
-    top_skeleton = result["skeletons"][0] if result["skeletons"] else ""
-    top_frequency = result["frequency"].get(top_skeleton, 0) if top_skeleton else 0
-
-    return {
-        "user_id": user_id,
-        "num_reviews": len(texts),
-        "skeleton": top_skeleton,
-        "skeleton_frequency": top_frequency,
-        "total_unique_skeletons": result["total_skeletons"],
-        "total_sentences": result["total_sentences"],
-        "extraction_method": "dependency_skeleton",
-        "extraction_date": datetime.now().isoformat(),
-    }
-
-
-def extract_user_abstract_skeletons(
-    user_id: str,
-    reviews: List[Dict],
-    extractor: LocalFeatureExtractor,
-    max_reviews: Optional[int] = None,
-    min_sentence_length: int = 25,
-    spacy_n_process: int = 1,
-    spacy_batch_size: int = 32,
-) -> Dict:
-    """提取用户的抽象句子模板（仅从长句中提取）"""
-    if max_reviews:
-        reviews = reviews[:max_reviews]
-
-    texts = []
-    for review in reviews:
-        text = review.get("reviewText", "")
-        if text and text.strip():
-            texts.append(text.strip())
-
-    if not texts:
-        logger.warning(f"No valid texts found for user {user_id}")
-        return {}
-
-    nlp = extractor.nlp
-    abstract_counts = defaultdict(int)
-    total_long_sentences = 0
-
-    for doc in nlp.pipe(texts, batch_size=spacy_batch_size, n_process=spacy_n_process):
-        for sent in doc.sents:
-            sent_len = len(sent)
-            if sent_len >= min_sentence_length:
-                total_long_sentences += 1
-                template = extract_abstract_template(sent)
-                if template.strip():
-                    abstract_counts[template] += 1
-
-    sorted_templates = sorted(
-        abstract_counts.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )
-
-    top_template = sorted_templates[0][0] if sorted_templates else ""
-    top_frequency = sorted_templates[0][1] if sorted_templates else 0
-
-    return {
-        "user_id": user_id,
-        "num_reviews": len(texts),
-        "abstract_template": top_template,
-        "template_frequency": top_frequency,
-        "total_unique_templates": len(abstract_counts),
-        "total_long_sentences": total_long_sentences,
-        "extraction_method": "abstract_template",
-        "extraction_date": datetime.now().isoformat(),
-    }
-
-
-def main_disentangle():
-    """对已提取的画像进行解耦处理"""
-    config = {
-        "profiles_dir": "/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis",
-        "output_dir": "/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis/disentangled_profiles",
-    }
-
-    import spacy
-    nlp = spacy.load('en_core_web_sm')
-
-    profiles_dir = Path(config['profiles_dir'])
-    output_dir = Path(config['output_dir'])
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    logger.info(f"Loading profiles from {profiles_dir}")
-    profile_files = list(profiles_dir.glob("linguistic_profile_*.json"))
-    logger.info(f"Found {len(profile_files)} profiles")
-
-    for profile_file in profile_files:
-        with open(profile_file, 'r', encoding='utf-8') as f:
-            profile = json.load(f)
-
-        # 解耦
-        disentangled = disentangle_user_profile(profile, nlp)
-
-        # 保存
-        output_file = output_dir / f"disentangled_{profile_file.name}"
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(disentangled, f, indent=2, ensure_ascii=False)
-
-        logger.info(f"Disentangled: {profile_file.name}")
-
-    logger.info(f"Done! Disentangled profiles saved to {output_dir}")
-
-
 # ============================================================================
 # 句法复杂度评分与分级
 # ============================================================================
@@ -1058,651 +778,8 @@ def complexity_score(dep_counts: dict, doc=None, return_components: bool = False
     return float(score)
 
 
-def score_binning(scores: list) -> tuple:
-    """
-    按三分位数将得分划分为 Low/Medium/High 三组。
-
-    Args:
-        scores: 复杂度得分列表
-
-    Returns:
-        (low_threshold, high_threshold)，用于划分三组
-    """
-    if not scores:
-        return 0.0, 0.0
-    low_threshold = float(np.percentile(scores, 33))
-    high_threshold = float(np.percentile(scores, 67))
-    return low_threshold, high_threshold
 
 
-def select_representative_template(reviews_with_scores: list, low_threshold: float, high_threshold: float) -> dict:
-    """
-    从每个复杂度分组中选取得分最接近该组中位数的评论作为代表性模板。
-
-    Args:
-        reviews_with_scores: list of (review_text, dep_counts, score, doc) tuples
-        low_threshold: 三分位 low 阈值
-        high_threshold: 三分位 high 阈值
-
-    Returns:
-        dict with keys 'low', 'medium', 'high', each containing:
-        - 'template': 依存关系 bigram 集合（用于区分度计算）
-        - 'skeleton_template': 骨架 bigram 集合（用于属性填充，有语义槽位）
-        - 'review_text': 原始评论文本
-        - 'score': 该评论的复杂度得分
-        - 'median_score': 该分组的中位数得分
-    """
-    # 分组
-    low_reviews = []
-    medium_reviews = []
-    high_reviews = []
-
-    for review_text, dep_counts, score, doc in reviews_with_scores:
-        if score < low_threshold:
-            low_reviews.append((review_text, dep_counts, score, doc))
-        elif score < high_threshold:
-            medium_reviews.append((review_text, dep_counts, score, doc))
-        else:
-            high_reviews.append((review_text, dep_counts, score, doc))
-
-    def pick_median(reviews_list: list) -> dict:
-        """从列表中选取得分最接近中位数的评论"""
-        if not reviews_list:
-            return {'template': None, 'skeleton_template': None, 'raw_skeleton': None, 'review_text': None, 'score': None, 'median_score': None}
-
-        scores_only = [r[2] for r in reviews_list]
-        median = float(np.median(scores_only))
-
-        # 选得分最接近中位数的
-        best = min(reviews_list, key=lambda r: abs(r[2] - median))
-        review_text, dep_counts, score, doc = best
-
-        # 1. dep bigram（用于区分度计算）
-        seen = set()
-        label_list = []
-        for dep_type in dep_counts.keys():
-            if dep_type not in seen:
-                seen.add(dep_type)
-                label_list.append(dep_type)
-        bigrams = set(f"{label_list[i]}|{label_list[i+1]}" for i in range(len(label_list) - 1))
-        template = " ".join(sorted(bigrams))
-
-        # 2. skeleton bigram（用于属性填充 — 有语义槽位）
-        # 3. raw skeleton（用于 fill_skeleton_with_attributes，直接填属性）
-        skeleton_bigrams = set()
-        raw_skeleton = None
-        best_level = None
-        best_len = 0
-        for sent in doc.sents:
-            skel = extract_sentence_skeleton(sent)
-            level = complexity_level(sent)
-            skel_parts = skel.split()
-            for i in range(len(skel_parts) - 1):
-                p1, p2 = skel_parts[i], skel_parts[i + 1]
-                if p1 in SKELETON_PLACEHOLDERS and p2 in SKELETON_PLACEHOLDERS:
-                    skeleton_bigrams.add(f"{p1}|{p2}")
-            # 优先选 HIGH 句子，其次最长的
-            if (best_level is None or
-                (level == 'High' and best_level != 'High') or
-                (level == best_level and len(skel_parts) > best_len)):
-                raw_skeleton = skel
-                best_level = level
-                best_len = len(skel_parts)
-        skeleton_template = " ".join(sorted(skeleton_bigrams)) if skeleton_bigrams else None
-
-        return {
-            'template': template,
-            'skeleton_template': skeleton_template,
-            'raw_skeleton': raw_skeleton,
-            'review_text': review_text,
-            'score': score,
-            'median_score': median,
-        }
-
-    return {
-        'low': pick_median(low_reviews),
-        'medium': pick_median(medium_reviews),
-        'high': pick_median(high_reviews),
-    }
-
-
-# ============================================================================
-# 句子骨架提取功能
-# ============================================================================
-
-# 停用词集合（保留小写形式）
-STOP_WORDS = {"i", "am", "looking", "for", "a", "an", "the", "to", "and", "or", "with", "in", "on", "of"}
-
-# 依存关系到骨架标签的映射
-DEP_TO_SKELETON = {
-    "nsubj": "SUBJ",
-    "nsubj:pass": "SUBJ",
-    "dobj": "OBJ",
-    "pobj": "OBJ",
-    "attr": "OBJ",
-    "amod": "AMOD",
-    "advmod": "ADV",
-    "prep": "PREP",
-    "det": "DET",
-    "ROOT": "ROOT",
-}
-
-# 骨架占位符集合
-SKELETON_PLACEHOLDERS = {"SUBJ", "OBJ", "AMOD", "ADV", "PREP", "DET", "ROOT"}
-
-
-def extract_sentence_skeleton(doc) -> str:
-    """
-    提取单个句子的骨架（纯结构版本）。
-
-    骨架规则:
-    - nsubj, nsubj:pass → "SUBJ"
-    - dobj, pobj, attr → "OBJ"
-    - amod → "AMOD"
-    - advmod → "ADV"
-    - prep → "PREP"
-    - det → "DET"
-    - ROOT → "ROOT"
-    - 停用词 → 保留小写
-    - 其他内容词 → 跳过（过滤掉）
-
-    Args:
-        doc: spaCy Doc对象（单句）
-
-    Returns:
-        句子骨架字符串
-
-    示例:
-        "I am looking for reflective yarn to make a scarf"
-        → "SUBJ am looking for AMOD yarn to make DET scarf"
-        （"reflective" 和 "scarf" 等内容词被过滤，只保留结构）
-    """
-    skeleton_parts = []
-
-    for token in doc:
-        if token.is_punct:
-            continue
-        dep = token.dep_
-        if dep in DEP_TO_SKELETON:
-            skeleton_parts.append(DEP_TO_SKELETON[dep])
-        elif token.text.lower() in STOP_WORDS:
-            skeleton_parts.append(token.text.lower())
-
-    return " ".join(skeleton_parts)
-
-
-def extract_user_sentence_skeletons(
-    nlp,
-    texts: List[str],
-    top_k: int = 5,
-    spacy_n_process: int = 1,
-    spacy_batch_size: int = 32,
-) -> Dict:
-    """
-    从用户文本列表中提取典型句子骨架。
-
-    Args:
-        nlp: spaCy nlp模型
-        texts: 用户文本列表
-        top_k: 返回最常见的骨架数量
-
-    Returns:
-        Dict包含:
-        - skeletons: 骨架列表（按频率排序）
-        - frequency: 骨架出现频率统计
-    """
-    skeleton_counts = defaultdict(int)
-
-    cleaned_texts = [text.strip() for text in texts if text and text.strip()]
-    for doc in nlp.pipe(cleaned_texts, batch_size=spacy_batch_size, n_process=spacy_n_process):
-
-        # 遍历每个句子
-        for sent in doc.sents:
-            skeleton = extract_sentence_skeleton(sent)
-            if skeleton.strip():  # 忽略空骨架
-                skeleton_counts[skeleton] += 1
-
-    # 按频率排序
-    sorted_skeletons = sorted(
-        skeleton_counts.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )
-
-    # 返回top_k和统计信息
-    top_skeletons = [s[0] for s in sorted_skeletons[:top_k]]
-    frequency = {s: c for s, c in sorted_skeletons[:top_k]}
-
-    return {
-        "skeletons": top_skeletons,
-        "frequency": frequency,
-        "total_skeletons": len(skeleton_counts),
-        "total_sentences": sum(skeleton_counts.values()),
-    }
-
-
-def fill_skeleton_with_attributes(skeleton: str, attributes: List[Dict], target_word_count: int = 27) -> str:
-    """按骨架结构填充，生成25-30词查询。"""
-    import random
-    import re
-    
-    if not attributes:
-        return "I am looking for craft supplies for my projects"
-
-    by_dimension = {}
-    for a in attributes:
-        dim = a.get('dimension', 'Other')
-        val = a.get('value', '').strip()
-        if val and len(val) > 1:
-            by_dimension.setdefault(dim, []).append(val)
-
-    if not by_dimension:
-        return "I am looking for craft supplies for my projects"
-
-    phrases = []
-    openers = ["I am looking for", "I need", "I want to find", 
-               "I am searching for", "I am hoping to find"]
-    
-    if 'Product_Category' in by_dimension:
-        phrases.append(by_dimension['Product_Category'][0].split('/')[0])
-    
-    if 'Brand_Preference' in by_dimension:
-        phrases.append(by_dimension['Brand_Preference'][0])
-    
-    if 'Appearance_Color' in by_dimension:
-        phrases.append(by_dimension['Appearance_Color'][0])
-    
-    if 'Style_Design' in by_dimension:
-        phrases.append(by_dimension['Style_Design'][0])
-    
-    if 'Material_Composition' in by_dimension:
-        phrases.append(by_dimension['Material_Composition'][0])
-    
-    if 'Functionality' in by_dimension:
-        phrases.append(by_dimension['Functionality'][0])
-    
-    if 'Ease_of_Use' in by_dimension:
-        phrases.append(by_dimension['Ease_of_Use'][0])
-    
-    if 'Performance' in by_dimension:
-        phrases.append(by_dimension['Performance'][0])
-    
-    if 'Usage_Scenario' in by_dimension:
-        phrases.append(f"for {by_dimension['Usage_Scenario'][0]}")
-    
-    if 'Target_User' in by_dimension:
-        phrases.append(f"for {by_dimension['Target_User'][0]}")
-    
-    for dim in ['Value', 'Special_Purpose', 'Safety', 'Compatibility', 'Price',
-                'Size_Dimensions', 'Packaging_Quantity', 'Portability', 'Quality_Craftsmanship',
-                'Special_User_Needs', 'Comfort']:
-        if dim in by_dimension and len(by_dimension[dim][0].split()) <= 3:
-            phrases.append(by_dimension[dim][0])
-    
-    query = random.choice(openers) + " " + ", ".join(phrases)
-    query = re.sub(r'\s+', ' ', query).strip().capitalize()
-    if not query.endswith('.'):
-        query += '.'
-    
-    words = query.split()
-    word_count = len(words)
-    
-    # 如果太短，添加更多属性
-    if word_count < 25:
-        extra_attrs = []
-        for dim, vals in by_dimension.items():
-            if dim not in ['Product_Category', 'Brand_Preference', 'Appearance_Color', 
-                          'Style_Design', 'Material_Composition', 'Functionality',
-                          'Ease_of_Use', 'Performance', 'Usage_Scenario', 'Target_User']:
-                for val in vals[1:]:
-                    if len(val.split()) <= 4:
-                        extra_attrs.append(val)
-        extra_attrs.sort(key=lambda x: len(x.split()), reverse=True)
-        while len(words) < 25 and extra_attrs:
-            extra = extra_attrs.pop(0)
-            query = query.rstrip('.') + f", {extra}."
-            words = query.split()
-    
-    # 如果太长，截断到30词
-    if len(words) > 30:
-        cutoff = 30
-        for j in range(29, 24, -1):
-            if j < len(words) and words[j] in ['for', 'and', 'or', 'with', 'the', 'a', 'an']:
-                cutoff = j
-                break
-        query = ' '.join(words[:cutoff]).rstrip('.,') + '.'
-    
-    return query
-
-
-# ============================================================================
-# 抽象模板提取功能（依存树 → 自然语言模板）
-# ============================================================================
-
-# 抽象模板的POS标签到占位符的映射
-# 核心依存关系标签（按复杂度分层）
-DEP_CORE_LABELS = {
-    # 主语
-    "nsubj": "SUBJ",
-    "nsubj:pass": "SUBJ",
-    # 宾语/补语
-    "dobj": "OBJ",
-    "pobj": "OBJ",
-    "attr": "ATTR",
-    "acomp": "ATTR",
-    "oprd": "ATTR",
-    # 动词
-    "ROOT": "ROOT",
-    # 从句标记
-    "acl:relcl": "RELCL",
-    "relcl": "RELCL",
-    "acl": "RELCL",
-    "advcl": "ADVCL",
-    "ccomp": "CCOMP",
-    "xcomp": "XCOMP",
-    # 介词
-    "prep": "PREP",
-    # 连词
-    "cc": "CCONJ",
-    "conj": "CONJ",
-}
-
-# 常见句型模式（依存结构 → 模板片段）
-SENTENCE_PATTERNS = {
-    ("nsubj", "amod", "ROOT"): "{subj} has {amod} {obj}",
-    ("nsubj", "ROOT", "acl:relcl"): "{subj} {root} ... that {acl}",
-    ("nsubj", "ROOT", "advcl"): "{subj} {root}, which {advcl}",
-    ("nsubj", "amod", "ROOT", "acl:relcl"): "{subj} has {amod} {obj} that {acl}",
-    ("nsubj", "ROOT", "acl:relcl", "advcl"): "{subj} {root} ... that {acl}, which {advcl}",
-    ("det", "amod", "nsubj", "ROOT"): "[属性] [实体] {root} ...",
-    ("amod", "nsubj", "ROOT", "advcl"): "[实体] has [属性] that {root}, which {advcl}",
-}
-
-
-def _get_token_dep_label(token) -> str:
-    if token.is_punct:
-        return ""
-    return DEP_CORE_LABELS.get(token.dep_, "")
-
-
-def _extract_noun_phrase_abstract(doc, root_token) -> str:
-    """提取名词短语区域的抽象表示（用于主语或宾语）"""
-    parts = []
-    for child in root_token.children:
-        if child.dep_ in {"amod", "det", "nummod", "compound"}:
-            parts.append((child.i, _get_token_dep_label(child)))
-    return " ".join(p[1] for p in sorted(parts))
-
-
-def _extract_clause_structure(doc, root_token) -> tuple:
-    """
-    提取从句结构信息
-    
-    Returns:
-        (has_relative_clause, has_advcl, main_verb_placeholder)
-    """
-    has_relcl = False
-    has_advcl = False
-    main_verb = _get_token_dep_label(root_token)
-    
-    for child in root_token.children:
-        if child.dep_ in {"acl:relcl", "relcl", "acl"}:
-            has_relcl = True
-        elif child.dep_ in {"advcl", "ccomp", "xcomp"}:
-            has_advcl = True
-    
-    return has_relcl, has_advcl, main_verb
-
-
-def _build_abstract_template_from_tree(doc) -> str:
-    if len(doc) == 0:
-        return ""
-    
-    root = None
-    for token in doc:
-        if token.dep_ == "ROOT":
-            root = token
-            break
-    
-    if root is None:
-        root = doc[0]
-    
-    # 收集所有token的抽象表示
-    all_tokens = []
-    for token in doc:
-        if token.is_punct:
-            continue
-        placeholder = _get_token_dep_label(token)
-        all_tokens.append(placeholder)
-    
-    # 简化：直接用POS序列
-    template = " ".join(all_tokens)
-    template = _simplify_template(template)
-    
-    return template
-
-
-def _simplify_template(template: str) -> str:
-    import re
-    # 移除连续重复的标签
-    parts = template.split()
-    if not parts:
-        return template
-    simplified = [parts[0]]
-    for p in parts[1:]:
-        if p != simplified[-1]:
-            simplified.append(p)
-    return " ".join(simplified)
-
-
-def extract_abstract_template(doc) -> str:
-    """
-    从spaCy Doc对象提取抽象自然语言模板。
-    
-    输入: spaCy Doc对象
-    输出: 自然语言模板字符串
-    
-    核心逻辑:
-    - 分析句子的依存树结构
-    - 识别主要句型模式（如 "X has Y that Z", "X is Y for Z" 等）
-    - 将具体词语替换为语义占位符
-    - 保留连词和介词结构
-    
-    抽象规则示例:
-    - nsubj + amod + NOUN → "[属性] [实体]" 或 "[实体] with [属性]"
-    - ROOT + acl:relcl → "... that [从句]"
-    - ROOT + acl + advcl → "... which makes it [形容词] for [场景]"
-    - 数字、颜色等具体词 → "[属性]"
-    
-    输出示例:
-    "[实体] has [属性] [属性] that [动作], which makes it [特性] for [场景]."
-    
-    Args:
-        doc: spaCy Doc对象（单句）
-    
-    Returns:
-        抽象模板字符串
-    
-    示例:
-        输入: "This embroidery colors that don't fade easily, which makes it perfect for detailed work."
-        输出: "[实体] has [属性] that [动作] [方式], which makes it [属性] for [场景]."
-    """
-    if doc is None or len(doc) == 0:
-        return ""
-    
-    sents = list(doc.sents)
-    if sents:
-        doc = sents[0]
-    
-    template = _build_abstract_template_from_tree(doc)
-    
-    if not template.strip():
-        template = " ".join(_get_token_dep_label(t) for t in doc if not t.is_punct)
-    
-    return template
-
-
-def analyze_template_patterns(docs: List) -> Dict:
-    """
-    分析多个句子，提取常见模板模式。
-    
-    输入: spaCy Doc对象列表
-    输出: Dict，包含常见模式和统计信息
-    
-    Args:
-        docs: spaCy Doc对象列表
-    
-    Returns:
-        Dict包含:
-        - common_patterns: 按频率排序的模板列表
-        - pattern_counts: 模板出现频率统计
-        - total_templates: 总模板数
-        - unique_templates: 唯一模板数
-    
-    示例输出:
-    {
-        "common_patterns": [
-            "[实体] has [属性] that [动作] [方式], which makes it [属性] for [场景].",
-            "[实体] is [属性] for [场景].",
-            ...
-        ],
-        "pattern_counts": {
-            "[实体] has [属性] ...": 15,
-            "[实体] is [属性] ...": 8,
-            ...
-        },
-        "total_templates": 50,
-        "unique_templates": 12
-    }
-    """
-    template_counts = defaultdict(int)
-    
-    for doc in docs:
-        if doc is None or len(doc) == 0:
-            continue
-        
-        template = extract_abstract_template(doc)
-        if template.strip():
-            template_counts[template] += 1
-    
-    sorted_patterns = sorted(
-        template_counts.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )
-    
-    common_patterns = [p[0] for p in sorted_patterns]
-    pattern_counts = dict(sorted_patterns)
-    
-    return {
-        "common_patterns": common_patterns,
-        "pattern_counts": pattern_counts,
-        "total_templates": sum(template_counts.values()),
-        "unique_templates": len(template_counts),
-    }
-
-
-def fill_abstract_template(template: str, attributes: List[Dict]) -> str:
-    """
-    将属性填入抽象模板。
-    
-    输入:
-        template: 抽象模板字符串，如 "[实体] has [属性] that [动作] [方式]"
-        attributes: 属性列表，格式为 [{"dimension": "...", "value": "..."}]
-    
-    输出: 填充后的自然语言句子
-    
-    attributes格式示例:
-    ```json
-    [
-      {"dimension": "Product_Category", "value": "thread"},
-      {"dimension": "Quality", "value": "rich"},
-      {"dimension": "Color", "value": "color variety"},
-      {"dimension": "Performance", "value": "holds well"},
-      {"dimension": "Usage_Scenario", "value": "detailed needlework"}
-    ]
-    ```
-    
-    填充逻辑:
-    - 识别模板中的占位符类型（[实体], [属性], [动作], [方式], [场景]等）
-    - 根据属性dimension匹配最合适的占位符
-    - 保留模板的句法和连词结构
-    - 优先填充位置靠前的占位符
-    
-    示例:
-    模板: "[实体] has [属性] [属性] that [动作] [方式], which makes it [属性] for [场景]."
-    属性: [{"dimension": "Product_Category", "value": "thread"}, {"dimension": "Color", "value": "rich color variety"}, ...]
-    
-    输出: "thread has rich color variety that holds well on fabric, which makes it perfect for detailed needlework."
-    
-    Args:
-        template: 抽象模板字符串
-        attributes: 属性列表
-    
-    Returns:
-        填充后的自然语言句子
-    """
-    if not template or not attributes:
-        return template
-    
-    # 定义占位符类型及其优先级
-    placeholder_types = ["[实体]", "[属性]", "[动作]", "[方式]", "[场景]", "[限定词]", "[介词]", "[连词]", "[从属连词]"]
-    
-    dimension_to_placeholder = {
-        "Product_Category": "[实体]",
-        "Product_Type": "[实体]",
-        "Material": "[实体]",
-        "Brand": "[实体]",
-        "Quality": "[属性]",
-        "Color": "[属性]",
-        "Performance": "[属性]",
-        "Durability": "[属性]",
-        "Style_Design": "[属性]",
-        "Functionality": "[属性]",
-        "Size": "[属性]",
-        "Weight": "[属性]",
-        "Price": "[属性]",
-        "Safety": "[属性]",
-        "Action": "[动作]",
-        "Usage": "[动作]",
-        "Usage_Scenario": "[场景]",
-        "Target_Audience": "[场景]",
-        "Application": "[场景]",
-        "Method": "[方式]",
-    }
-    
-    available_attrs = defaultdict(list)
-    for attr in attributes:
-        dimension = attr.get("dimension", "")
-        value = attr.get("value", "")
-        if value:
-            placeholder = dimension_to_placeholder.get(dimension, "[属性]")
-            available_attrs[placeholder].append(value)
-    
-    all_values = []
-    for placeholder in placeholder_types:
-        if placeholder in available_attrs:
-            all_values.extend(available_attrs[placeholder])
-    
-    import re
-    
-    result = template
-    values_iter = iter(all_values)
-    
-    def replace_placeholder(match):
-        nonlocal values_iter
-        try:
-            return next(values_iter)
-        except StopIteration:
-            return match.group(0)
-    
-    result = re.sub(r'\[[^\]]+\]', replace_placeholder, result)
-    result = " ".join(result.split())
-    
-    if result:
-        result = result[0].upper() + result[1:]
-    
-    return result
 
 
 # ============================================================================
@@ -1876,246 +953,6 @@ class DisentanglementModel(nn.Module):
         return self.decoder(content, target_style)
 
 
-def disentangle_text(doc, dependency_features: Dict) -> Dict:
-    """
-    将单个文本解耦为内容表示和风格表示
-
-    Args:
-        doc: spaCy Doc对象
-        dependency_features: 依存关系特征字典
-
-    Returns:
-        Dict包含:
-            - content: 内容表示
-                - skeleton: 骨架序列（如 "SUBJ am looking for OBJ"）
-                - dep_sequence: 依存关系序列
-                - semantic_slots: 语义槽位列表
-            - style: 风格表示
-                - complexity_axis: 复杂度四维向量
-                - pos_distribution: POS分布向量
-                - syntactic_markers: 句法标记密度向量
-            - disentangled: 是否成功解耦
-    """
-    # ========== 内容表示提取 ==========
-    skeleton_parts = []
-    dep_sequence = []
-    semantic_slots = []
-
-    DEP_TO_SLOT = {
-        "nsubj": "SUBJ", "nsubj:pass": "SUBJ",
-        "dobj": "OBJ", "pobj": "OBJ", "attr": "OBJ",
-        "ROOT": "ROOT", "amod": "AMOD", "advmod": "ADV",
-        "prep": "PREP", "det": "DET",
-    }
-
-    for token in doc:
-        if token.is_punct:
-            continue
-        dep = token.dep_
-        skeleton_parts.append(DEP_TO_SLOT.get(dep, dep))
-        dep_sequence.append(dep)
-
-        # 语义槽位分类
-        if dep in {"nsubj", "nsubj:pass", "dobj", "pobj", "attr"}:
-            semantic_slots.append("ARG")
-        elif dep in {"amod", "advmod", "det"}:
-            semantic_slots.append("MOD")
-        elif dep == "ROOT":
-            semantic_slots.append("PRED")
-        elif dep in {"prep", "agent"}:
-            semantic_slots.append("LINK")
-        else:
-            semantic_slots.append("OTHER")
-
-    # ========== 风格表示提取 ==========
-    # 1. 复杂度四维轴
-    precomputed = dependency_features.get('_precomputed', {})
-    complexity_axis = {
-        'subordination': dependency_features.get('subordinate_ratio', 0.0) * 10,
-        'coordination': dependency_features.get('coordination_ratio', 0.0) * 10,
-        'negation': dependency_features.get('_dep_raw_counts', {}).get('neg', 0) / max(dependency_features.get('n_tokens', 1), 1),
-        'length_depth': dependency_features.get('avg_dependency_depth', 0.0) / 10,
-    }
-
-    # 2. POS分布向量
-    n_tokens = dependency_features.get('n_tokens', 1)
-    pos_dist = {
-        'NOUN': dependency_features.get('upos_dist_NOUN', 0.0),
-        'VERB': dependency_features.get('upos_dist_VERB', 0.0),
-        'ADJ': dependency_features.get('upos_dist_ADJ', 0.0),
-        'ADV': dependency_features.get('upos_dist_ADV', 0.0),
-        'PRON': dependency_features.get('upos_dist_PRON', 0.0),
-        'DET': dependency_features.get('upos_dist_DET', 0.0),
-        'AUX': dependency_features.get('upos_dist_AUX', 0.0),
-        'PART': dependency_features.get('upos_dist_PART', 0.0),
-        'SCONJ': dependency_features.get('upos_dist_SCONJ', 0.0),
-        'CCONJ': dependency_features.get('upos_dist_CCONJ', 0.0),
-        'ADP': dependency_features.get('upos_dist_ADP', 0.0),
-    }
-
-    # 3. 句法标记密度向量
-    syntactic_markers = {
-        'relative_clause': dependency_features.get('relative_clause_ratio', 0.0),
-        'passive': dependency_features.get('passive_ratio', 0.0),
-        'participial': dependency_features.get('participial_ratio', 0.0),
-        'infinitive': dependency_features.get('infinitive_ratio', 0.0),
-        'appositive': dependency_features.get('appositive_ratio', 0.0),
-        'parenthetical': dependency_features.get('parenthetical_ratio', 0.0),
-        'prep_phrase': dependency_features.get('prep_phrase_ratio', 0.0),
-        'insertion': dependency_features.get('insertion_frequency', 0.0),
-    }
-
-    # ========== 组装解耦结果 ==========
-    content_repr = {
-        'skeleton': ' '.join(skeleton_parts),
-        'dep_sequence': dep_sequence,
-        'semantic_slots': semantic_slots,
-        'n_tokens': n_tokens,
-    }
-
-    style_repr = {
-        'complexity_axis': complexity_axis,
-        'pos_distribution': pos_dist,
-        'syntactic_markers': syntactic_markers,
-        # 展平为向量
-        'vector': [
-            complexity_axis['subordination'],
-            complexity_axis['coordination'],
-            complexity_axis['negation'],
-            complexity_axis['length_depth'],
-            pos_dist['NOUN'], pos_dist['VERB'], pos_dist['ADJ'], pos_dist['ADV'],
-            pos_dist['PRON'], pos_dist['DET'], pos_dist['AUX'], pos_dist['PART'],
-            pos_dist['SCONJ'], pos_dist['CCONJ'], pos_dist['ADP'],
-            syntactic_markers['relative_clause'],
-            syntactic_markers['passive'],
-            syntactic_markers['participial'],
-            syntactic_markers['infinitive'],
-            syntactic_markers['appositive'],
-            syntactic_markers['parenthetical'],
-            syntactic_markers['prep_phrase'],
-            syntactic_markers['insertion'],
-        ],
-    }
-
-    return {
-        'content': content_repr,
-        'style': style_repr,
-        'disentangled': True,
-    }
-
-
-def style_transfer(content_skeleton: str,
-                   source_style: Dict,
-                   target_style: Dict,
-                   attributes: List[Dict],
-                   nlp) -> str:
-    """
-    风格转换：将内容与目标风格结合，生成新文本
-
-    Args:
-        content_skeleton: 内容骨架（如 "SUBJ am looking for OBJ"）
-        source_style: 源风格表示
-        target_style: 目标风格表示
-        attributes: 属性列表
-        nlp: spaCy模型
-
-    Returns:
-        转换后的文本
-    """
-    # 1. 解析骨架
-    skeleton_parts = content_skeleton.split()
-
-    # 2. 计算风格插值系数
-    # 在源风格和目标风格之间进行线性插值
-    interpolation_ratio = 0.7  # 保留70%目标风格
-
-    # 3. 生成填充文本
-    # 根据目标风格的复杂度调整填充方式
-
-    # 解析目标风格的复杂度
-    target_complexity = target_style.get('complexity_axis', {})
-    target_markers = target_style.get('syntactic_markers', {})
-
-    # 高复杂度：使用更长的从句结构
-    high_complexity = (
-        target_complexity.get('subordination', 0) > 0.5 or
-        target_markers.get('relative_clause', 0) > 0.1
-    )
-
-    # 4. 填充属性
-    filled_text = _fill_with_style(content_skeleton, attributes, high_complexity)
-
-    return filled_text
-
-
-def _fill_with_style(skeleton: str, attributes: List[Dict], high_complexity: bool) -> str:
-    """
-    根据风格填充骨架
-
-    Args:
-        skeleton: 内容骨架
-        attributes: 属性列表
-        high_complexity: 是否使用高复杂度句式
-    """
-    import random
-
-    if not attributes:
-        return "I am looking for craft supplies."
-
-    # 按维度组织属性
-    by_dim = {}
-    for a in attributes:
-        dim = a.get('dimension', 'Other')
-        val = a.get('value', '').strip()
-        if val and len(val) > 1:
-            by_dim.setdefault(dim, []).append(val)
-
-    if not by_dim:
-        return "I am looking for craft supplies."
-
-    # 提取关键词
-    product = by_dim.get('Product_Category', [''])[0].split('/')[0]
-    brand = by_dim.get('Brand_Preference', [''])[0]
-    color = by_dim.get('Appearance_Color', [''])[0]
-    style = by_dim.get('Style_Design', [''])[0]
-    material = by_dim.get('Material_Composition', [''])[0]
-
-    # 根据复杂度选择句式模板
-    if high_complexity:
-        # 高复杂度：从句、被动、插入语
-        templates = [
-            "I have been searching for {product} that {brand}, which {style} and {material}.",
-            "The {product} I am looking at, with its {color} {style}, is {material}.",
-            "I need {product} that, despite being {brand}, offers {style} in {material}.",
-            "What I am hoping to find is {product} that {brand} with {color} and {style}.",
-        ]
-    else:
-        # 低复杂度：简单句
-        templates = [
-            "I am looking for {product}.",
-            "I need {product} in {color}.",
-            "I want {product} from {brand}.",
-            "I am searching for {product} that is {style}.",
-        ]
-
-    # 填充模板
-    template = random.choice(templates)
-    result = template.format(
-        product=product or 'craft supplies',
-        brand=brand or '',
-        color=color or '',
-        style=style or '',
-        material=material or '',
-    )
-
-    # 清理空白
-    result = ' '.join(result.split())
-    if not result.endswith('.'):
-        result += '.'
-
-    return result
-
-
 def compute_disentanglement_loss(model: DisentanglementModel,
                                  content_tokens: torch.Tensor,
                                  style_features: torch.Tensor,
@@ -2144,8 +981,15 @@ def compute_disentanglement_loss(model: DisentanglementModel,
     # 前向传播
     reconstructed, content_emb, style_emb = model(content_tokens, style_features)
 
-    # 1. 重构损失
-    recon_loss = F.cross_entropy(reconstructed, target_tokens)
+    # 1. 重构损失：对整个序列计算平均交叉熵
+    # reconstructed: (batch, vocab_size) → 扩展到序列长度
+    # target_tokens: (batch, seq_len)
+    seq_len = target_tokens.size(1)
+    # 将单token预测扩展到所有位置，计算平均损失
+    recon_loss = F.cross_entropy(
+        reconstructed.unsqueeze(1).expand(-1, seq_len, -1).reshape(-1, reconstructed.size(-1)),
+        target_tokens.reshape(-1)
+    )
 
     # 2. 对比损失（简化的infoNCE）
     # 正样本：相同内容不同风格
@@ -2228,76 +1072,6 @@ def extract_style_vector(dependency_features: Dict) -> np.ndarray:
     return np.array(complexity_axis + pos_dist + syntactic_markers, dtype=np.float32)
 
 
-def compute_style_similarity(style1: np.ndarray, style2: np.ndarray) -> float:
-    """
-    计算两个风格向量之间的相似度
-
-    Args:
-        style1: (23,) 风格向量1
-        style2: (23,) 风格向量2
-
-    Returns:
-        cosine_similarity: 余弦相似度
-    """
-    from numpy.linalg import norm
-
-    if norm(style1) == 0 or norm(style2) == 0:
-        return 0.0
-
-    return np.dot(style1, style2) / (norm(style1) * norm(style2))
-
-
-def interpolate_style(source_style: np.ndarray, target_style: np.ndarray,
-                      alpha: float = 0.7) -> np.ndarray:
-    """
-    在源风格和目标风格之间进行插值
-
-    Args:
-        source_style: 源风格向量
-        target_style: 目标风格向量
-        alpha: 插值系数，0=完全源风格，1=完全目标风格
-
-    Returns:
-        interpolated_style: 插值后的风格向量
-    """
-    return (1 - alpha) * source_style + alpha * target_style
-
-
-def apply_style_transfer(content_skeleton: str,
-                        source_style: np.ndarray,
-                        target_style: np.ndarray,
-                        attributes: List[Dict],
-                        nlp,
-                        alpha: float = 0.7) -> str:
-    """
-    应用风格转换
-
-    将内容骨架从源风格转换到目标风格
-
-    Args:
-        content_skeleton: 内容骨架
-        source_style: 源风格向量
-        target_style: 目标风格向量
-        attributes: 属性列表
-        nlp: spaCy模型
-        alpha: 风格强度，0=保持原风格，1=完全目标风格
-
-    Returns:
-        转换后的文本
-    """
-    # 判断目标风格是否高复杂度
-    # 目标风格的subordination维度
-    target_subordination = target_style[0]
-    target_relative_clause = target_style[15]  # relative_clause_ratio
-
-    high_complexity = target_subordination > 0.5 or target_relative_clause > 0.1
-
-    # 填充骨架
-    filled = _fill_with_style(content_skeleton, attributes, high_complexity)
-
-    return filled
-
-
 # ============================================================================
 # 便捷函数：批量处理用户文本的解耦
 # ============================================================================
@@ -2322,31 +1096,9 @@ def disentangle_user_profile(profile: Dict, nlp) -> Dict:
     # 提取风格向量
     style_vector = extract_style_vector(dependency_features)
 
-    # 解析复杂度模板
-    complexity_templates = profile.get('complexity_templates', {})
-
-    # 解耦各复杂度等级的内容
-    disentangled_templates = {}
-    for level in ['low', 'medium', 'high']:
-        template_info = complexity_templates.get(level, {})
-        skeleton = template_info.get('raw_skeleton', '')
-
-        if skeleton:
-            # 提取骨架的依存关系序列
-            doc = nlp(skeleton)
-            dep_seq = [token.dep_ for token in doc if not token.is_punct]
-            dep_sequence = ' '.join(dep_seq) if dep_seq else ''
-
-            disentangled_templates[level] = {
-                'skeleton': skeleton,
-                'dep_sequence': dep_sequence,
-                'style_vector': style_vector.tolist(),
-            }
-
     return {
         **profile,
         'disentangled_style': style_vector.tolist(),
-        'disentangled_templates': disentangled_templates,
         'disentanglement_method': 'dae_contrastive',
     }
 
@@ -2518,7 +1270,7 @@ class DisentanglementTrainer:
             self.model,
             content_tokens,
             style_features,
-            target_tokens[:, 0],  # 使用第一个token作为目标
+            target_tokens,  # 整个序列作为目标
             lambda_contrastive,
             lambda_style
         )
@@ -2729,6 +1481,92 @@ class DisentanglementTrainer:
         return style_emb.cpu().numpy()[0]
 
 
+def _extract_style_features_from_text(text: str, nlp) -> Optional[np.ndarray]:
+    """
+    从文本中提取 23 维风格特征（少于25词返回None）。
+
+    与 Stage 6 的 _extract_style_features_from_text 保持一致。
+
+    Args:
+        text: 输入文本
+        nlp: spaCy 模型
+
+    Returns:
+        23维风格特征向量，或 None（文本太短）
+    """
+    words = [w for w in text.split() if w.strip()]
+    if len(words) < 25:
+        return None
+
+    doc = nlp(text)
+    n_tokens = max(len([t for t in doc if not t.is_punct]), 1)
+    n_subj = sum(1 for t in doc if t.dep_ in {'nsubj', 'nsubj:pass'})
+    n_dobj = sum(1 for t in doc if t.dep_ in {'dobj', 'pobj', 'attr'})
+    n_amod = sum(1 for t in doc if t.dep_ == 'amod')
+    n_advmod = sum(1 for t in doc if t.dep_ == 'advmod')
+    n_prep = sum(1 for t in doc if t.dep_ == 'prep')
+    n_conj = sum(1 for t in doc if t.dep_ == 'conj')
+    n_neg = sum(1 for t in doc if t.dep_ == 'neg')
+    n_relcl = sum(1 for t in doc if t.dep_ == 'relcl')
+    n_pass = sum(1 for t in doc if t.dep_ in {'nsubj:pass', 'aux:pass'} or (t.tag_ == 'VBN' and t.dep_ not in {'amod', 'conj'}))
+    n_part = sum(1 for t in doc if t.tag_ in {'VBG', 'VBN'} and t.dep_ in {'amod', 'advcl', 'relcl'})
+    n_inf = sum(1 for t in doc if t.tag_ == 'VB' and t.dep_ in {'xcomp', 'ccomp', 'advcl'})
+    n_det = sum(1 for t in doc if t.dep_ == 'det')
+    n_cc = sum(1 for t in doc if t.dep_ == 'cc')
+    n_intj = sum(1 for t in doc if t.dep_ == 'intj')
+
+    pos_counts = {}
+    for token in doc:
+        if not token.is_punct:
+            pos = token.pos_
+            pos_counts[pos] = pos_counts.get(pos, 0) + 1
+
+    def get_depth(token):
+        depth = 0
+        while token.head != token:
+            depth += 1
+            token = token.head
+            if depth > 20:
+                break
+        return depth
+    depths = [get_depth(t) for t in doc if not t.is_punct]
+    avg_depth = sum(depths) / max(len(depths), 1)
+
+    subordinate_ratio = n_subj / n_tokens
+    coordination_ratio = n_conj / n_tokens
+    negation_ratio = n_neg / n_tokens
+    length_depth = avg_depth / 10.0
+
+    upos_order = ['NOUN', 'VERB', 'ADJ', 'ADV', 'PRON', 'DET', 'AUX', 'PART', 'SCONJ', 'CCONJ', 'ADP']
+    pos_dist = [pos_counts.get(p, 0) / n_tokens for p in upos_order]
+
+    relative_clause_ratio = n_relcl / n_tokens
+    passive_ratio = n_pass / n_tokens
+    participial_ratio = n_part / n_tokens
+    infinitive_ratio = n_inf / n_tokens
+    appositive_ratio = n_intj / n_tokens
+    parenthetical_ratio = n_det / n_tokens
+    prep_phrase_ratio = n_prep / n_tokens
+    insertion_frequency = n_amod / n_tokens
+
+    features = [
+        subordinate_ratio * 10,
+        coordination_ratio * 10,
+        negation_ratio * 10,
+        length_depth,
+        *pos_dist,
+        relative_clause_ratio,
+        passive_ratio,
+        participial_ratio,
+        infinitive_ratio,
+        appositive_ratio,
+        parenthetical_ratio,
+        prep_phrase_ratio,
+        insertion_frequency,
+    ]
+    return np.array(features, dtype=np.float32)
+
+
 def run_training(config: Dict = None):
     """
     运行训练流程
@@ -2740,12 +1578,11 @@ def run_training(config: Dict = None):
         config = {
             # 数据路径
             'reviews_file': '/fs04/ar57/wenyu/result/personal_query/00_data_preparation',
-            'profiles_dir': '/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis',
-            'output_dir': '/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis/disentanglement_model',
+            'output_dir': '/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis',
 
             # 模型参数
             'content_dim': 128,
-            'style_dim': 32,
+            'style_dim': 64,
             'hidden_dim': 128,
             'learning_rate': 1e-3,
 
@@ -2765,7 +1602,8 @@ def run_training(config: Dict = None):
         }
 
     import os
-    os.makedirs(config['output_dir'], exist_ok=True)
+    output_dir = config.get('output_dir', '/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis')
+    os.makedirs(output_dir, exist_ok=True)
 
     print("=" * 60)
     print("Disentanglement Model Training")
@@ -2773,48 +1611,31 @@ def run_training(config: Dict = None):
 
     # 1. 加载数据
     print("\n[1/5] Loading data...")
-    from collections import defaultdict
+    import spacy
+    nlp = spacy.load('en_core_web_sm')
 
     # 加载用户评论
     user_reviews = load_user_reviews(config['reviews_file'])
     print(f"  Loaded {len(user_reviews)} users' reviews")
 
-    # 加载用户画像
-    profiles_dir = Path(config['profiles_dir'])
-    user_profiles = {}
-    for profile_file in profiles_dir.glob("linguistic_profile_*.json"):
-        with open(profile_file, 'r', encoding='utf-8') as f:
-            profile = json.load(f)
-            user_id = profile.get('user_id')
-            if user_id:
-                user_profiles[user_id] = profile
-    print(f"  Loaded {len(user_profiles)} user profiles")
-
-    # 2. 准备训练数据
+    # 2. 准备训练数据（直接从评论提取风格特征，不再依赖画像文件）
     print("\n[2/5] Preparing training data...")
 
     texts = []
     style_vectors = []
 
     for user_id, reviews in user_reviews.items():
-        if user_id not in user_profiles:
-            continue
-
-        profile = user_profiles[user_id]
-        dep_features = profile.get('dependency_features', {})
-
-        if not dep_features:
-            continue
-
-        # 提取风格向量
-        style_vec = extract_style_vector(dep_features)
-
-        # 提取评论文本
         for review in reviews[:5]:  # 每个用户最多5条评论
             text = review.get('reviewText', '')
-            if text and len(text.split()) >= 25:
-                texts.append(text)
-                style_vectors.append(style_vec)
+            if not text or len(text.split()) < 25:
+                continue
+
+            style_features = _extract_style_features_from_text(text, nlp)
+            if style_features is None:
+                continue
+
+            texts.append(text)
+            style_vectors.append(style_features)
 
     print(f"  Prepared {len(texts)} training samples")
 
@@ -2826,8 +1647,6 @@ def run_training(config: Dict = None):
 
     # 2.5 扫描所有依存关系标签，构建完整词汇表
     print("\n[2.5/5] Building vocabulary from actual data...")
-    import spacy
-    nlp = spacy.load('en_core_web_sm')
 
     all_deps = set()
     total_texts = len(texts)
@@ -2845,6 +1664,12 @@ def run_training(config: Dict = None):
     for i, dep in enumerate(sorted(all_deps), start=1):
         content_vocab[dep] = i
     print(f"  Vocabulary size: {len(content_vocab)}")
+
+    # 保存词汇表
+    vocab_path = os.path.join(output_dir, 'content_vocab.json')
+    with open(vocab_path, 'w', encoding='utf-8') as f:
+        json.dump(content_vocab, f)
+    print(f"  Saved vocabulary to {vocab_path}")
 
     # 3. 初始化训练器
     print("\n[3/5] Initializing trainer...")
@@ -2876,7 +1701,7 @@ def run_training(config: Dict = None):
 
     # 5. 保存模型
     print("\n[5/5] Saving model...")
-    model_path = os.path.join(config['output_dir'], 'disentanglement_model.pt')
+    model_path = os.path.join(output_dir, 'disentanglement_model.pt')
     trainer.save_model(model_path)
 
     # 保存词汇表
@@ -2897,50 +1722,20 @@ def run_training(config: Dict = None):
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description='Stage 5: Disentanglement Model Training & Application')
-    parser.add_argument('--mode', type=str, default='train',
-                       choices=['train', 'disentangle'],
-                       help='运行模式: train=训练解耦模型, disentangle=解耦画像')
-    parser.add_argument('--reviews-file', type=str,
-                       default='/fs04/ar57/wenyu/result/personal_query/00_data_preparation',
-                       help='评论数据路径')
-    parser.add_argument('--profiles-dir', type=str,
-                       default='/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis',
-                       help='用户画像目录')
-    parser.add_argument('--output-dir', type=str,
-                       default='/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis',
-                       help='输出目录')
-    parser.add_argument('--epochs', type=int, default=10, help='训练轮数')
-    parser.add_argument('--batch-size', type=int, default=32, help='批大小')
-    parser.add_argument('--lr', type=float, default=1e-3, help='学习率')
-    parser.add_argument('--content-dim', type=int, default=128, help='内容向量维度')
-    parser.add_argument('--style-dim', type=int, default=32, help='风格向量维度')
-    parser.add_argument('--lambda-contrastive', type=float, default=0.1, help='对比损失权重')
-    parser.add_argument('--lambda-style', type=float, default=0.1, help='风格解耦损失权重')
-    parser.add_argument('--device', type=str, default=None, help='设备 (cuda/cpu)')
-
-    args = parser.parse_args()
-
-    if args.mode == 'train':
-        # 训练解耦模型
-        config = {
-            'reviews_file': args.reviews_file,
-            'profiles_dir': args.profiles_dir,
-            'output_dir': args.output_dir,
-            'content_dim': args.content_dim,
-            'style_dim': args.style_dim,
-            'hidden_dim': 128,
-            'learning_rate': args.lr,
-            'epochs': args.epochs,
-            'batch_size': args.batch_size,
-            'lambda_contrastive': args.lambda_contrastive,
-            'lambda_style': args.lambda_style,
-            'log_every': 100,
-            'device': args.device,
-        }
-        run_training(config)
-    elif args.mode == 'disentangle':
-        # 解耦用户画像
-        main_disentangle()
+    # 训练解耦模型
+    config = {
+        'reviews_file': '/fs04/ar57/wenyu/result/personal_query/00_data_preparation',
+        'profiles_dir': '/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis',
+        'output_dir': '/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis',
+        'content_dim': 128,
+        'style_dim': 64,
+        'hidden_dim': 128,
+        'learning_rate': 1e-3,
+        'epochs': 10,
+        'batch_size': 32,
+        'lambda_contrastive': 0.1,
+        'lambda_style': 0.1,
+        'log_every': 100,
+        'device': None,
+    }
+    run_training(config)

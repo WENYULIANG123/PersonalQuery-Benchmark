@@ -19,9 +19,133 @@ import json
 import gzip
 import re
 from datetime import datetime
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Set
 from collections import defaultdict
 from multiprocessing import Pool, cpu_count
+
+
+# ============ 匈牙利算法（Kuhn-Munkres）============
+
+
+def build_user_product_graph(products: List[Dict]) -> Tuple[Dict[str, List[str]], Set[str]]:
+    """构建用户-商品二分图"""
+    user_to_products = defaultdict(list)
+    all_users = set()
+    for product in products:
+        asin = product.get('asin')
+        reviewed_by = product.get('reviewed_by_users', [])
+        for user_id in reviewed_by:
+            user_to_products[user_id].append(asin)
+            all_users.add(user_id)
+    return user_to_products, all_users
+
+
+def hungarian_maximum_matching(
+    user_to_products: Dict[str, List[str]],
+    all_users: Set[str],
+    products_per_user: int = 3,
+) -> Dict[str, List[str]]:
+    """
+    使用 Kuhn 增广路径算法找到最大匹配（匈牙利算法的简化版）。
+
+    两阶段策略：
+    1. 第一阶段：优先保证每个用户获得至少1个商品（用户按候选商品数升序排列，优先处理选择少的用户）
+    2. 第二阶段：对已获得1个商品的用户，尝试分配第2个商品
+
+    每个商品只匹配给一个用户。
+
+    返回: user_id -> [matched_asin_list]
+    """
+    user_match: Dict[str, List[str]] = {u: [] for u in all_users}
+    product_match: Dict[str, str] = {}  # product -> user (商品只属于一个用户)
+
+    def dfs(user: str, visited: Set[str]) -> bool:
+        """尝试为用户分配一个未占用的商品"""
+        if user in visited:
+            return False
+        visited.add(user)
+
+        for product in user_to_products.get(user, []):
+            if product in product_match:
+                # 商品已被匹配，尝试把该商品当前的用户挤走
+                current_user = product_match[product]
+                if dfs(current_user, visited.copy()):
+                    product_match[product] = user
+                    user_match[user].append(product)
+                    return True
+            else:
+                # 商品未被匹配，直接分配
+                product_match[product] = user
+                user_match[user].append(product)
+                return True
+
+        return False
+
+    # ===== 第一阶段：优先保证每个用户获得至少1个商品 =====
+    # 按候选商品数升序排列，优先处理选择少的用户（避免它们无法匹配）
+    users_by_options = sorted(all_users, key=lambda u: len(user_to_products.get(u, [])))
+    for user in users_by_options:
+        if user_match[user]:
+            continue  # 已有匹配，跳过
+        visited = set()
+        dfs(user, visited)
+
+    # ===== 第二阶段：对已获得1个商品的用户，尝试分配第2个 =====
+    if products_per_user >= 2:
+        for user in sorted(all_users):
+            if len(user_match[user]) >= 1:
+                visited = set()
+                dfs(user, visited)
+
+    # ===== 第三阶段：对已获得2个商品的用户，尝试分配第3个 =====
+    if products_per_user >= 3:
+        for user in sorted(all_users):
+            if len(user_match[user]) >= 2:
+                visited = set()
+                dfs(user, visited)
+
+    return user_match
+
+
+def run_hungarian_matching(all_results: List[Dict], products_per_user: int = 3) -> Tuple[List[Dict], Dict]:
+    """
+    对商品列表执行匈牙利算法，返回用户-商品一对多匹配结果
+
+    Args:
+        all_results: 商品列表
+        products_per_user: 每个用户匹配的商品数量 (默认: 2)
+
+    返回: (matched_results, matching_stats)
+    """
+    user_to_products, all_users = build_user_product_graph(all_results)
+
+    user_match = hungarian_maximum_matching(user_to_products, all_users, products_per_user=products_per_user)
+
+    matched_users = sum(1 for u in user_match if user_match[u])
+    matched_products_set = set()
+    for products in user_match.values():
+        matched_products_set.update(products)
+    unmatched_users = [u for u in sorted(all_users) if not user_match.get(u)]
+
+    product_dict = {p.get('asin'): p for p in all_results}
+
+    matched_results = []
+    for user_id in sorted(all_users):
+        matched_asins = user_match.get(user_id, [])
+        for matched_asin in matched_asins:
+            product = product_dict.get(matched_asin)
+            if product:
+                matched_results.append({'user_id': user_id, 'product': product})
+
+    stats = {
+        'total_users': len(all_users),
+        'matched_users': matched_users,
+        'matched_products': len(matched_products_set),
+        'unmatched_users': len(unmatched_users),
+        'unmatched_user_list': unmatched_users,
+    }
+
+    return matched_results, stats
 
 
 def log_with_timestamp(message: str):
@@ -879,75 +1003,6 @@ def main():
 
     log_with_timestamp(f"✅ 处理完成，总计 {stats['total']} 个有效商品")
 
-    # ========== 每个用户只保留一个商品（优先选择唯一评论的商品）==========
-    log_with_timestamp("")
-    log_with_timestamp("🔍 为每个用户只保留一个商品（优先选择只有该用户评论过的商品）...")
-
-    def calc_total_length(p):
-        """计算商品 A1-A5 字段值的总长度"""
-        length = 0
-        for key in ['A1_product_type', 'A2_brand', 'A3_price', 'A4_appearance', 'A5_use_case']:
-            val = p.get(key)
-            if val is not None:
-                if isinstance(val, list):
-                    length += sum(len(str(v)) for v in val)
-                else:
-                    length += len(str(val))
-        return length
-
-    # 构建 asin -> 评论用户列表
-    asin_to_users = defaultdict(list)
-    for p in all_results:
-        asin = p.get('asin', '')
-        for user_id in p.get('reviewed_by_users', []):
-            asin_to_users[asin].append(user_id)
-
-    # 按用户分组
-    user_products = {}
-    for p in all_results:
-        users = p.get('reviewed_by_users', [])
-        for user_id in users:
-            if user_id not in user_products:
-                user_products[user_id] = []
-            user_products[user_id].append(p)
-
-    # 为每个用户选择商品（优先选择只有该用户评论过的商品）
-    per_user_results = []
-    stats['unique_only'] = 0  # 唯一评论的商品数
-    stats['multi_users'] = 0  # 多人评论的商品数
-
-    for user_id, prods in user_products.items():
-        if not prods:
-            continue
-
-        # 先找只有该用户评论过的商品
-        unique_prods = [p for p in prods if len(asin_to_users.get(p.get('asin'), [])) == 1]
-
-        if unique_prods:
-            # 优先从唯一评论中选择 A1-A5 最长的
-            best = max(unique_prods, key=calc_total_length)
-            stats['unique_only'] += 1
-        else:
-            # 没有唯一评论，从多人评论中选择 A1-A5 最长的
-            best = max(prods, key=calc_total_length)
-            stats['multi_users'] += 1
-
-        per_user_results.append(best)
-
-    original_count = len(all_results)
-    all_results = per_user_results
-    log_with_timestamp(f"  每用户一个后商品数: {len(all_results)}")
-    log_with_timestamp(f"  其中唯一评论商品: {stats['unique_only']}, 多人评论商品: {stats['multi_users']}")
-
-    # 更新统计
-    stats['total'] = len(all_results)
-    for slot in ['A1', 'A2', 'A3', 'A4', 'A5']:
-        slot_key = f'{slot}_product_type' if slot in ['A1'] else f'{slot}_' + {
-            'A2': 'brand', 'A3': 'price', 'A4': 'appearance', 'A5': 'use_case'
-        }[slot]
-        stats[f'has_{slot}'] = sum(1 for r in all_results if r.get(slot_key))
-    # ========== 每用户一个过滤结束 ==========
-
     # 保存结果
     log_with_timestamp(f"💾 保存结果到: {OUTPUT_FILE}")
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
@@ -1002,6 +1057,73 @@ def main():
     log_with_timestamp("📋 示例输出 (前3个):")
     for i, p in enumerate(all_results[:3]):
         print(f"  {i+1}. asin={p['asin']}, A1={p['A1_product_type']}, A2={p['A2_brand']}, A3={p['A3_price']}, A5={p['A5_use_case']}, A7={len(p.get('A7_material', []))} mat, A18={len(p.get('A18_quality', []))} qual")
+
+    # ========== 匈牙利算法最大匹配 ==========
+    log_with_timestamp("")
+    log_with_timestamp("=" * 80)
+    log_with_timestamp("🔄 执行匈牙利算法最大匹配...")
+    matched_results, matching_stats = run_hungarian_matching(all_results)
+
+    log_with_timestamp(f"  总用户数: {matching_stats['total_users']}")
+    log_with_timestamp(f"  成功匹配: {matching_stats['matched_users']}/{matching_stats['total_users']}")
+    log_with_timestamp(f"  使用独特商品数: {matching_stats['matched_products']}")
+    log_with_timestamp(f"  未匹配用户数: {matching_stats['unmatched_users']}")
+
+    # 输出直接覆盖原文件，格式为用户-商品一对一
+    log_with_timestamp(f"💾 保存结果到: {OUTPUT_FILE} (匈牙利匹配后)")
+    output_results = []
+    for item in matched_results:
+        p = item['product']
+        p_copy = p.copy()
+        p_copy['user_id'] = item['user_id']
+        output_results.append(p_copy)
+
+    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+        json.dump({
+            'metadata': {
+                'source': 'meta_Arts_Crafts_and_Sewing.json.gz',
+                'total_products': len(output_results),
+                'total_users': matching_stats['total_users'],
+                'matched_users': matching_stats['matched_users'],
+                'unmatched_users': matching_stats['unmatched_users'],
+                'extraction_time': datetime.now().isoformat(),
+                'slots': {
+                    'A1': 'Category - 产品类型',
+                    'A2': 'Brand - 品牌',
+                    'A3': 'Price - 价格',
+                    'A4': 'Appearance - 外观（颜色+风格+表面）',
+                    'A5': 'Usage - 使用场景',
+                    'A7': 'Material - 材料',
+                    'A8': 'Safety - 安全/环保',
+                    'A9': 'Durability - 耐用性',
+                    'A10': 'Ease_of_use - 易用性',
+                    'A11': 'Temperature_resistance - 耐温性',
+                    'A13': 'Reusability - 可重复使用',
+                    'A14': 'Size - 尺寸规格',
+                    'A16': 'Compatibility - 兼容性',
+                    'A18': 'Quality - 质量描述',
+                }
+            },
+            'stats': {
+                'total': len(output_results),
+                'total_users': matching_stats['total_users'],
+                'matched_users': matching_stats['matched_users'],
+                'unmatched_users': matching_stats['unmatched_users'],
+                'unmatched_user_list': matching_stats['unmatched_user_list'],
+            },
+            'products': output_results
+        }, f, indent=2, ensure_ascii=False)
+
+    log_with_timestamp("")
+    log_with_timestamp("📋 匈牙利匹配示例 (前3个):")
+    for i, item in enumerate(matched_results[:3]):
+        p = item['product']
+        log_with_timestamp(f"  {i+1}. user={item['user_id']}, asin={p.get('asin')}, brand={p.get('A2_brand')}, type={p.get('A1_product_type')}")
+
+    log_with_timestamp("")
+    log_with_timestamp("=" * 80)
+    log_with_timestamp("✅ Stage 1 全部完成")
+    log_with_timestamp("=" * 80)
 
 
 if __name__ == "__main__":
