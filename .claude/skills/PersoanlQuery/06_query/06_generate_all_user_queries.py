@@ -315,6 +315,76 @@ def _init_worker():
     _stage1_asin_index = {}
 
 
+# Global nlp instance for precompute workers (loaded once per worker process)
+_nlp_precompute_worker = None
+
+
+def _init_precompute_worker():
+    """Initializer for precompute pool - no spaCy needed for lexical features."""
+    import os
+    import sys
+    pid = os.getpid()
+    print(f"[DEBUG] Init worker PID={pid} started (lexical features, no spaCy)", flush=True, file=sys.stderr)
+
+
+def _precompute_user_features_worker(args: Tuple) -> Tuple[str, np.ndarray]:
+    """Module-level worker for parallel precomputation. Returns (user_id, 17-dim lexical features).
+
+    注意：此版本使用词汇级特征，不需要 spaCy NLP 模型，大幅提升速度。
+    """
+    import numpy as np
+    import json as json_module
+    import re
+
+    user_id, user_data = args
+
+    def _extract_lexical_features(text: str):
+        """提取14维词汇级特征（不需要spaCy）- 使用模板特有短语模式"""
+        return _extract_style_features_from_text(text)
+
+    reviews = []
+    review_file = os.path.join(STAGE0_REVIEWS_DIR, f"reviews_{user_id}.json")
+    if os.path.exists(review_file):
+        try:
+            with open(review_file, 'r', encoding='utf-8') as f:
+                review_data = json_module.load(f)
+            for item in review_data.get("results", []):
+                for review in item.get("target_reviews", []):
+                    if isinstance(review, str):
+                        text = review
+                    elif isinstance(review, dict):
+                        text = review.get("review_text", "")
+                    else:
+                        text = ""
+                    if text:
+                        reviews.append(text)
+                for review in item.get("other_reviews", []):
+                    if isinstance(review, str):
+                        text = review
+                    elif isinstance(review, dict):
+                        text = review.get("review_text", "")
+                    else:
+                        text = ""
+                    if text:
+                        reviews.append(text)
+        except Exception:
+            pass
+
+    all_style_feats = []
+    for review in reviews:
+        try:
+            feat = _extract_lexical_features(review)
+            if feat is not None:
+                all_style_feats.append(feat)
+        except Exception:
+            continue
+
+    if all_style_feats:
+        return (user_id, np.mean(all_style_feats, axis=0))
+    else:
+        return (user_id, np.zeros(17, dtype=np.float32))
+
+
 def _process_user_worker(args: Tuple) -> Tuple[str, bool, Optional[Dict]]:
     """Worker function for multiprocessing. Returns (user_id, success, result_dict or error)."""
     user_id, user_data, config = args
@@ -353,96 +423,87 @@ def _extract_opening_pattern_features(text: str) -> np.ndarray:
 
 
 def _extract_style_features_from_text(text: str) -> Optional[np.ndarray]:
-    """从文本中提取 30 维风格特征（23维原有 + 7维开头特征，少于25词返回None）。"""
+    """从文本中提取词汇级风格特征（14维），用于区分不同模板。
+
+    基于模板特有的短语模式进行检测，而不是泛化的统计特征。
+    每个特征对应一个模板/模板群组独有的短语模式。
+    """
+    text_lower = text.lower()
     words = [w for w in text.split() if w.strip()]
-    if len(words) < 25:
+    word_count = max(len(words), 1)
+
+    # 少于10词跳过（模板填充后约29-32词）
+    if len(words) < 10:
         return None
 
-    doc = nlp(text)
-    n_tokens = max(len([t for t in doc if not t.is_punct]), 1)
-    n_subj = sum(1 for t in doc if t.dep_ in {'nsubj', 'nsubj:pass'})
-    n_dobj = sum(1 for t in doc if t.dep_ in {'dobj', 'pobj', 'attr'})
-    n_amod = sum(1 for t in doc if t.dep_ == 'amod')
-    n_advmod = sum(1 for t in doc if t.dep_ == 'advmod')
-    n_prep = sum(1 for t in doc if t.dep_ == 'prep')
-    n_conj = sum(1 for t in doc if t.dep_ == 'conj')
-    n_neg = sum(1 for t in doc if t.dep_ == 'neg')
-    n_relcl = sum(1 for t in doc if t.dep_ == 'relcl')
-    n_pass = sum(1 for t in doc if t.dep_ in {'nsubj:pass', 'aux:pass'} or (t.tag_ == 'VBN' and t.dep_ not in {'amod', 'conj'}))
-    n_part = sum(1 for t in doc if t.tag_ in {'VBG', 'VBN'} and t.dep_ in {'amod', 'advcl', 'relcl'})
-    n_inf = sum(1 for t in doc if t.tag_ == 'VB' and t.dep_ in {'xcomp', 'ccomp', 'advcl'})
-    n_det = sum(1 for t in doc if t.dep_ == 'det')
-    n_cc = sum(1 for t in doc if t.dep_ == 'cc')
-    n_intj = sum(1 for t in doc if t.dep_ == 'intj')
+    # 使用标准化的介词模式，避免不同词数导致的尺度差异
+    # 所有介词短语都用统一的 with 计数来标准化
+    features = [
+        # ========== HIGH-2 特有: "which ... offers products" ==========
+        1.0 if 'which' in text_lower and 'offers products' in text_lower else 0.0,
 
-    pos_counts = {}
-    for token in doc:
-        if not token.is_punct:
-            pos = token.pos_
-            pos_counts[pos] = pos_counts.get(pos, 0) + 1
+        # ========== HIGH-1/HIGH-2 共有: "that is ... and that is" ==========
+        # 至少2个 "that is/are" 模式
+        1.0 if (text_lower.count('that is') + text_lower.count('that are')) >= 2 else 0.0,
 
-    def get_depth(token):
-        depth = 0
-        while token.head != token:
-            depth += 1
-            token = token.head
-            if depth > 20:
-                break
-        return depth
-    depths = [get_depth(t) for t in doc if not t.is_punct]
-    avg_depth = sum(depths) / max(len(depths), 1)
+        # ========== HIGH-18 特有: "as it happens" ==========
+        1.0 if 'as it happens' in text_lower else 0.0,
 
-    subordinate_ratio = n_subj / n_tokens
-    coordination_ratio = n_conj / n_tokens
-    negation_ratio = n_neg / n_tokens
-    length_depth = avg_depth / 10.0
+        # ========== HIGH-17 特有: 多个 "with ... for" 结构 ==========
+        # HIGH-17: "with a price around" + "with suitability for" + "with application"
+        (1.0 if 'with a price' in text_lower else 0.0) +
+        (1.0 if 'with suitability' in text_lower else 0.0) +
+        (1.0 if 'with application' in text_lower else 0.0),
 
-    upos_order = ['NOUN', 'VERB', 'ADJ', 'ADV', 'PRON', 'DET', 'AUX', 'PART', 'SCONJ', 'CCONJ', 'ADP']
-    pos_dist = [pos_counts.get(p, 0) / n_tokens for p in upos_order]
+        # ========== HIGH-5/HIGH-17 共有: "with ... with" 结构 ==========
+        # 统计连续 with 结构 (HIGH-5用1个，HIGH-17用多个)
+        min(2.0, text_lower.count(' with ')),
 
-    relative_clause_ratio = n_relcl / n_tokens
-    passive_ratio = n_pass / n_tokens
-    participial_ratio = n_part / n_tokens
-    infinitive_ratio = n_inf / n_tokens
-    appositive_ratio = n_intj / n_tokens
-    parenthetical_ratio = n_det / n_tokens
-    prep_phrase_ratio = n_prep / n_tokens
-    insertion_frequency = n_amod / n_tokens
+        # ========== HIGH-3 特有: "that, being ... is suitable" ==========
+        1.0 if 'that,' in text_lower and 'being' in text_lower else 0.0,
 
-    # 23维原有特征
-    base_features = [
-        subordinate_ratio * 10,
-        coordination_ratio * 10,
-        negation_ratio * 10,
-        length_depth,
-        *pos_dist,
-        relative_clause_ratio,
-        passive_ratio,
-        participial_ratio,
-        infinitive_ratio,
-        appositive_ratio,
-        parenthetical_ratio,
-        prep_phrase_ratio,
-        insertion_frequency,
+        # ========== HIGH-6 特有: "to be used ... to be priced" ==========
+        1.0 if text_lower.count('to be') >= 2 else 0.0,
+
+        # ========== HIGH-7 特有: "that is designed by" ==========
+        1.0 if 'that is designed' in text_lower else 0.0,
+
+        # ========== HIGH-8 特有: "It is ... that I am looking for" (倒装) ==========
+        1.0 if text_lower.startswith('it is') else 0.0,
+
+        # ========== HIGH-9/HIGH-4 共有: 逗号分隔的并列结构 ==========
+        # HIGH-4: "a product from ..., priced ..., and suitable"
+        # HIGH-9: "from ... and priced ... and suitable ... and appropriate"
+        text_lower.count(','),
+
+        # ========== HIGH-10/HIGH-14 特有: 句末介词/无动词结构 ==========
+        # HIGH-10: "for ... for ... for"
+        # HIGH-14: "the requirement is"
+        1.0 if 'requirement is' in text_lower else 0.0,
+
+        # ========== HIGH-13 特有: "the need for" ==========
+        1.0 if 'the need for' in text_lower else 0.0,
+
+        # ========== HIGH-15 特有: 疑问句 "what ... how" ==========
+        1.0 if re.search(r'\bwhat\b', text_lower) or re.search(r'\bhow\b', text_lower) else 0.0,
+
+        # ========== HIGH-11/HIGH-12 特有: "there is" 存在句 ==========
+        1.0 if 'there is' in text_lower or 'there are' in text_lower else 0.0,
     ]
 
-    # 7维开头特征
-    opening_features = _extract_opening_pattern_features(text)
-
-    features = np.concatenate([base_features, opening_features])
-    return features.astype(np.float32)
+    return np.array(features, dtype=np.float32)
 
 
 _template_style_features = None
 
 
 def _get_template_style_features() -> Dict[str, np.ndarray]:
-    """获取模板的30维风格特征（23维原有 + 7维开头特征）"""
+    """获取模板的14维词汇级风格特征"""
     global _template_style_features
     if _template_style_features is not None:
         return _template_style_features
 
-    print("[Stage 6] Computing template style features (30-dim: 23 base + 7 opening pattern)...")
+    print("[Stage 6] Computing template style features (14-dim lexical)...")
     _template_style_features = {}
 
     placeholders_map = {
@@ -503,7 +564,7 @@ def _load_precomputed_features() -> Dict[str, np.ndarray]:
 
 
 def _get_user_style_features(user_id: str, reviews: List[str]) -> np.ndarray:
-    """获取用户的23维风格特征（直接从评论提取，不使用模型）。
+    """获取用户的17维词汇级风格特征（直接从评论提取，不使用模型）。
 
     优先使用预计算结果，否则实时计算并缓存到进程内。
     """
@@ -526,7 +587,7 @@ def _get_user_style_features(user_id: str, reviews: List[str]) -> np.ndarray:
             continue
 
     if not all_style_feats:
-        emb = np.zeros(23, dtype=np.float32)
+        emb = np.zeros(17, dtype=np.float32)
     else:
         emb = np.mean(all_style_feats, axis=0)
 
@@ -846,7 +907,7 @@ def run_generation(
     if user_reviews:
         user_style_feat = _get_user_style_features(user_id, user_reviews)
     else:
-        user_style_feat = np.zeros(23, dtype=np.float32)
+        user_style_feat = np.zeros(17, dtype=np.float32)
 
     # 确定要处理的asin列表
     if asin is None:
@@ -1072,8 +1133,8 @@ def main():
     log_with_timestamp("=" * 80)
     log_with_timestamp("Stage 6: Generate Template Queries (Style-based Template Matching)")
     log_with_timestamp("=" * 80)
-    log_with_timestamp("Step 1: Extract 30-dim style features for all templates (23 base + 7 opening)")
-    log_with_timestamp("Step 2: Compute user 30-dim style features from their reviews")
+    log_with_timestamp("Step 1: Extract 17-dim lexical features for all templates")
+    log_with_timestamp("Step 2: Compute user 17-dim lexical features from their reviews")
     log_with_timestamp("Step 3: Match user to best template via cosine similarity")
     log_with_timestamp("=" * 80)
 
@@ -1111,25 +1172,33 @@ def main():
     if precomputed_features is None:
         log_with_timestamp("Precomputing user style features (parallel)...")
 
-        # 获取CPU核心数，用于并行
-        num_workers = min(mp.cpu_count(), 16)
+        # 获取CPU核心数，用于并行（限制为8以提高速度）
+        num_workers = min(8, mp.cpu_count())
 
         # Worker函数：处理单个用户
         def _precompute_user_features(args):
-            user_id, user_data = args
+            import os
+            import sys
+            import warnings
             import spacy
             import numpy as np
             import json as json_module
 
+            user_id, user_data = args
+            pid = os.getpid()
+            print(f"[DEBUG] Worker PID={pid} started for user={user_id}", flush=True, file=sys.stderr)
+
             try:
                 nlp = spacy.load("en_core_web_sm")
+                print(f"[DEBUG] Worker PID={pid} loaded spaCy model for user={user_id}", flush=True, file=sys.stderr)
             except OSError:
                 import subprocess
+                print(f"[DEBUG] Worker PID={pid} downloading spaCy model for user={user_id}", flush=True, file=sys.stderr)
                 subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"], check=True, capture_output=True)
                 nlp = spacy.load("en_core_web_sm")
 
             def _extract_30dim_features(text: str):
-                """提取30维特征（23维基础 + 7维开头特征）"""
+                """提取17维词汇级特征"""
                 words = [w for w in text.split() if w.strip()]
                 if len(words) < 25:
                     return None
@@ -1201,10 +1270,12 @@ def main():
                     1.0 if 'as it happens' in text_lower else 0.0,
                 ]
 
-                return np.array(base_features + opening_features, dtype=np.float32)
+                # 只使用23维基特征
+                return np.array(base_features, dtype=np.float32)
 
             reviews = []
             review_file = os.path.join(STAGE0_REVIEWS_DIR, f"reviews_{user_id}.json")
+            print(f"[DEBUG] Worker PID={pid} reading file={review_file} for user={user_id}", flush=True, file=sys.stderr)
             if os.path.exists(review_file):
                 try:
                     with open(review_file, 'r', encoding='utf-8') as f:
@@ -1228,31 +1299,45 @@ def main():
                                 text = ""
                             if text:
                                 reviews.append(text)
-                except Exception:
-                    pass
+                    print(f"[DEBUG] Worker PID={pid} loaded {len(reviews)} reviews for user={user_id}", flush=True, file=sys.stderr)
+                except Exception as e:
+                    print(f"[DEBUG] Worker PID={pid} error loading reviews: {e}", flush=True, file=sys.stderr)
 
             all_style_feats = []
-            for review in reviews:
+            for i, review in enumerate(reviews):
                 try:
-                    feat = _extract_30dim_features(review)
+                    feat = _extract_lexical_features(review)
                     if feat is not None:
                         all_style_feats.append(feat)
-                except Exception:
+                except Exception as e:
+                    print(f"[DEBUG] Worker PID={pid} error processing review {i}: {e}", flush=True, file=sys.stderr)
                     continue
 
+            print(f"[DEBUG] Worker PID={pid} processed {len(all_style_feats)} features for user={user_id}", flush=True, file=sys.stderr)
+
             if all_style_feats:
-                return (user_id, np.mean(all_style_feats, axis=0))
+                result = (user_id, np.mean(all_style_feats, axis=0))
+                print(f"[DEBUG] Worker PID={pid} returning result for user={user_id}", flush=True, file=sys.stderr)
+                return result
             else:
-                return (user_id, np.zeros(30, dtype=np.float32))
+                print(f"[DEBUG] Worker PID={pid} returning zeros for user={user_id}", flush=True, file=sys.stderr)
+                return (user_id, np.zeros(17, dtype=np.float32))
 
         # 并行处理所有用户
         log_with_timestamp(f"  Using {num_workers} parallel workers for {len(validated_users)} users")
         precomputed_features = {}
 
-        with mp.Pool(num_workers) as pool:
-            results = pool.map(_precompute_user_features, validated_users.items())
-            for user_id, feat in results:
+        print(f"  Creating pool with {num_workers} workers...", flush=True, file=sys.stderr)
+        with mp.Pool(num_workers, initializer=_init_precompute_worker) as pool:
+            print(f"  Pool created, starting imap_unordered...", flush=True, file=sys.stderr)
+            # Use imap_unordered with chunksize=1 to reduce memory pressure
+            results_gen = pool.imap_unordered(_precompute_user_features_worker, validated_users.items(), chunksize=1)
+            print(f"  Started receiving results...", flush=True, file=sys.stderr)
+            for i, (user_id, feat) in enumerate(results_gen):
                 precomputed_features[user_id] = feat
+                if (i + 1) % 500 == 0:
+                    print(f"  Processed {i + 1}/{len(validated_users)} users", flush=True, file=sys.stderr)
+            print(f"  All {len(precomputed_features)} users processed", flush=True, file=sys.stderr)
 
         log_with_timestamp(f"  Processed {len(precomputed_features)} users")
 
