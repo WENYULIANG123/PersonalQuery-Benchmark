@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
-"""Stage 6: Template-based Query Generation."""
+"""
+Stage 6: 句法结构提取 - 基于 LLM 的依存句法分析
 
-import hashlib
+功能：
+1. 对用户评论逐句进行依存句法分析
+2. 保留功能词（连词、介词、关系代词、冠词等）和依存拓扑
+3. 将实义词替换为类型化槽位（如 {NOUN}、{ADJ}、{VERB}）
+4. 计算五个复杂度维度指标
+5. 筛选后保留高质量骨架，构建立体化的句法结构池
+"""
+
+import glob
 import json
-import multiprocessing as mp
 import os
-import random
-import re
 import sys
-from collections import Counter
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from collections import defaultdict
 
-import numpy as np
-import spacy
+sys.path.insert(0, '/home/wlia0047/ar57/wenyu/.claude/skills')
+from llm_client import ChatGLMClient
 
 # ============================================================
 # 路径配置
@@ -22,974 +28,1043 @@ STAGE0_REVIEWS_DIR = "/fs04/ar57/wenyu/result/personal_query/00_data_preparation
 STAGE1_ATTRIBUTES_FILE = "/fs04/ar57/wenyu/result/personal_query/01_preference_extraction/attributes_Arts_Crafts_and_Sewing.json"
 OUTPUT_DIR = "/fs04/ar57/wenyu/result/personal_query/06_query"
 
-# ============================================================
-# 查询模板定义（从 query_templates.py 内联）
-# ============================================================
-
-DIMENSION_TO_SEMANTIC_TYPE: Dict[str, str] = {
-    "Product_Category": "CATEGORY",
-    "Product_Keyword": "CATEGORY",
-    "Brand_Preference": "BRAND",
-    "Price_Range": "PRICE",
-    "Material_Composition": "MATERIAL",
-    "A4_appearance": "STYLE",
-    "Size_Spec": "SIZE",
-    "Quality_Description": "QUALITY",
-    "Quality_Craftsmanship": "QUALITY",
-    "Use_Scene": "USE_CASE",
-    "Safety_Feature": "FEATURE",
-    "Durability": "FEATURE",
-    "Ease_Of_Use": "FEATURE",
-    "Temperature_Resistance": "FEATURE",
-    "Surface_Feature": "FEATURE",
-    "Reusability": "FEATURE",
-    "Compatibility": "FEATURE",
-}
-
-SEMANTIC_DEFAULTS: Dict[str, str] = {
-    "CATEGORY": "craft supplies",
-    "BRAND": "trusted brand",
-    "PRICE": "$20",
-    "MATERIAL": "durable material",
-    "COLOR": "classic",
-    "SIZE": "standard size",
-    "QUALITY": "good quality",
-    "STYLE": "modern style",
-    "USE_CASE": "general crafting",
-    "FEATURE": "reliable performance",
-}
-
-TEMPLATES: Dict[str, List[Tuple[List[str], str]]] = {
-    "HIGH-1": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for {ARTICLE} {STYLE} {CAT} that is from the {BRAND} brand, that is priced around {PRICE}, and that is suitable for {USE} in my current project."),
-    ],
-    "HIGH-2": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for {ARTICLE} {STYLE} {CAT} that is from the {BRAND} brand, which offers products that are priced around {PRICE}, and that are suitable for {USE} in my current project."),
-    ],
-    "HIGH-3": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for {ARTICLE} {STYLE} {CAT} that, being from the {BRAND} brand and being priced around {PRICE}, is suitable for {USE} in my current project."),
-    ],
-    "HIGH-4": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for {ARTICLE} {STYLE} {CAT}, a product from the {BRAND} brand, priced around {PRICE}, and suitable for {USE} in my current project."),
-    ],
-    "HIGH-5": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for {ARTICLE} {STYLE} {CAT} from the {BRAND} brand, with a price around {PRICE}, for use in {USE}, in my current project."),
-    ],
-    "HIGH-6": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for {ARTICLE} {STYLE} {CAT} to be used in {USE}, to be priced around {PRICE}, and to be from the {BRAND} brand in my current project."),
-    ],
-    "HIGH-7": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for {ARTICLE} {STYLE} {CAT} that is designed by the {BRAND} brand, that is priced around {PRICE}, and that is used for {USE} in my current project."),
-    ],
-    "HIGH-8": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "It is {ARTICLE} {STYLE} {CAT} from the {BRAND} brand that I am looking for, which is priced around {PRICE} and suitable for {USE} in my current project."),
-    ],
-    "HIGH-9": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for {ARTICLE} {STYLE} {CAT} from the {BRAND} brand and priced around {PRICE} and suitable for {USE} and appropriate for my current project needs."),
-    ],
-    "HIGH-10": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for {ARTICLE} {STYLE} {CAT} from the {BRAND} brand priced around {PRICE} suitable for {USE} in my current project."),
-    ],
-    "HIGH-11": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for {ARTICLE} {STYLE} {CAT} that is from the {BRAND} brand that provides products that are priced around {PRICE} that are suitable for {USE} in my current project."),
-    ],
-    "HIGH-12": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "As for {ARTICLE} {STYLE} {CAT} from the {BRAND} brand, priced around {PRICE} and suitable for {USE}, I am looking for one for my current project."),
-    ],
-    "HIGH-13": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "There is a need for {ARTICLE} {STYLE} {CAT} from the {BRAND} brand, priced around {PRICE} and suitable for {USE} in my current project."),
-    ],
-    "HIGH-14": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "The requirement is for {ARTICLE} {STYLE} {CAT} from the {BRAND} brand, with a price around {PRICE} and suitability for {USE} in my current project."),
-    ],
-    "HIGH-15": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for what would be {ARTICLE} {STYLE} {CAT} from the {BRAND} brand, priced around {PRICE} and suitable for {USE} in my current project."),
-    ],
-    "HIGH-16": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "Looking for is {ARTICLE} {STYLE} {CAT} from the {BRAND} brand, priced around {PRICE} and suitable for {USE} in my current project."),
-    ],
-    "HIGH-17": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for {ARTICLE} {STYLE} {CAT} from the {BRAND} brand with a price around {PRICE} with suitability for {USE} with application in my current project."),
-    ],
-    "HIGH-18": [
-        (["CATEGORY", "BRAND", "PRICE", "USE_CASE", "STYLE"],
-         "I am looking for {ARTICLE} {STYLE} {CAT}, from the {BRAND} brand, as it happens, priced around {PRICE} and suitable for {USE}, in my current project."),
-    ],
-}
-
-SUBTYPES = [
-    "Conditional", "Causal", "Concessive", "Comparative", "Purpose",
-    "Passive", "Apposition_Parenthetical", "Interrogative",
-    "Elliptical_Telegraphic", "Constraint_List",
-]
-
-
-def _clean(text: str) -> str:
-    out = re.sub(r"\s+", " ", (text or "").strip())
-    out = re.sub(r"\s+([,.;:!?])", r"\1", out)
-    return out
-
-
-def _compact_value(value: str, max_tokens: int = 2) -> str:
-    if not value:
-        return ""
-    tokens = [t for t in re.split(r"\s+", value.strip()) if t]
-    bad = {
-        "who", "whose", "which", "that", "where", "when", "why", "how",
-        "dont", "don't", "cant", "can't", "wont", "won't", "didnt", "didn't",
-        "isnt", "aren't", "arent", "wasnt", "weren't", "werent", "not", "none",
-        "this", "these", "those", "there", "here", "then", "really", "very",
-    }
-    filtered = []
-    for t in tokens:
-        k = re.sub(r"[^a-z0-9%$-]", "", t.lower())
-        if not k or k in bad:
-            continue
-        filtered.append(t)
-    if filtered:
-        tokens = filtered
-    if not tokens:
-        return value
-    if len(tokens) <= max_tokens:
-        return " ".join(tokens)
-    return " ".join(tokens[:max_tokens])
-
-
-def _get_semantic_type(dimension: str) -> str:
-    return DIMENSION_TO_SEMANTIC_TYPE.get(dimension, "FEATURE")
-
-
-def _build_attr_map_by_semantic_type(selected_attrs: List[Tuple[str, str]]) -> Dict[str, str]:
-    semantic_map: Dict[str, str] = {}
-    for dimension, value in selected_attrs:
-        sem_type = _get_semantic_type(dimension)
-        if sem_type not in semantic_map:
-            semantic_map[sem_type] = value
-    return semantic_map
-
-
-def _map_slot_placeholder(sem_type: str) -> str:
-    mapping = {
-        "CATEGORY": "{CAT}", "BRAND": "{BRAND}", "PRICE": "{PRICE}",
-        "MATERIAL": "{MATERIAL}", "COLOR": "{COLOR}", "SIZE": "{SIZE}",
-        "QUALITY": "{QUALITY}", "STYLE": "{STYLE}", "USE_CASE": "{USE}",
-        "FEATURE": "{FEATURE}",
-    }
-    return mapping.get(sem_type, "{FEATURE}")
-
-
-def _is_plural(noun_phrase: str) -> bool:
-    if not noun_phrase:
-        return False
-    words = noun_phrase.strip().split()
-    if not words:
-        return False
-    last_word = words[-1].lower()
-    irregular_plurals = {
-        'feet', 'teeth', 'geese', 'mice', 'lice', 'men', 'women', 'children',
-        'people', 'oxen', 'cattle', 'deer', 'sheep', 'fish', 'species', 'series',
-        'people', 'folks', 'guys', 'pads', 'inks', 'beads', 'colors',
-    }
-    plural_indicators = {'some', 'any', 'few', 'many', 'various', 'different', 'multiple'}
-    if any(ind in words for ind in plural_indicators):
-        return True
-    if last_word in irregular_plurals:
-        return True
-    plural_patterns = (
-        last_word.endswith('s') and not last_word.endswith('ss') and not last_word.endswith('us')
-    ) or last_word.endswith('ies') or last_word.endswith('ves')
-    return plural_patterns
-
-
-def _get_article(noun_phrase: str) -> str:
-    if not noun_phrase:
-        return "a"
-    words = noun_phrase.strip().split()
-    if not words:
-        return "a"
-    last_word = words[-1].lower()
-    plural_patterns = (
-        last_word.endswith('s') and not last_word.endswith('ss') and not last_word.endswith('us')
-    ) or last_word.endswith('ies') or last_word.endswith('ves')
-    irregular_plurals = {
-        'feet', 'teeth', 'geese', 'mice', 'lice', 'men', 'women', 'children',
-        'people', 'oxen', 'cattle', 'deer', 'sheep', 'fish', 'species', 'series',
-        'people', 'folks', 'guys', 'pads', 'inks', 'beads', 'colors',
-    }
-    plural_indicators = {'some', 'any', 'few', 'many', 'various', 'different', 'multiple'}
-    if any(ind in words for ind in plural_indicators):
-        return "some"
-    if last_word in irregular_plurals:
-        return "some"
-    if plural_patterns:
-        return "some"
-    first_word = words[0].lower()
-    vowel_start = first_word[0] in 'aeiou' if first_word else False
-    if vowel_start:
-        return "an"
-    return "a"
-
-
-def generate_query_from_attributes(
-    category: str,
-    selected_attrs: List[Tuple[str, str]],
-    subtype: str,
-    rng: Optional[random.Random] = None,
-) -> Tuple[str, str]:
-    chooser = rng if rng is not None else random
-    c = category if category else "craft supplies"
-
-    semantic_map = _build_attr_map_by_semantic_type(selected_attrs)
-    templates = TEMPLATES.get(subtype, TEMPLATES["HIGH-1"])
-    template_idx = chooser.randrange(len(templates))
-    slots_needed, template_text = templates[template_idx]
-
-    slot_values: Dict[str, str] = {}
-    for sem_type in slots_needed:
-        placeholder = _map_slot_placeholder(sem_type)
-        if sem_type in semantic_map:
-            slot_values[placeholder] = _compact_value(semantic_map[sem_type], max_tokens=2)
-        else:
-            default = SEMANTIC_DEFAULTS.get(sem_type, c)
-            slot_values[placeholder] = _compact_value(default, max_tokens=2)
-
-    if "{CAT}" not in slot_values or slot_values["{CAT}"] in ["craft supplies", ""]:
-        slot_values["{CAT}"] = _compact_value(c, max_tokens=2)
-
-    cat_value = slot_values.get("{CAT}", c)
-    article = _get_article(cat_value)
-    slot_values["{ARTICLE}"] = article
-
-    query = template_text
-    for placeholder, value in slot_values.items():
-        query = query.replace(placeholder, value)
-
-    query = _clean(query)
-    if query and query[-1] not in ".!?":
-        query += "."
-
-    template_id = f"{subtype}#{template_idx + 1}"
-    return query, template_id
-
+# 属性槽位名称（5个）
+ATTRIBUTE_SLOTS = ["A1", "A2", "A3", "A4", "A5"]
 
 # ============================================================
-# Stage 5 解耦模型加载与风格嵌入
+# 骨架筛选参数（TBD - 可调整）
 # ============================================================
-try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    import subprocess
-    subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"], check=True)
-    nlp = spacy.load("en_core_web_sm")
-
+MIN_WORD_COUNT = 6      # 词数下限
+MAX_WORD_COUNT = 25     # 词数上限
+MIN_SLOT_COUNT = 3      # 最少槽位数
+MAX_SKELETONS_PER_USER = 10  # 每用户保留的最大骨架数
 
 # ============================================================
-# 多进程 Worker
+# Stage1 属性加载（缓存）
 # ============================================================
-def _init_worker():
-    """Initialize worker process resources (spaCy model, caches)."""
-    global nlp, _user_style_cache, _precomputed_user_features, _template_style_features, _stage1_cache, _stage1_asin_index
-    import spacy
-    nlp = spacy.load("en_core_web_sm")
-    _user_style_cache = {}
-    _precomputed_user_features = _load_precomputed_features()
-    _template_style_features = None
-    _stage1_cache = None
-    _stage1_asin_index = {}
-
-
-# Global nlp instance for precompute workers (loaded once per worker process)
-_nlp_precompute_worker = None
-
-
-def _init_precompute_worker():
-    """Initializer for precompute pool - no spaCy needed for lexical features."""
-    import os
-    import sys
-    pid = os.getpid()
-    print(f"[DEBUG] Init worker PID={pid} started (lexical features, no spaCy)", flush=True, file=sys.stderr)
-
-
-def _precompute_user_features_worker(args: Tuple) -> Tuple[str, np.ndarray]:
-    """Module-level worker for parallel precomputation. Returns (user_id, 17-dim lexical features).
-
-    注意：此版本使用词汇级特征，不需要 spaCy NLP 模型，大幅提升速度。
-    """
-    import numpy as np
-    import json as json_module
-    import re
-
-    user_id, user_data = args
-
-    def _extract_lexical_features(text: str):
-        """提取14维词汇级特征（不需要spaCy）- 使用模板特有短语模式"""
-        return _extract_style_features_from_text(text)
-
-    reviews = []
-    review_file = os.path.join(STAGE0_REVIEWS_DIR, f"reviews_{user_id}.json")
-    if os.path.exists(review_file):
-        try:
-            with open(review_file, 'r', encoding='utf-8') as f:
-                review_data = json_module.load(f)
-            for item in review_data.get("results", []):
-                for review in item.get("target_reviews", []):
-                    if isinstance(review, str):
-                        text = review
-                    elif isinstance(review, dict):
-                        text = review.get("review_text", "")
-                    else:
-                        text = ""
-                    if text:
-                        reviews.append(text)
-                for review in item.get("other_reviews", []):
-                    if isinstance(review, str):
-                        text = review
-                    elif isinstance(review, dict):
-                        text = review.get("review_text", "")
-                    else:
-                        text = ""
-                    if text:
-                        reviews.append(text)
-        except Exception:
-            pass
-
-    all_style_feats = []
-    for review in reviews:
-        try:
-            feat = _extract_lexical_features(review)
-            if feat is not None:
-                all_style_feats.append(feat)
-        except Exception:
-            continue
-
-    if all_style_feats:
-        return (user_id, np.mean(all_style_feats, axis=0))
-    else:
-        return (user_id, np.zeros(17, dtype=np.float32))
-
-
-def _process_user_worker(args: Tuple) -> Tuple[str, bool, Optional[Dict]]:
-    """Worker function for multiprocessing. Returns (user_id, success, result_dict or error)."""
-    user_id, user_data, config = args
-    try:
-        result = run_generation(
-            linguistic_profile_file=None,
-            user_id=user_id,
-            asin=user_data.get('asins'),
-            output_dir=config['output_dir'],
-            seed=config['seed'],
-            forced_level=None,
-        )
-        # Return the result dict instead of just the path for verification
-        with open(result, 'r') as f:
-            result_data = json.load(f)
-        return (user_id, True, result_data)
-    except Exception as e:
-        return (user_id, False, str(e))
-
-
-def _extract_opening_pattern_features(text: str) -> np.ndarray:
-    """提取开头模式特征（7维binary特征）"""
-    text_lower = text.lower().strip()
-    first_words = ' '.join(text_lower.split()[:5])  # 前5个词
-
-    features = [
-        1.0 if text_lower.startswith('i am looking for') else 0.0,
-        1.0 if text_lower.startswith('it is') or text_lower.startswith("it's") else 0.0,
-        1.0 if text_lower.startswith('as for') else 0.0,
-        1.0 if text_lower.startswith('there is') or text_lower.startswith("there's") or text_lower.startswith('there are') else 0.0,
-        1.0 if text_lower.startswith('the requirement') else 0.0,
-        1.0 if 'looking for is' in first_words else 0.0,
-        1.0 if 'as it happens' in text_lower else 0.0,
-    ]
-    return np.array(features, dtype=np.float32)
-
-
-def _extract_style_features_from_text(text: str) -> Optional[np.ndarray]:
-    """从文本中提取词汇级风格特征（14维），用于区分不同模板。
-
-    基于模板特有的短语模式进行检测，而不是泛化的统计特征。
-    每个特征对应一个模板/模板群组独有的短语模式。
-    """
-    text_lower = text.lower()
-    words = [w for w in text.split() if w.strip()]
-    word_count = max(len(words), 1)
-
-    # 少于10词跳过（模板填充后约29-32词）
-    if len(words) < 10:
-        return None
-
-    # 使用标准化的介词模式，避免不同词数导致的尺度差异
-    # 所有介词短语都用统一的 with 计数来标准化
-    features = [
-        # ========== HIGH-2 特有: "which ... offers products" ==========
-        1.0 if 'which' in text_lower and 'offers products' in text_lower else 0.0,
-
-        # ========== HIGH-1/HIGH-2 共有: "that is ... and that is" ==========
-        # 至少2个 "that is/are" 模式
-        1.0 if (text_lower.count('that is') + text_lower.count('that are')) >= 2 else 0.0,
-
-        # ========== HIGH-18 特有: "as it happens" ==========
-        1.0 if 'as it happens' in text_lower else 0.0,
-
-        # ========== HIGH-17 特有: 多个 "with ... for" 结构 ==========
-        # HIGH-17: "with a price around" + "with suitability for" + "with application"
-        (1.0 if 'with a price' in text_lower else 0.0) +
-        (1.0 if 'with suitability' in text_lower else 0.0) +
-        (1.0 if 'with application' in text_lower else 0.0),
-
-        # ========== HIGH-5/HIGH-17 共有: "with ... with" 结构 ==========
-        # 统计连续 with 结构 (HIGH-5用1个，HIGH-17用多个)
-        min(2.0, text_lower.count(' with ')),
-
-        # ========== HIGH-3 特有: "that, being ... is suitable" ==========
-        1.0 if 'that,' in text_lower and 'being' in text_lower else 0.0,
-
-        # ========== HIGH-6 特有: "to be used ... to be priced" ==========
-        1.0 if text_lower.count('to be') >= 2 else 0.0,
-
-        # ========== HIGH-7 特有: "that is designed by" ==========
-        1.0 if 'that is designed' in text_lower else 0.0,
-
-        # ========== HIGH-8 特有: "It is ... that I am looking for" (倒装) ==========
-        1.0 if text_lower.startswith('it is') else 0.0,
-
-        # ========== HIGH-9/HIGH-4 共有: 逗号分隔的并列结构 ==========
-        # HIGH-4: "a product from ..., priced ..., and suitable"
-        # HIGH-9: "from ... and priced ... and suitable ... and appropriate"
-        text_lower.count(','),
-
-        # ========== HIGH-10/HIGH-14 特有: 句末介词/无动词结构 ==========
-        # HIGH-10: "for ... for ... for"
-        # HIGH-14: "the requirement is"
-        1.0 if 'requirement is' in text_lower else 0.0,
-
-        # ========== HIGH-13 特有: "the need for" ==========
-        1.0 if 'the need for' in text_lower else 0.0,
-
-        # ========== HIGH-15 特有: 疑问句 "what ... how" ==========
-        1.0 if re.search(r'\bwhat\b', text_lower) or re.search(r'\bhow\b', text_lower) else 0.0,
-
-        # ========== HIGH-11/HIGH-12 特有: "there is" 存在句 ==========
-        1.0 if 'there is' in text_lower or 'there are' in text_lower else 0.0,
-    ]
-
-    return np.array(features, dtype=np.float32)
-
-
-_template_style_features = None
-
-
-def _get_template_style_features() -> Dict[str, np.ndarray]:
-    """获取模板的14维词汇级风格特征"""
-    global _template_style_features
-    if _template_style_features is not None:
-        return _template_style_features
-
-    print("[Stage 6] Computing template style features (14-dim lexical)...")
-    _template_style_features = {}
-
-    placeholders_map = {
-        '{ARTICLE}': 'a', '{STYLE}': 'elegant', '{CAT}': 'craft supplies',
-        '{BRAND}': 'trusted', '{PRICE}': '$20', '{USE}': 'crafting',
-        '{COLOR}': 'blue', '{MATERIAL}': 'cotton',
-    }
-    fallback_text = (
-        "I am looking for elegant craft supplies that are from the trusted brand "
-        "that is priced around twenty dollars and that are suitable for crafting "
-        "in my current project"
-    )
-
-    for subtype, templates in TEMPLATES.items():
-        for slots_needed, template_text in templates:
-            cleaned = template_text
-            for ph, replacement in placeholders_map.items():
-                if ph in cleaned:
-                    cleaned = cleaned.replace(ph, replacement)
-
-            style_features = _extract_style_features_from_text(cleaned)
-            if style_features is None:
-                style_features = _extract_style_features_from_text(fallback_text)
-
-            _template_style_features[subtype] = style_features
-
-    print(f"[Stage 6] Computed style features for {len(_template_style_features)} templates")
-    return _template_style_features
-
-
-def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    norm_a = np.linalg.norm(a)
-    norm_b = np.linalg.norm(b)
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return float(np.dot(a, b) / (norm_a * norm_b))
-
-
-_user_style_cache: Dict[str, np.ndarray] = {}
-_precomputed_user_features: Dict[str, np.ndarray] = {}
-_PRECOMPUTED_FEATURES_FILE = os.path.join(OUTPUT_DIR, "precomputed_user_style_features.json")
-
-
-def _load_precomputed_features() -> Dict[str, np.ndarray]:
-    """加载预计算的用户风格特征。"""
-    global _precomputed_user_features
-    if os.path.exists(_PRECOMPUTED_FEATURES_FILE):
-        try:
-            with open(_PRECOMPUTED_FEATURES_FILE, 'r') as f:
-                data = json.load(f)
-            for uid, feat_list in data.items():
-                _precomputed_user_features[uid] = np.array(feat_list, dtype=np.float32)
-            log_with_timestamp(f"Loaded {len(_precomputed_user_features)} precomputed user style features")
-            return _precomputed_user_features
-        except Exception as e:
-            log_with_timestamp(f"Warning: Failed to load precomputed features: {e}")
-    return {}
-
-
-def _get_user_style_features(user_id: str, reviews: List[str]) -> np.ndarray:
-    """获取用户的17维词汇级风格特征（直接从评论提取，不使用模型）。
-
-    优先使用预计算结果，否则实时计算并缓存到进程内。
-    """
-    # 优先使用预计算结果（跨进程共享）
-    if user_id in _precomputed_user_features:
-        return _precomputed_user_features[user_id]
-
-    # 进程内缓存
-    if user_id in _user_style_cache:
-        return _user_style_cache[user_id]
-
-    all_style_feats = []
-    for review in reviews:
-        try:
-            style_features = _extract_style_features_from_text(review)
-            if style_features is None:
-                continue
-            all_style_feats.append(style_features)
-        except Exception:
-            continue
-
-    if not all_style_feats:
-        emb = np.zeros(17, dtype=np.float32)
-    else:
-        emb = np.mean(all_style_feats, axis=0)
-
-    _user_style_cache[user_id] = emb
-    return emb
-
-
-def _select_template_by_cached_style(user_id: str, reviews: List[str]) -> Tuple[str, Dict[str, float]]:
-    user_style_feat = _get_user_style_features(user_id, reviews)
-    template_feats = _get_template_style_features()
-
-    similarities = {}
-    for subtype, template_feat in template_feats.items():
-        sim = _cosine_similarity(user_style_feat, template_feat)
-        similarities[subtype] = sim
-
-    best_template = max(similarities.items(), key=lambda x: x[1])[0]
-    return best_template, similarities
-
-
-# ============================================================
-# 模板分组（层次聚类 + MLP）
-# ============================================================
-STOPWORDS = {
-    "the", "and", "for", "with", "that", "this", "from", "into", "your", "you", "are", "was",
-    "were", "have", "has", "had", "but", "not", "all", "can", "will", "would", "just", "very",
-    "about", "then", "than", "when", "where", "while", "they", "them", "their", "there", "also",
-    "what", "which", "much", "many", "more", "most", "some", "such", "only", "over", "under",
-    "out", "off", "our", "its", "it's", "too", "few", "lot", "use", "used", "using", "like",
-    "made", "make", "still", "after", "before", "being", "been",
-}
-
-COLOR_WORDS = {
-    "black", "white", "blue", "red", "green", "pink", "purple", "gray", "grey", "brown",
-    "beige", "navy", "silver", "gold", "yellow", "orange", "clear", "transparent"
-}
-
-MATERIAL_WORDS = {
-    "cotton", "wool", "silicone", "leather", "metal", "plastic", "polyester", "linen", "nylon",
-    "canvas", "wood", "bamboo", "paper", "steel", "rubber", "ceramic", "glass", "acrylic"
-}
-
-
-def _extract_template_features(template_text: str) -> np.ndarray:
-    words = template_text.split()
-    word_count = max(len(words), 1)
-    text_lower = template_text.lower()
-
-    features = [
-        template_text.count(',') / word_count,
-        text_lower.count('that') / word_count,
-        text_lower.count('which') / word_count,
-        text_lower.count(' and ') / word_count,
-        (text_lower.count('to be') + text_lower.count('being')) / word_count,
-        len(re.findall(r'\b(is|are|was|were)\b.*\b(\w+ed)\b', text_lower)) / word_count,
-        len(re.findall(r'\b(with|for|in|to|of|by|from)\b', text_lower)) / word_count,
-        1.0 if 'there is' in text_lower or 'there are' in text_lower else 0.0,
-        1.0 if re.search(r'\b(what|how)\b', text_lower) else 0.0,
-    ]
-    return np.array(features, dtype=float)
-
-
-def _compute_all_template_features() -> Tuple[np.ndarray, List[str]]:
-    feature_list = []
-    subtype_list = []
-    for subtype, templates in TEMPLATES.items():
-        for slots_needed, template_text in templates:
-            features = _extract_template_features(template_text)
-            feature_list.append(features)
-            subtype_list.append(subtype)
-    return np.array(feature_list), subtype_list
-
-
-def _cluster_templates_mlp(features: np.ndarray, subtype_list: List[str]) -> Dict[str, List[str]]:
-    from sklearn.neural_network import MLPClassifier
-    from sklearn.preprocessing import StandardScaler
-
-    desired_groups = {
-        "low": ["HIGH-15", "HIGH-17", "HIGH-18", "HIGH-2", "HIGH-3", "HIGH-11", "HIGH-9"],
-        "medium": ["HIGH-1", "HIGH-4", "HIGH-14", "HIGH-8", "HIGH-12", "HIGH-16"],
-        "high": ["HIGH-5", "HIGH-10", "HIGH-13", "HIGH-6", "HIGH-7"],
-    }
-
-    label_to_id = {"low": 0, "medium": 1, "high": 2}
-    y = np.array([label_to_id[g] for s in subtype_list for g, v in desired_groups.items() if s in v])
-
-    scaler = StandardScaler()
-    X = scaler.fit_transform(features)
-    mlp = MLPClassifier(hidden_layer_sizes=(8, 4), activation='relu', max_iter=1000, random_state=42)
-    mlp.fit(X, y)
-
-    return {"low": [], "medium": [], "high": []}
-
-
-_TEMPLATE_SCORES = None
-TEMPLATE_GROUPS = None
-
-
-def _init_template_groups():
-    global _TEMPLATE_SCORES, TEMPLATE_GROUPS
-    features, subtype_list = _compute_all_template_features()
-    TEMPLATE_GROUPS = _cluster_templates_mlp(features, subtype_list)
-    _TEMPLATE_SCORES = {}
-    for subtype, feats in zip(subtype_list, features):
-        _TEMPLATE_SCORES[subtype] = float(np.sum(feats))
-
-
-_init_template_groups()
-
-
-def _get_templates_for_level(level: str) -> List[str]:
-    return TEMPLATE_GROUPS.get(level, TEMPLATE_GROUPS.get("medium", []))
-
-
-# ============================================================
-# Stage 1 / Stage 0 数据加载
-# ============================================================
-_stage1_cache = None
-_stage1_asin_index: Dict[str, Dict] = {}  # asin -> product (O(1) lookup)
+_stage1_data_cache = None
 
 
 def _load_stage1_attributes() -> Dict:
-    global _stage1_cache, _stage1_asin_index
-    if _stage1_cache is None:
-        if os.path.exists(STAGE1_ATTRIBUTES_FILE):
-            with open(STAGE1_ATTRIBUTES_FILE, 'r', encoding='utf-8') as f:
-                _stage1_cache = json.load(f)
-            # Build asin -> product index for O(1) lookup
-            _stage1_asin_index = {}
-            for product in _stage1_cache.get("products", []):
-                asin = product.get("asin")
-                if asin:
-                    _stage1_asin_index[asin] = product
+    """加载Stage1属性数据"""
+    global _stage1_data_cache
+    if _stage1_data_cache is None:
+        with open(STAGE1_ATTRIBUTES_FILE, 'r', encoding='utf-8') as f:
+            _stage1_data_cache = json.load(f)
+    return _stage1_data_cache
+
+
+def _get_user_attributes(user_id: str) -> Dict[str, str]:
+    """获取用户的5个属性值"""
+    data = _load_stage1_attributes()
+    products = data.get('products', [])
+
+    # 找该用户的第一个产品
+    user_attrs = {}
+    for p in products:
+        if p.get('user_id') == user_id:
+            # 提取5个属性
+            for i, slot in enumerate(ATTRIBUTE_SLOTS, 1):
+                key = f'A{i}_product_type' if i == 1 else f'A{i}_brand' if i == 2 else f'A{i}_price' if i == 3 else f'A{i}_appearance' if i == 4 else f'A{i}_use_case'
+                val = p.get(key)
+                if val:
+                    user_attrs[slot] = val if isinstance(val, str) else ', '.join(val) if isinstance(val, list) else str(val)
+            break
+    return user_attrs
+
+
+def _fill_skeleton_with_attributes(skeleton: str, attributes: Dict[str, str]) -> str:
+    """
+    将骨架中的槽位替换为属性槽位，基于语义角色映射
+    例如: "[NOUN:SUBJECT] [VERB] a [ADJ:MODIFIER] [NOUN:OBJECT]"
+    映射: SUBJECT→A1, OBJECT→A3, MODIFIER→A4
+    填充后: "{A1} [VERB] a [ADJ:MODIFIER] {A3}"
+    """
+    import re
+
+    ROLE_TO_ATTR = {
+        'SUBJECT': 'A1',
+        'OBJECT': 'A3',
+        'ADJUNCT': 'A5',
+    }
+    MODIFIER_ATTRS = ['A4', 'A2', 'A1']
+
+    attr_used = set()
+
+    def replace_match(match):
+        full_tag = match.group(1)
+        pos = full_tag.split(':')[0] if ':' in full_tag else full_tag
+        role = full_tag.split(':')[1] if ':' in full_tag else None
+
+        if role and role in ROLE_TO_ATTR:
+            attr = ROLE_TO_ATTR[role]
+            if attr in attributes and attr not in attr_used:
+                attr_used.add(attr)
+                return f'{{{attr}}}'
+        elif role == 'MODIFIER':
+            for a in MODIFIER_ATTRS:
+                if a in attributes and a not in attr_used:
+                    attr_used.add(a)
+                    return f'{{{a}}}'
+
+        return match.group(0)
+
+    pattern = r'\[([A-Za-z_]+(?::[A-Za-z_]+)?)\]'
+    filled_skeleton = re.sub(pattern, replace_match, skeleton)
+
+    return filled_skeleton
+
+
+# ============================================================
+# LLM Client (ChatGLM)
+# ============================================================
+_client = ChatGLMClient(
+    model="glm-5",
+    api_key="db2682f8a0024278a672f762ce36d7cd.RC8PtxIy5xdlh8Uj"
+)
+
+
+def _rule_based_question_formation(skeleton: str) -> str:
+    """
+    基于依存树的疑问句改写
+    核心：只在主句的主动词层面操作，其他结构（从句、并列、修饰语）不变
+    """
+    import re
+    import spacy
+
+    try:
+        nlp = spacy.load('en_core_web_sm')
+    except Exception:
+        return skeleton.rstrip('?') + '?'
+
+    TAG_TO_WORD = {
+        'NOUN:SUBJECT': 'someone', 'PRON:SUBJECT': 'someone',
+        'NOUN:OBJECT': 'something', 'PRON:OBJECT': 'it',
+        'NOUN:MODIFIER': 'item', 'ADJ:MODIFIER': 'nice',
+        'NOUN:ADJUNCT': 'place',
+        'NOUN': 'item', 'VERB': 'use', 'ADJ': 'good', 'ADV': 'well',
+        'DET': 'the', 'PRON': 'it', 'AUX': 'do', 'ADP': 'for',
+        'NUM': 'one', 'SCONJ': 'that', 'CCONJ': 'and', 'CONJ': 'and',
+    }
+
+    def skeleton_to_text(text):
+        result = text
+        for tag, word in TAG_TO_WORD.items():
+            result = re.sub(r'\[' + re.escape(tag) + r'\]', word, result, flags=re.IGNORECASE)
+        result = re.sub(r'\[[A-Za-z_:]+\]', 'item', result)
+        result = re.sub(r'\{A[1-5]\}', 'item', result)
+        result = result.replace(',', ' ,').replace('?', ' ?')
+        return result
+
+    text = skeleton_to_text(skeleton)
+    doc = nlp(text)
+
+    root = None
+    for token in doc:
+        if token.head == token:
+            root = token
+            break
+
+    if root is None:
+        return text.rstrip('?') + '?'
+
+    tokens_list = [token.text for token in doc]
+
+    def find_child_by_dep(dep):
+        for token in doc:
+            if token.head == root and token.dep_ == dep:
+                return token
+        return None
+
+    def find_subject():
+        for token in doc:
+            if token.head == root and token.dep_ == 'nsubj':
+                return token
+        for child in root.children:
+            if child.dep_ == 'nsubj':
+                return child
+        return None
+
+    aux = find_child_by_dep('aux')
+    neg = find_child_by_dep('neg')
+    subject = find_subject()
+
+    if aux and subject:
+        subj_idx = list(doc).index(subject)
+        aux_idx = list(doc).index(aux)
+        tokens_list.pop(aux_idx)
+        tokens_list.insert(0, 'Do')
+    elif subject:
+        subj_idx = list(doc).index(subject)
+        if subj_idx > 0:
+            tokens_list.insert(0, 'Do')
+
+    question = ' '.join(tokens_list)
+    if not question.endswith('?'):
+        question += '?'
+
+    return question
+
+
+def _rewrite_to_first_person_question(skeleton: str, user_attrs: Dict[str, str]) -> str:
+    """
+    规则化 + LLM 混合疑问句改写
+    优先使用规则化改写保持复杂度，复杂情况 fallback 到 LLM
+    """
+    skeleton_filled = skeleton
+    for attr, value in user_attrs.items():
+        skeleton_filled = skeleton_filled.replace(f'{{{attr}}}', str(value))
+
+    try:
+        rule_result = _rule_based_question_formation(skeleton_filled)
+        if rule_result and '?' in rule_result:
+            return rule_result
+    except Exception:
+        pass
+
+    prompt = f"""你是一个句型改写专家。请将下面的句法骨架改写为第一人称疑问句。
+
+规则：
+1. 只替换词性槽位，不要添加额外的词或短语
+2. 使用第一人称 "I" 作为主语
+3. 必须构成疑问句（以问号结尾）
+4. 尽量保持骨架中的功能词和标点位置不变
+5. 替换时只使用最简单、最常见的词语
+
+句法骨架：
+{skeleton_filled}
+
+请直接输出改写后的疑问句，不要解释。"""
+
+    try:
+        response = _client.call_json(prompt, max_tokens=2048, temperature=0.0)
+        result = response.strip()
+        if result.startswith("```"):
+            result = result.split("```")[1]
+            if result.startswith("json"):
+                result = result[4:]
+        result = result.strip()
+        try:
+            data = json.loads(result)
+            if isinstance(data, dict):
+                for key in ["rewritten_sentence", "sentence", "text", "query"]:
+                    if key in data:
+                        return data[key]
+        except json.JSONDecodeError:
+            pass
+        return result
+    except Exception as e:
+        _log(f"LLM 改写失败: {str(e)}", "SYSTEM")
+        attr_list = [str(v) for v in user_attrs.values() if v]
+        if len(attr_list) >= 3:
+            return f"Can I find {attr_list[0]} with {attr_list[1]} for {attr_list[2]}?"
+        elif attr_list:
+            return f"Can I find {attr_list[0]}?"
+        return "Can I find something?"
+
+
+def _compute_query_complexity(text: str) -> Dict[str, float]:
+    """
+    使用 LLM 计算文本的五个复杂度维度
+    """
+    prompt = f'''对以下疑问句进行复杂度分析，只返回纯JSON：
+
+文本：{text}
+
+输出格式（只需要第一个句子的分析）：
+{{"subordinate_depth":0-3的整数,"dependency_distance":0-1的小数,"modifier_density":0-1的小数,"conj_chain_depth":0-3的整数,"negation_scope":0-10的整数}}
+
+注意：只返回JSON，不要任何解释。'''
+
+    try:
+        result = _client.call_json(prompt, max_tokens=512, temperature=0.0)
+        result = result.strip()
+        if result.startswith("```"):
+            result = result.split("```")[1]
+            if result.startswith("json"):
+                result = result[4:]
+        result = result.strip()
+        data = json.loads(result)
+        return {
+            "subordinate_depth": int(data.get("subordinate_depth", 0)),
+            "dependency_distance": float(data.get("dependency_distance", 0)),
+            "modifier_density": float(data.get("modifier_density", 0)),
+            "conj_chain_depth": int(data.get("conj_chain_depth", 0)),
+            "negation_scope": int(data.get("negation_scope", 0))
+        }
+    except Exception as e:
+        _log(f"计算复杂度失败: {str(e)}", "SYSTEM")
+        return {"subordinate_depth": 0, "dependency_distance": 0, "modifier_density": 0, "conj_chain_depth": 0, "negation_scope": 0}
+
+
+# ============================================================
+# 五个复杂度维度计算函数（Python端计算）
+# ============================================================
+
+def _build_dependency_tree(dep_tree: List[Dict]) -> List[Dict]:
+    """
+    从 LLM 返回的 dependency_tree 构建内部树结构
+    dep_tree: [{"token": "I", "pos": "PRON", "dep": "nsubj", "head": 1}, ...]
+    返回: 添加了 children 列表的 tokens
+    """
+    n = len(dep_tree)
+    tokens = []
+    for i, t in enumerate(dep_tree):
+        tokens.append({
+            "index": i,
+            "token": t.get("token", ""),
+            "pos": t.get("pos", ""),
+            "dep": t.get("dep", ""),
+            "head": t.get("head", -1),
+            "children": []
+        })
+
+    # 构建 children 关系
+    for i, t in enumerate(tokens):
+        head = t["head"]
+        if head >= 0 and head < n and head != i:
+            tokens[head]["children"].append(i)
+
+    return tokens
+
+
+def _calculate_subordinate_depth(tokens: List[Dict], idx: int, depth: int = 0) -> int:
+    """
+    递归计算从句嵌套深度
+    从句关系包括: acl, acl:relcl, relcl, advcl, ccomp, xcomp, csubj, csubjpass
+    """
+    SUBORDINATE_DEPS = {"acl", "acl:relcl", "relcl", "advcl", "ccomp", "xcomp", "csubj", "csubjpass"}
+
+    token = tokens[idx]
+    max_depth = depth
+
+    for child_idx in token["children"]:
+        child_token = tokens[child_idx]
+        if child_token["dep"] in SUBORDINATE_DEPS:
+            child_depth = _calculate_subordinate_depth(tokens, child_idx, depth + 1)
+            max_depth = max(max_depth, child_depth)
+
+    return max_depth
+
+
+def _compute_five_dimensions(dep_tree: List[Dict]) -> Dict[str, float]:
+    """
+    从依存关系树计算五个复杂度维度
+    """
+    if not dep_tree or len(dep_tree) == 0:
+        return {
+            "subordinate_depth": 0,
+            "dependency_distance": 0.0,
+            "modifier_density": 0.0,
+            "conj_chain_depth": 0,
+            "negation_scope": 0
+        }
+
+    n = len(dep_tree)
+    tokens = _build_dependency_tree(dep_tree)
+
+    # 1. 从句嵌套深度
+    SUBORDINATE_DEPS = {"acl", "acl:relcl", "relcl", "advcl", "ccomp", "xcomp", "csubj", "csubjpass"}
+    subordinate_depth = 0
+    for i, t in enumerate(tokens):
+        if t["dep"] in SUBORDINATE_DEPS:
+            depth = _calculate_subordinate_depth(tokens, i, 1)
+            subordinate_depth = max(subordinate_depth, depth)
+
+    # 2. 依存距离（归一化）
+    total_distance = 0
+    for i, t in enumerate(tokens):
+        head = t["head"]
+        if head >= 0 and head != i:
+            total_distance += abs(i - head)
+    dependency_distance = total_distance / (n * (n + 1) / 2) if n > 0 else 0.0
+
+    # 3. 修饰语密度
+    MODIFIER_DEPS = {"amod", "advmod", "compound", "nn", "nummod"}
+    modifier_count = sum(1 for t in tokens if t["dep"] in MODIFIER_DEPS)
+    modifier_density = modifier_count / n if n > 0 else 0.0
+
+    # 4. 并列链深度 (Union-Find)
+    conj_pairs = []
+    for i, t in enumerate(tokens):
+        if t["dep"] == "conj":
+            head = t["head"]
+            if head >= 0 and head != i:
+                conj_pairs.append((min(i, head), max(i, head)))
+
+    if conj_pairs:
+        parent = list(range(n))
+        def find(x):
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
+        def union(x, y):
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+
+        for i, j in conj_pairs:
+            union(i, j)
+
+        component_size = defaultdict(int)
+        for i in range(n):
+            component_size[find(i)] += 1
+        conj_chain_depth = max(component_size.values()) if component_size else 0
+    else:
+        conj_chain_depth = 0
+
+    # 5. 否定作用域 (BFS)
+    negation_scope = 0
+    for i, t in enumerate(tokens):
+        if t["dep"] == "neg":
+            visited = set()
+            queue = [i]
+            scope_size = 0
+            while queue:
+                curr = queue.pop(0)
+                if curr in visited:
+                    continue
+                visited.add(curr)
+                scope_size += 1
+                for child in tokens[curr]["children"]:
+                    if child not in visited:
+                        queue.append(child)
+            negation_scope = max(negation_scope, scope_size)
+
+    return {
+        "subordinate_depth": subordinate_depth,
+        "dependency_distance": round(dependency_distance, 4),
+        "modifier_density": round(modifier_density, 4),
+        "conj_chain_depth": conj_chain_depth,
+        "negation_scope": negation_scope
+    }
+
+
+def _count_subordinate_depth(doc_tokens: List[Dict], token_idx: int, depth: int = 0) -> int:
+    """
+    递归计算从句嵌套深度
+    从句关系包括: acl, acl:relcl, relcl, advcl, ccomp, xcomp, csubj, csubjpass
+    """
+    SUBORDINATE_DEPS = {"acl", "acl:relcl", "relcl", "advcl", "ccomp", "xcomp", "csubj", "csubjpass"}
+
+    token = doc_tokens[token_idx]
+    current_depth = depth
+    max_child_depth = depth
+
+    for child_idx in token.get("children", []):
+        if child_idx < len(doc_tokens):
+            child_token = doc_tokens[child_idx]
+            if child_token["dep"] in SUBORDINATE_DEPS:
+                child_depth = _count_subordinate_depth(doc_tokens, child_idx, depth + 1)
+                max_child_depth = max(max_child_depth, child_depth)
+
+    return max_child_depth
+
+
+def _calculate_dependency_distance(doc_tokens: List[Dict]) -> float:
+    """
+    计算依存距离：所有 head-dependent 词对的线性距离之和
+    """
+    total_distance = 0
+    for i, token in enumerate(doc_tokens):
+        head_idx = token.get("head", i)
+        if head_idx != i:  # 非根节点
+            distance = abs(i - head_idx)
+            total_distance += distance
+    return total_distance
+
+
+def _calculate_modifier_density(doc_tokens: List[Dict]) -> float:
+    """
+    计算修饰语密度：修饰性依存关系数与总词数之比
+    修饰性关系包括: amod, advmod, compound, nn, nummod, nsubj, nsubjpass
+    """
+    MODIFIER_DEPS = {"amod", "advmod", "compound", "nn", "nummod", "nsubj", "nsubjpass"}
+    modifier_count = sum(1 for t in doc_tokens if t.get("dep") in MODIFIER_DEPS)
+    total_tokens = len(doc_tokens)
+    return modifier_count / max(total_tokens, 1)
+
+
+def _calculate_conj_chain_depth(doc_tokens: List[Dict]) -> int:
+    """
+    计算并列链深度：conj 关系连接的最长链长度
+    """
+    # 构建 conj 关系图
+    conj_pairs = []
+    for i, token in enumerate(doc_tokens):
+        if token.get("dep") == "conj":
+            head_idx = token.get("head", i)
+            if head_idx != i:
+                conj_pairs.append((min(i, head_idx), max(i, head_idx)))
+
+    if not conj_pairs:
+        return 0
+
+    # 找最长链 - 使用 Union-Find
+    parent = list(range(len(doc_tokens)))
+
+    def find(x):
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+
+    def union(x, y):
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+
+    for i, j in conj_pairs:
+        union(i, j)
+
+    # 统计每个连通分量的大小
+    component_size = defaultdict(int)
+    for i in range(len(doc_tokens)):
+        component_size[find(i)] += 1
+
+    return max(component_size.values()) if component_size else 0
+
+
+def _calculate_negation_scope(doc_tokens: List[Dict], token_idx: int) -> int:
+    """
+    计算否定作用域：否定词所辖依存子树的节点数
+    """
+    if token_idx >= len(doc_tokens):
+        return 0
+
+    token = doc_tokens[token_idx]
+    if token.get("dep") != "neg":
+        return 0
+
+    # BFS 计算子树大小
+    visited = set()
+    queue = [token_idx]
+    scope_size = 0
+
+    while queue:
+        current_idx = queue.pop(0)
+        if current_idx in visited:
+            continue
+        visited.add(current_idx)
+        scope_size += 1
+
+        # 添加所有子节点
+        for child_idx in doc_tokens[current_idx].get("children", []):
+            if child_idx not in visited:
+                queue.append(child_idx)
+
+    return scope_size
+
+
+# ============================================================
+# 骨架提取核心（基于 LLM 的依存句法分析）
+# ============================================================
+def _extract_dependency_analysis_for_single_review(review: str) -> Optional[Dict]:
+    """
+    对单条评论进行 LLM 依存句法分析，提取骨架并计算五个复杂度维度。
+    """
+    text = review.strip() if isinstance(review, str) else str(review)
+    if len(text) > 400:
+        text = text[:400] + "..."
+
+    prompt = '''对评论进行依存句法分析，提取骨架并计算复杂度指标。
+
+## 任务
+对每句话进行以下处理：
+
+### 1. 骨架提取（带语义角色）
+- 功能词保留原词（the, a, an, in, on, at, for, with, to, from, by, and, but, or, that, which, who, what, where, when, how, why, because, since, while, although, if, unless, be, is, are, was, were, have, has, had, do, does, did, will, would, could, should, may, might, must, can, i, you, he, she, it, we, they, me, him, her, us, them, my, your, his, its, our, their, this, that, these, those, not, very, really, quite, too, also, just）
+- 实义词替换为{POS}，格式为 [POS:ROLE]，可用类型包括[NOUN:SUBJECT], [NOUN:OBJECT], [NOUN:MODIFIER], [NOUN:ADJUNCT], [VERB], [ADJ:MODIFIER], [ADV], [PRON], [DET], [AUX], [ADP], [NUM]
+- 语义角色：SUBJECT=主语, OBJECT=宾语, MODIFIER=修饰语, ADJUNCT=状语
+- 保留标点
+
+### 2. 五个复杂度维度（必须计算）
+- subordinate_depth: 从句嵌套深度（acl/relcl/advcl/ccomp/xcomp等从句关系最大嵌套层数，无则填0）
+- dependency_distance: 归一化依存距离（|token_i - head_i|之和/(n*(n+1)/2)，0到1之间）
+- modifier_density: 修饰语密度（amod/advmod/compound数除以总词数，0到1之间）
+- conj_chain_depth: 并列链深度（conj连接最长链节点数，无conj则填0）
+- negation_scope: 否定作用域（not节点的依存子树大小，无not则填0）
+
+### 3. 句法类型（仅分析用）
+- 简单陈述: 无从句无并列
+- 并列约束: 含and/but/or
+- 从句嵌套: 含that/which/who/because/if/when
+- 介词链: 含多个介词
+- 混合复杂: 多种结构混合
+
+### 4. 输出格式
+只返回纯JSON，不要任何解释文字：
+{"sentences":[{"original":"原句","skeleton":"[PRON] [VERB] a [ADJ:MODIFIER] [NOUN:SUBJECT] that [VERB] [ADV] for [NOUN:OBJECT] in [ADJ:MODIFIER] [NOUN]","word_count":12,"slot_count":9,"slot_roles":["PRON","VERB","DET","ADJ:MODIFIER","NOUN:SUBJECT","VERB","ADV","ADP","NOUN:OBJECT","ADP","ADJ:MODIFIER","NOUN"],"has_subject_predicate":true,"subordinate_depth":1,"dependency_distance":0.45,"modifier_density":0.25,"conj_chain_depth":0,"negation_scope":0,"syntax_type":"从句嵌套"}]}
+
+评论文本：''' + f'\n{text}\n'
+
+    try:
+        result = _client.call_json(prompt, max_tokens=2048, temperature=0.0)
+        result = result.strip() if result else ""
+
+        if not result:
+            return None
+
+        # 清理可能的markdown代码块
+        if result.startswith('```'):
+            lines = result.split('\n')
+            result = '\n'.join(lines[1:-1] if lines[-1] == '```' else lines[1:])
+
+        data = json.loads(result)
+        sentences = data.get("sentences", [])
+        if sentences:
+            return {"sentences": sentences}
+        return None
+    except json.JSONDecodeError as e:
+        _log(f"Parse failed: {e}", "LLM JSON Error")
+        _log(f"result[:500]: {result[:500] if result else 'empty'}", "LLM Raw")
+        return None
+    except Exception as e:
+        _log(f"Error: {e}", "LLM Dependency Analysis")
+        _log(f"result[:500]: {result[:500] if result else 'empty'}", "LLM Raw")
+        return None
+
+
+def _extract_skeleton_with_llm(reviews: List[str]) -> List[Dict]:
+    """使用 LLM 从用户评论中逐句提取依存骨架和复杂度指标。"""
+    if not reviews:
+        return []
+
+    results = []
+    for i, review in enumerate(reviews[:10]):  # 最多处理10条
+        _log(f"Processing review {i+1}/{min(len(reviews), 10)}...", "LLM Dependency")
+        analysis = _extract_dependency_analysis_for_single_review(review)
+
+        if analysis and "sentences" in analysis:
+            sentences = analysis["sentences"]
+            results.append({
+                "review_index": i,
+                "original_review": review[:200] + "..." if len(review) > 200 else review,
+                "sentences": sentences,
+            })
+            _log(f"{len(sentences)} sentence(s) extracted", "LLM Dependency")
+            for j, sent in enumerate(sentences[:3]):  # 最多显示前3句
+                _log(f"[{j+1}] {sent.get('skeleton', '')[:80]}...", "LLM Dependency")
+                _log(f"    sub_depth={sent.get('subordinate_depth', 0)}, "
+                      f"dep_dist={sent.get('dependency_distance', 0):.2f}, "
+                      f"mod_dens={sent.get('modifier_density', 0):.2f}, "
+                      f"conj_chain={sent.get('conj_chain_depth', 0)}, "
+                      f"neg_scope={sent.get('negation_scope', 0)}", "LLM Dependency")
         else:
-            _stage1_cache = {"products": []}
-    return _stage1_cache
+            _log("Failed to extract skeletons", "LLM Dependency")
+
+    return results
 
 
-def _get_stage1_attributes(asin: str) -> Dict:
-    """Get product attributes by asin using O(1) index lookup."""
-    # Ensure index is built
-    _load_stage1_attributes()
-    return _stage1_asin_index.get(asin, {})
+def _filter_and_diversify_skeletons(sentences: List[Dict]) -> List[Dict]:
+    """
+    筛选高质量骨架并多样化保留。
+
+    筛选条件：
+    - 词数 ∈ [MIN_WORD_COUNT, MAX_WORD_COUNT]
+    - 槽位数 ≥ MIN_SLOT_COUNT
+    - 必须有主谓结构
+
+    多样化策略：
+    - 按五个复杂度维度聚类
+    - 每类保留结构差异最大的
+    - 最多保留 MAX_SKELETONS_PER_USER 个
+    """
+    filtered = []
+
+    for sent in sentences:
+        word_count = sent.get("word_count", 0)
+        slot_count = sent.get("slot_count", 0)
+        has_subj_pred = sent.get("has_subject_predicate", False)
+
+        # 筛选
+        if (MIN_WORD_COUNT <= word_count <= MAX_WORD_COUNT and
+            slot_count >= MIN_SLOT_COUNT and
+            has_subj_pred):
+            filtered.append(sent)
+
+    if not filtered:
+        return []
+
+    # 按复杂度维度多样性选择
+    # 计算每个骨架的复杂度向量
+    def complexity_vector(sent):
+        return (
+            sent.get("subordinate_depth", 0),      # 从句嵌套深度
+            sent.get("dependency_distance", 0),    # 依存距离
+            sent.get("modifier_density", 0),       # 修饰语密度
+            sent.get("conj_chain_depth", 0),       # 并列链深度
+            sent.get("negation_scope", 0),         # 否定作用域
+        )
+
+    # 使用简单的多样性采样：优先选择复杂度向量差异大的
+    selected = []
+    remaining = filtered.copy()
+
+    while remaining and len(selected) < MAX_SKELETONS_PER_USER:
+        if not selected:
+            # 第一个：选择从句深度最大的
+            remaining.sort(key=lambda x: x.get("subordinate_depth", 0), reverse=True)
+            selected.append(remaining.pop(0))
+        else:
+            # 之后：选择与已选骨架差异最大的
+            best_idx = 0
+            best_min_distance = -1
+
+            for i, candidate in enumerate(remaining):
+                cand_vec = complexity_vector(candidate)
+                # 计算与所有已选骨架的最小距离
+                min_dist = float('inf')
+                for sel in selected:
+                    sel_vec = complexity_vector(sel)
+                    # 欧氏距离（简化版）
+                    dist = sum((a - b) ** 2 for a, b in zip(cand_vec, sel_vec))
+                    min_dist = min(min_dist, dist)
+
+                if min_dist > best_min_distance:
+                    best_min_distance = min_dist
+                    best_idx = i
+
+            selected.append(remaining.pop(best_idx))
+
+    return selected
 
 
-def _get_user_reviewed_asins(user_id: str) -> List[str]:
+def _combine_skeletons(all_skeletons: List[Dict], user_attrs: Dict[str, str]) -> str:
+    """
+    组合多个骨架，生成包含所有语义角色的统一骨架
+    """
+    if not all_skeletons:
+        return ""
+
+    skeleton_contexts = []
+    for i, sk in enumerate(all_skeletons[:8]):
+        original = sk.get('original', '')[:100]
+        skeleton = sk.get('skeleton', '')
+        slot_roles = sk.get('slot_roles', [])
+        skeleton_contexts.append(f"骨架{i+1}: {skeleton}\n  原句: {original}\n  角色: {slot_roles}")
+
+    attr_str = ", ".join([f"{k}={v}" for k, v in user_attrs.items()])
+
+    context_text = "\n\n".join(skeleton_contexts)
+
+    prompt = f"""你是一个句型组合专家。请根据下面的多个骨架，组合成一个统一的句法骨架。
+
+## 任务
+1. 从多个骨架中提取不同语义角色的片段
+2. 将它们组合成一个自然流畅的疑问句骨架
+3. 必须包含所有5个属性角色：SUBJECT（主语）、OBJECT（宾语）、MODIFIER（修饰语）、ADJUNCT（状语）
+4. 保持骨架的复杂度和句法多样性
+5. 输出格式：只返回骨架字符串，用[POS:ROLE]标注
+
+## 属性信息
+{attr_str}
+
+## 骨架列表
+{context_text}
+
+## 输出要求
+- 只返回组合后的骨架字符串
+- 格式示例：[PRON:SUBJECT] [VERB] a [ADJ:MODIFIER] [NOUN:OBJECT] for [NOUN:ADJUNCT]?
+- 必须包含SUBJECT、OBJECT、MODIFIER、ADJUNCT四种角色
+- 以问号结尾表示疑问句
+
+请直接输出组合后的骨架："""
+
+    try:
+        response = _client.call_json(prompt, max_tokens=2048, temperature=0.0)
+        result = response.strip()
+        if result.startswith("```"):
+            result = result.split("```")[1]
+            if result.startswith("json"):
+                result = result[4:]
+        result = result.strip()
+        try:
+            data = json.loads(result)
+            if isinstance(data, dict):
+                for key in ["skeleton", "combined", "result", "sentence"]:
+                    if key in data:
+                        return data[key]
+            return result
+        except json.JSONDecodeError:
+            return result
+    except Exception as e:
+        _log(f"LLM 骨架组合失败: {str(e)}", "SYSTEM")
+        return ""
+
+
+def _build_template_library(user_id: str, reviews: List[str]) -> Dict:
+    """为单个用户构建依存骨架模板库，包含五个复杂度维度标注。"""
+    _log(f"使用 LLM 提取句法骨架和复杂度维度...", user_id)
+    skeleton_results = _extract_skeleton_with_llm(reviews)
+
+    if skeleton_results:
+        _log(f"成功提取 {len(skeleton_results)} 条评论的骨架", user_id)
+        # 收集所有句子骨架
+        all_skeletons = []
+        for sr in skeleton_results:
+            if "sentences" in sr:
+                all_skeletons.extend(sr["sentences"])
+
+        all_filtered = all_skeletons
+        _log(f"共提取 {len(all_filtered)} 个骨架，全部保留", user_id)
+
+        # 计算五个维度的平均值
+        mean_sub_depth = sum(s.get("subordinate_depth", 0) for s in all_filtered) / max(len(all_filtered), 1)
+        mean_dep_dist = sum(s.get("dependency_distance", 0) for s in all_filtered) / max(len(all_filtered), 1)
+        mean_mod_dens = sum(s.get("modifier_density", 0) for s in all_filtered) / max(len(all_filtered), 1)
+        mean_conj_chain = sum(s.get("conj_chain_depth", 0) for s in all_filtered) / max(len(all_filtered), 1)
+        mean_neg_scope = sum(s.get("negation_scope", 0) for s in all_filtered) / max(len(all_filtered), 1)
+
+        _log(f"五个维度平均值: 从句深度={mean_sub_depth:.2f}, 依存距离={mean_dep_dist:.2f}, "
+              f"修饰密度={mean_mod_dens:.2f}, 并列链={mean_conj_chain:.2f}, 否定域={mean_neg_scope:.2f}", user_id)
+
+        # 找到与平均值最接近的骨架
+        def _skeleton_distance(sk):
+            d_sub = (sk.get("subordinate_depth", 0) - mean_sub_depth) ** 2
+            d_dep = (sk.get("dependency_distance", 0) - mean_dep_dist) ** 2
+            d_mod = (sk.get("modifier_density", 0) - mean_mod_dens) ** 2
+            d_conj = (sk.get("conj_chain_depth", 0) - mean_conj_chain) ** 2
+            d_neg = (sk.get("negation_scope", 0) - mean_neg_scope) ** 2
+            return (d_sub + d_dep + d_mod + d_conj + d_neg) ** 0.5
+
+        if all_filtered:
+            closest_idx = min(range(len(all_filtered)), key=lambda i: _skeleton_distance(all_filtered[i]))
+            closest_skeleton = all_filtered[closest_idx]
+            _log(f"最接近平均值的骨架 (idx={closest_idx}): {closest_skeleton.get('skeleton', '')[:60]}...", user_id)
+            _log(f"    该骨架复杂度: 从句深度={closest_skeleton.get('subordinate_depth')}, 依存距离={closest_skeleton.get('dependency_distance', 0):.2f}, "
+                  f"修饰密度={closest_skeleton.get('modifier_density', 0):.2f}, 并列链={closest_skeleton.get('conj_chain_depth')}, 否定域={closest_skeleton.get('negation_scope')}", user_id)
+
+            # 获取用户属性
+            user_attrs = _get_user_attributes(user_id)
+            _log(f"用户属性: {user_attrs}", user_id)
+
+            if user_attrs:
+                # 使用骨架组合，生成包含所有角色的统一骨架
+                _log(f"正在使用 LLM 组合骨架以包含所有角色...", user_id)
+                combined_skeleton = _combine_skeletons(all_filtered, user_attrs)
+                
+                if combined_skeleton:
+                    _log(f"组合骨架: {combined_skeleton}", user_id)
+                    original_skeleton = combined_skeleton
+                else:
+                    _log(f"组合失败，使用最接近平均值的骨架", user_id)
+                    original_skeleton = closest_skeleton.get('skeleton', '')
+                
+                filled_skeleton = _fill_skeleton_with_attributes(original_skeleton, user_attrs)
+                _log(f"属性填充后骨架: {filled_skeleton}", user_id)
+
+                # 使用 LLM 将骨架改写为第一人称疑问句
+                _log(f"正在使用 LLM 改写为第一人称疑问句...", user_id)
+                final_query = _rewrite_to_first_person_question(filled_skeleton, user_attrs)
+                _log(f"最终生成查询语句: {final_query}", user_id)
+
+                # 计算改写后的复杂度
+                _log(f"正在计算改写后复杂度...", user_id)
+                rewritten_complexity = _compute_query_complexity(final_query)
+                original_complexity = closest_skeleton
+                _log(f"[改写前] 骨架复杂度: 从句深度={original_complexity.get('subordinate_depth')}, 依存距离={original_complexity.get('dependency_distance', 0):.2f}, "
+                      f"修饰密度={original_complexity.get('modifier_density', 0):.2f}, 并列链={original_complexity.get('conj_chain_depth')}, 否定域={original_complexity.get('negation_scope')}", user_id)
+                _log(f"[改写后] 查询复杂度: 从句深度={rewritten_complexity.get('subordinate_depth')}, 依存距离={rewritten_complexity.get('dependency_distance', 0):.2f}, "
+                      f"修饰密度={rewritten_complexity.get('modifier_density', 0):.2f}, 并列链={rewritten_complexity.get('conj_chain_depth')}, 否定域={rewritten_complexity.get('negation_scope')}", user_id)
+
+                # 创建填充后的骨架副本
+                filled_closest = dict(closest_skeleton)
+                filled_closest['skeleton'] = filled_skeleton
+                filled_closest['filled_skeleton'] = filled_skeleton
+                filled_closest['attributes'] = user_attrs
+                filled_closest['original_skeleton'] = original_skeleton
+            else:
+                filled_closest = dict(closest_skeleton)
+                filled_closest['attributes'] = {}
+        else:
+            closest_skeleton = {}
+            filled_closest = {}
+
+        # 打印骨架详情
+        _log(f"=== 骨架详情 ===", user_id)
+        for i, sk in enumerate(all_filtered):
+            _log(f"[{i+1}] 原句: {sk.get('original', '')[:80]}...", user_id)
+            _log(f"    骨架: {sk.get('skeleton', '')}", user_id)
+            _log(f"    词数={sk.get('word_count')}, 槽位数={sk.get('slot_count')}, 类型={sk.get('syntax_type')}", user_id)
+            _log(f"    复杂度: 从句深度={sk.get('subordinate_depth')}, 依存距离={sk.get('dependency_distance', 0):.2f}, "
+                  f"修饰密度={sk.get('modifier_density', 0):.2f}, 并列链={sk.get('conj_chain_depth')}, 否定域={sk.get('negation_scope')}", user_id)
+        _log(f"=== 骨架详情结束 ===", user_id)
+
+        return {
+            "user_id": user_id,
+            "num_reviews": len(reviews),
+            "num_patterns_extracted": len(all_skeletons),
+            "num_patterns_filtered": len(all_filtered),
+            "num_clusters": 1,
+            "template_clusters": [{
+                "cluster_id": 0,
+                "center_pattern": filled_closest if filled_closest else {},
+                "all_skeletons": all_filtered,
+                "frequency": len(skeleton_results),
+                "examples": skeleton_results,
+            }],
+            "llm_extracted": True,
+            "extraction_method": "llm_dependency_parsing",
+            # 五个复杂度维度的统计
+            "complexity_stats": {
+                "subordinate_depth": {
+                    "mean": mean_sub_depth,
+                    "max": max((s.get("subordinate_depth", 0) for s in all_filtered), default=0),
+                    "min": min((s.get("subordinate_depth", 0) for s in all_filtered), default=0),
+                },
+                "dependency_distance": {
+                    "mean": mean_dep_dist,
+                    "max": max((s.get("dependency_distance", 0) for s in all_filtered), default=0),
+                    "min": min((s.get("dependency_distance", 0) for s in all_filtered), default=0),
+                },
+                "modifier_density": {
+                    "mean": mean_mod_dens,
+                    "max": max((s.get("modifier_density", 0) for s in all_filtered), default=0),
+                    "min": min((s.get("modifier_density", 0) for s in all_filtered), default=0),
+                },
+                "conj_chain_depth": {
+                    "mean": mean_conj_chain,
+                    "max": max((s.get("conj_chain_depth", 0) for s in all_filtered), default=0),
+                    "min": min((s.get("conj_chain_depth", 0) for s in all_filtered), default=0),
+                },
+                "negation_scope": {
+                    "mean": mean_neg_scope,
+                    "max": max((s.get("negation_scope", 0) for s in all_filtered), default=0),
+                    "min": min((s.get("negation_scope", 0) for s in all_filtered), default=0),
+                },
+            },
+            # 最接近平均值的骨架
+            "closest_to_mean": closest_skeleton,
+        }
+    else:
+        _log(f"LLM 提取失败，返回空", user_id)
+        return {
+            "user_id": user_id,
+            "num_reviews": len(reviews),
+            "num_patterns_extracted": 0,
+            "num_patterns_filtered": 0,
+            "num_clusters": 0,
+            "template_clusters": [],
+        }
+
+
+# ============================================================
+# 缓存
+# ============================================================
+_user_template_library_cache: Dict[str, Dict] = {}
+_CACHE_FILE = os.path.join(OUTPUT_DIR, "template_library_cache.json")
+
+
+def _load_cache_from_file() -> Dict[str, Dict]:
+    if os.path.exists(_CACHE_FILE):
+        try:
+            with open(_CACHE_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_cache_to_file(cache: Dict[str, Dict]):
+    try:
+        with open(_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _get_user_template_library(user_id: str, reviews: List[str]) -> Dict:
+    """获取用户的 phrase pattern 模板库（带缓存）。"""
+    if user_id in _user_template_library_cache:
+        return _user_template_library_cache[user_id]
+
+    file_cache = _load_cache_from_file()
+    if user_id in file_cache:
+        _user_template_library_cache[user_id] = file_cache[user_id]
+        return file_cache[user_id]
+
+    template_lib = _build_template_library(user_id, reviews)
+    _user_template_library_cache[user_id] = template_lib
+
+    file_cache[user_id] = template_lib
+    _save_cache_to_file(file_cache)
+
+    return template_lib
+
+
+# ============================================================
+# 数据加载
+# ============================================================
+def _load_user_reviews(user_id: str) -> List[str]:
+    """加载用户的所有评论。"""
+    user_reviews = []
     review_file = os.path.join(STAGE0_REVIEWS_DIR, f"reviews_{user_id}.json")
     if not os.path.exists(review_file):
         return []
+
     try:
         with open(review_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        asins = []
-        for item in data.get("results", []):
-            asin = item.get("asin")
-            if asin:
-                asins.append(asin)
-        return asins
-    except Exception:
-        return []
+            review_data = json.load(f)
+        for item in review_data.get("results", []):
+            for review in item.get("target_reviews", []):
+                if isinstance(review, str):
+                    text = review
+                elif isinstance(review, dict):
+                    text = review.get("review_text", "")
+                else:
+                    text = ""
+                if text:
+                    user_reviews.append(text)
+            for review in item.get("other_reviews", []):
+                if isinstance(review, str):
+                    text = review
+                elif isinstance(review, dict):
+                    text = review.get("review_text", "")
+                else:
+                    text = ""
+                if text:
+                    user_reviews.append(text)
+    except Exception as e:
+        _log(f"Warning: failed to load reviews for {user_id}: {e}", "Stage 6")
 
-
-def _find_valid_asin_for_user(user_id: str, rng: random.Random) -> Tuple[str, str]:
-    user_asins = _get_user_reviewed_asins(user_id)
-    if not user_asins:
-        return "", "Craft Supplies"
-
-    stage1_data = _load_stage1_attributes()
-    stage1_asins = set(p.get("asin") for p in stage1_data.get("products", []))
-    valid_asins = [asin for asin in user_asins if asin in stage1_asins]
-
-    if not valid_asins:
-        return "", "Craft Supplies"
-
-    selected_asin = rng.choice(valid_asins)
-    for product in stage1_data.get("products", []):
-        if product.get("asin") == selected_asin:
-            category = product.get("A1_product_type", "Craft Supplies")
-            return selected_asin, category
-
-    return selected_asin, "Craft Supplies"
+    return user_reviews
 
 
 # ============================================================
-# 属性选择与查询生成
+# 主流程
 # ============================================================
-def _pick_best_attributes(stage1_attrs: Dict) -> List[Tuple[str, str]]:
-    attrs = []
+def run_skeleton_extraction(user_id: str, output_dir: str) -> Dict:
+    """为单个用户提取骨架并保存。"""
+    _log(f"开始提取骨架...", user_id)
 
-    product_type = stage1_attrs.get("A1_product_type")
-    if product_type:
-        attrs.append(("Product_Category", str(product_type)))
-    else:
-        attrs.append(("Product_Category", "Craft Supplies"))
+    user_reviews = _load_user_reviews(user_id)
+    _log(f"加载了 {len(user_reviews)} 条评论", user_id)
 
-    brand = stage1_attrs.get("A2_brand")
-    if brand:
-        attrs.append(("Brand_Preference", str(brand)))
-    else:
-        attrs.append(("Brand_Preference", "trusted"))
+    if not user_reviews:
+        _log(f"没有评论，跳过", user_id)
+        return None
 
-    price = stage1_attrs.get("A3_price")
-    if price:
-        attrs.append(("Price_Range", str(price)))
-    else:
-        attrs.append(("Price_Range", "$50"))
+    template_lib = _get_user_template_library(user_id, user_reviews)
 
-    appearance = stage1_attrs.get("A4_appearance")
-    if appearance:
-        if isinstance(appearance, list):
-            appearance = appearance[0] if appearance else ""
-        attrs.append(("A4_appearance", str(appearance)[:30]))
-
-    use_case = stage1_attrs.get("A5_use_case")
-    if use_case:
-        uc_str = str(use_case).strip()
-        if uc_str.lower().startswith("for "):
-            uc_str = uc_str[4:]
-        attrs.append(("Use_Scene", uc_str))
-    else:
-        attrs.append(("Use_Scene", "Crafting"))
-
-    return attrs
-
-
-def _word_count(text: str) -> int:
-    return len([w for w in (text or "").split() if w])
-
-
-def _default_subtype_scores(selected: str) -> Dict[str, float]:
-    scores = {name: 0.12 for name in SUBTYPES}
-    if selected in scores:
-        scores[selected] = 1.25
-    return scores
-
-
-def _build_rng(user_id: str, seed: Optional[int]) -> random.Random:
-    if seed is None:
-        return random.Random()
-    uid_hash = int(hashlib.md5(user_id.encode("utf-8")).hexdigest()[:8], 16)
-    return random.Random(int(seed) + uid_hash)
-
-
-# ============================================================
-# 单用户查询生成
-# ============================================================
-def run_generation(
-    linguistic_profile_file: Optional[str],
-    output_dir: str,
-    seed: Optional[int] = None,
-    forced_level: Optional[str] = None,
-    user_id: Optional[str] = None,
-    asin: Optional[str | List[str]] = None,
-) -> str:
-    """生成用户查询。支持单个asin或asin列表（每个asin生成一个查询）。"""
-    if linguistic_profile_file and os.path.exists(linguistic_profile_file):
-        with open(linguistic_profile_file, 'r', encoding='utf-8') as f:
-            profile = json.load(f)
-        profile_user_id = profile.get("user_id")
-        if profile_user_id:
-            user_id = profile_user_id
-        if not user_id:
-            raise ValueError("Missing user_id")
-    else:
-        profile = {}
-
-    if not user_id:
-        raise ValueError("Missing user_id")
-
-    rng = _build_rng(user_id, seed)
-
-    # 加载用户评论
-    user_reviews = []
-    review_file = os.path.join(STAGE0_REVIEWS_DIR, f"reviews_{user_id}.json")
-    if os.path.exists(review_file):
-        try:
-            with open(review_file, 'r', encoding='utf-8') as f:
-                review_data = json.load(f)
-            for item in review_data.get("results", []):
-                for review in item.get("target_reviews", []):
-                    if isinstance(review, str):
-                        text = review
-                    elif isinstance(review, dict):
-                        text = review.get("review_text", "")
-                    else:
-                        text = ""
-                    if text:
-                        user_reviews.append(text)
-                for review in item.get("other_reviews", []):
-                    if isinstance(review, str):
-                        text = review
-                    elif isinstance(review, dict):
-                        text = review.get("review_text", "")
-                    else:
-                        text = ""
-                    if text:
-                        user_reviews.append(text)
-        except Exception as e:
-            print(f"[Stage 6] Warning: failed to load reviews for {user_id}: {e}")
-
-    # 确定使用哪个模板
-    if forced_level:
-        templates_for_level = _get_templates_for_level(forced_level)
-        subtype = templates_for_level[0] if templates_for_level else "HIGH-1"
-        template_similarities = {}
-    else:
-        if user_reviews:
-            best_template, template_similarities = _select_template_by_cached_style(user_id, user_reviews)
-            subtype = best_template
-        else:
-            best_template, template_similarities = "HIGH-1", {}
-            subtype = best_template
-
-    subtype_scores = _default_subtype_scores(subtype)
-
-    # 获取用户风格特征
-    if user_reviews:
-        user_style_feat = _get_user_style_features(user_id, user_reviews)
-    else:
-        user_style_feat = np.zeros(17, dtype=np.float32)
-
-    # 确定要处理的asin列表
-    if asin is None:
-        asins_to_process = [_find_valid_asin_for_user(user_id, rng)[0]]
-    elif isinstance(asin, str):
-        asins_to_process = [asin]
-    else:
-        asins_to_process = asin
-
-    stage1_data = _load_stage1_attributes()
-
-    # 为每个asin生成查询
-    all_results = []
-    for reviewed_asin in asins_to_process:
-        # 获取category（使用O(1)索引查找）
-        product_info = _get_stage1_attributes(reviewed_asin)
-        category = product_info.get("A1_product_type", "Craft Supplies")
-
-        stage1_attrs = product_info
-        attrs = _pick_best_attributes(stage1_attrs)
-
-        query_text, template_id = generate_query_from_attributes(category, attrs, subtype, rng=rng)
-
-        all_results.append({
-            "asin": reviewed_asin,
-            "category": category,
-            "user_id": user_id,
-            "target_subtype": subtype,
-            "skeleton_level": subtype,
-            "shared_dimensions": [d for d, _ in attrs],
-            "target_user_query": {
-                "query": query_text,
-                "subtype": subtype,
-                "template_id": template_id,
-                "subtype_scores": subtype_scores,
-                "word_count": _word_count(query_text),
-                "attempts": 1,
-                "error_words_valid": True,
-                "missing_error_words": [],
-                "selected_attributes": [{"dimension": d, "value": v} for d, v in attrs],
-                "attribute_priority_tracking": [
-                    {
-                        "dimension": d,
-                        "attribute": v,
-                        "priority_level": "medium",
-                        "reason": "Stage1预提取属性"
-                    }
-                    for d, v in attrs
-                ]
-            },
-        })
-
-    # 合并结果
     result = {
         "user_id": user_id,
         "timestamp": datetime.now().isoformat(),
-        "method": "direct_style_matching" if user_reviews else "knn_fallback",
-        "template_selection_method": "30dim_style_features" if user_reviews else "knn_feature_matching",
-        "user_style_features": user_style_feat.tolist() if isinstance(user_style_feat, np.ndarray) else user_style_feat,
-        "num_user_reviews_used": len(user_reviews),
-        "total_queries": len(all_results),
-        "successful_target_queries": len(all_results),
-        "results": all_results,
+        "num_reviews": len(user_reviews),
+        "template_library": template_lib,
     }
 
     os.makedirs(output_dir, exist_ok=True)
-    out_fp = os.path.join(output_dir, f"queries_{user_id}.json")
+    out_fp = os.path.join(output_dir, f"skeleton_{user_id}.json")
+
     with open(out_fp, 'w', encoding='utf-8') as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
-    return out_fp
 
-
-# ============================================================
-# 批量处理入口
-# ============================================================
-def log_with_timestamp(message: str):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] {message}", flush=True)
+    _log(f"骨架保存到: {out_fp}", user_id)
+    return result
 
 
 def find_users_from_stage1() -> List[str]:
-    log_with_timestamp("Reading users from Stage 1 attributes file...")
+    """从 Stage 1 属性文件中获取所有用户 ID。"""
     try:
         with open(STAGE1_ATTRIBUTES_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -999,417 +1074,128 @@ def find_users_from_stage1() -> List[str]:
             user_id = product.get('user_id')
             if user_id:
                 users_set.add(user_id)
-        users_list = sorted(list(users_set))
-        log_with_timestamp(f"Found {len(users_list)} unique users from Stage 1")
-        return users_list
+        return sorted(list(users_set))
     except Exception as e:
-        log_with_timestamp(f"ERROR reading Stage 1 file: {e}")
+        print(f"ERROR reading Stage 1 file: {e}")
         return []
 
 
-def find_users_with_profiles(profile_dir: str = None) -> List[str]:
-    return find_users_from_stage1()
-
-
-def validate_user_files(user_ids: List[str], profile_dir: str = None) -> Dict[str, Dict[str, List[str]]]:
-    """从 Stage 1 构建用户-商品映射，支持每个用户多个商品。"""
-    log_with_timestamp("Building user-product mapping from Stage 1...")
-    validated_users = {}  # user_id -> {'user_id': user_id, 'asins': [asin1, asin2, ...]}
+def validate_users(user_ids: List[str]) -> Dict[str, Dict]:
+    """验证用户，返回有效的用户-ASIN 映射。"""
+    validated_users = {}
     try:
         with open(STAGE1_ATTRIBUTES_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
         products = data.get('products', [])
+
         for product in products:
-            asin = product.get('asin')
-            user_id = product.get('user_id')
-            if asin and user_id:
+            asin = product.get("asin")
+            user_id = product.get("user_id")
+            if asin and user_id and user_id in user_ids:
                 if user_id not in validated_users:
                     validated_users[user_id] = {'user_id': user_id, 'asins': []}
                 if asin not in validated_users[user_id]['asins']:
                     validated_users[user_id]['asins'].append(asin)
-        total_pairs = sum(len(v['asins']) for v in validated_users.values())
-        log_with_timestamp(f"Found {len(validated_users)} users with {total_pairs} user-product pairs from Stage 1")
     except Exception as e:
-        log_with_timestamp(f"ERROR reading Stage 1 file: {e}")
+        print(f"ERROR reading Stage 1 file: {e}")
     return validated_users
 
 
-def generate_summary(output_dir: str, user_ids: List[str]) -> Dict:
-    log_with_timestamp("=" * 80)
-    log_with_timestamp("Generating summary statistics...")
-    log_with_timestamp("=" * 80)
+def log_with_timestamp(message: str):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}", flush=True)
 
-    summary = {
-        'timestamp': datetime.now().isoformat(),
-        'total_users': len(user_ids),
-        'processed_users': 0,
-        'failed_users': [],
-        'user_summaries': {},
-        'aggregate_stats': {
-            'total_queries': 0,
-            'total_target_queries': 0,
-            'total_valid_target_error_words': 0,
-            'target_validation_rate': 0.0
-        }
-    }
 
-    for user_id in user_ids:
-        output_file = os.path.join(output_dir, f'queries_{user_id}.json')
-        if not os.path.exists(output_file):
-            log_with_timestamp(f"  ✗ User {user_id}: output file not found")
-            summary['failed_users'].append(user_id)
-            continue
-
-        try:
-            with open(output_file, 'r', encoding='utf-8') as f:
-                user_data = json.load(f)
-
-            summary['processed_users'] += 1
-            user_summary = {
-                'user_id': user_id,
-                'total_queries': user_data.get('total_queries', 0),
-                'successful_target_queries': user_data.get('successful_target_queries', 0),
-                'valid_target_error_words': user_data.get('successful_target_queries', 0)
-            }
-
-            summary['aggregate_stats']['total_queries'] += user_summary['total_queries']
-            summary['aggregate_stats']['total_target_queries'] += user_summary['successful_target_queries']
-            summary['aggregate_stats']['total_valid_target_error_words'] += user_summary['valid_target_error_words']
-
-            if user_summary['successful_target_queries'] > 0:
-                user_summary['target_validation_rate'] = round(
-                    user_summary['valid_target_error_words'] / user_summary['successful_target_queries'] * 100, 1
-                )
-            else:
-                user_summary['target_validation_rate'] = 0.0
-
-            summary['user_summaries'][user_id] = user_summary
-            log_with_timestamp(
-                f"  ✓ User {user_id}: {user_summary['total_queries']} queries, "
-                f"TU validation: {user_summary['target_validation_rate']}%"
-            )
-        except Exception as e:
-            log_with_timestamp(f"  ✗ User {user_id}: error reading results - {e}")
-            summary['failed_users'].append(user_id)
-
-    if summary['aggregate_stats']['total_target_queries'] > 0:
-        summary['aggregate_stats']['target_validation_rate'] = round(
-            summary['aggregate_stats']['total_valid_target_error_words'] /
-            summary['aggregate_stats']['total_target_queries'] * 100, 1
-        )
-
-    summary_file = os.path.join(output_dir, 'all_users_summary.json')
-    with open(summary_file, 'w', encoding='utf-8') as f:
-        json.dump(summary, f, indent=2, ensure_ascii=False)
-
-    log_with_timestamp(f"Summary saved to {summary_file}")
-    log_with_timestamp("=" * 80)
-    log_with_timestamp("AGGREGATE STATISTICS")
-    log_with_timestamp("=" * 80)
-    log_with_timestamp(f"Processed users: {summary['processed_users']}/{summary['total_users']}")
-    log_with_timestamp(f"Total queries: {summary['aggregate_stats']['total_queries']}")
-    log_with_timestamp(f"Total target user queries: {summary['aggregate_stats']['total_target_queries']}")
-    log_with_timestamp("")
-    log_with_timestamp(f"Error Word Validation:")
-    log_with_timestamp(f"  Target queries with all error words: {summary['aggregate_stats']['total_valid_target_error_words']}/{summary['aggregate_stats']['total_target_queries']} ({summary['aggregate_stats']['target_validation_rate']}%)")
-
-    if summary['failed_users']:
-        log_with_timestamp(f"\nFailed users: {', '.join(summary['failed_users'])}")
-
-    return summary
+def _log(msg: str, prefix: str = ""):
+    """带时间戳的日志打印"""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if prefix:
+        print(f"[{ts}] [{prefix}] {msg}", flush=True)
+    else:
+        print(f"[{ts}] {msg}", flush=True)
 
 
 def main():
-    config = {
-        'profile_dir': '/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis',
-        'output_dir': OUTPUT_DIR,
-        'user_ids': None,
-        'seed': None,
-        'skip_summary': False,
+    output_dir = OUTPUT_DIR
+    os.makedirs(output_dir, exist_ok=True)
+
+    log_with_timestamp("清理缓存和旧骨架文件...")
+    if os.path.exists(_CACHE_FILE):
+        try:
+            os.remove(_CACHE_FILE)
+            log_with_timestamp("已删除缓存文件")
+        except Exception:
+            pass
+    old_files = glob.glob(os.path.join(output_dir, 'skeleton_*.json'))
+    for f in old_files:
+        try:
+            os.remove(f)
+        except Exception:
+            pass
+    log_with_timestamp(f"已删除 {len(old_files)} 个旧骨架文件")
+
+    log_with_timestamp("=" * 60)
+    log_with_timestamp("Stage 6: 句法结构提取 - 依存分析 + 五维复杂度标注")
+    log_with_timestamp("=" * 60)
+
+    # 获取用户列表
+    user_ids = find_users_from_stage1()
+    if not user_ids:
+        log_with_timestamp("ERROR: 没有找到用户!")
+        sys.exit(1)
+
+    log_with_timestamp(f"找到 {len(user_ids)} 个用户")
+
+    # 验证用户
+    validated_users = validate_users(user_ids)
+    log_with_timestamp(f"验证了 {len(validated_users)} 个有效用户")
+
+    # 只处理前1个用户（调试用，可调整）
+    validated_users = dict(list(validated_users.items())[:1])
+    log_with_timestamp(f"DEBUG: 限制处理前 1 个用户")
+
+    # 逐个处理
+    success_count = 0
+    fail_count = 0
+
+    for i, (user_id, user_data) in enumerate(validated_users.items()):
+        try:
+            result = run_skeleton_extraction(user_id, output_dir)
+            if result:
+                success_count += 1
+        except Exception as e:
+            import traceback
+            log_with_timestamp(f"[{user_id}] ✗ FAILED: {e}")
+            fail_count += 1
+
+        if (i + 1) % 10 == 0:
+            log_with_timestamp(f"进度: {i+1}/{len(validated_users)}")
+
+    log_with_timestamp("=" * 60)
+    log_with_timestamp(f"完成! 成功: {success_count}, 失败: {fail_count}")
+    log_with_timestamp("=" * 60)
+
+    # 生成汇总
+    all_results = []
+    for user_id in validated_users:
+        fp = os.path.join(output_dir, f"skeleton_{user_id}.json")
+        if os.path.exists(fp):
+            with open(fp, 'r') as f:
+                all_results.append(json.load(f))
+
+    summary = {
+        "timestamp": datetime.now().isoformat(),
+        "total_users": len(validated_users),
+        "success_count": success_count,
+        "fail_count": fail_count,
+        "results": all_results,
     }
 
-    os.makedirs(config['output_dir'], exist_ok=True)
+    summary_fp = os.path.join(output_dir, "all_skeletons_summary.json")
+    with open(summary_fp, 'w', encoding='utf-8') as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
 
-    log_with_timestamp("=" * 80)
-    log_with_timestamp("Stage 6: Generate Template Queries (Style-based Template Matching)")
-    log_with_timestamp("=" * 80)
-    log_with_timestamp("Step 1: Extract 17-dim lexical features for all templates")
-    log_with_timestamp("Step 2: Compute user 17-dim lexical features from their reviews")
-    log_with_timestamp("Step 3: Match user to best template via cosine similarity")
-    log_with_timestamp("=" * 80)
-
-    if config['user_ids']:
-        user_ids = config['user_ids']
-        log_with_timestamp(f"Processing {len(user_ids)} user(s) specified by --user-ids")
-    else:
-        user_ids = find_users_with_profiles(config['profile_dir'])
-
-    if not user_ids:
-        log_with_timestamp("ERROR: No users to process!")
-        sys.exit(1)
-
-    validated_users = validate_user_files(user_ids, config['profile_dir'])
-
-    if not validated_users:
-        log_with_timestamp("ERROR: No valid users found!")
-        sys.exit(1)
-
-    # ============================================================
-    # 预计算所有用户的风格特征（主进程一次性完成，避免 worker 重复计算）
-    # ============================================================
-    if os.path.exists(_PRECOMPUTED_FEATURES_FILE):
-        log_with_timestamp(f"Loading precomputed user style features from {_PRECOMPUTED_FEATURES_FILE}")
-        try:
-            with open(_PRECOMPUTED_FEATURES_FILE, 'r') as f:
-                precomputed_features = json.load(f)
-            log_with_timestamp(f"Loaded {len(precomputed_features)} precomputed user style features")
-        except Exception as e:
-            log_with_timestamp(f"Failed to load precomputed features: {e}, will recompute")
-            precomputed_features = None
-    else:
-        precomputed_features = None
-
-    if precomputed_features is None:
-        log_with_timestamp("Precomputing user style features (parallel)...")
-
-        # 获取CPU核心数，用于并行（限制为8以提高速度）
-        num_workers = min(8, mp.cpu_count())
-
-        # Worker函数：处理单个用户
-        def _precompute_user_features(args):
-            import os
-            import sys
-            import warnings
-            import spacy
-            import numpy as np
-            import json as json_module
-
-            user_id, user_data = args
-            pid = os.getpid()
-            print(f"[DEBUG] Worker PID={pid} started for user={user_id}", flush=True, file=sys.stderr)
-
-            try:
-                nlp = spacy.load("en_core_web_sm")
-                print(f"[DEBUG] Worker PID={pid} loaded spaCy model for user={user_id}", flush=True, file=sys.stderr)
-            except OSError:
-                import subprocess
-                print(f"[DEBUG] Worker PID={pid} downloading spaCy model for user={user_id}", flush=True, file=sys.stderr)
-                subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"], check=True, capture_output=True)
-                nlp = spacy.load("en_core_web_sm")
-
-            def _extract_30dim_features(text: str):
-                """提取17维词汇级特征"""
-                words = [w for w in text.split() if w.strip()]
-                if len(words) < 25:
-                    return None
-                doc = nlp(text)
-                n_tokens = max(len([t for t in doc if not t.is_punct]), 1)
-                n_subj = sum(1 for t in doc if t.dep_ in {'nsubj', 'nsubj:pass'})
-                n_dobj = sum(1 for t in doc if t.dep_ in {'dobj', 'pobj', 'attr'})
-                n_amod = sum(1 for t in doc if t.dep_ == 'amod')
-                n_advmod = sum(1 for t in doc if t.dep_ == 'advmod')
-                n_prep = sum(1 for t in doc if t.dep_ == 'prep')
-                n_conj = sum(1 for t in doc if t.dep_ == 'conj')
-                n_neg = sum(1 for t in doc if t.dep_ == 'neg')
-                n_relcl = sum(1 for t in doc if t.dep_ == 'relcl')
-                n_pass = sum(1 for t in doc if t.dep_ in {'nsubj:pass', 'aux:pass'} or (t.tag_ == 'VBN' and t.dep_ not in {'amod', 'conj'}))
-                n_part = sum(1 for t in doc if t.tag_ in {'VBG', 'VBN'} and t.dep_ in {'amod', 'advcl', 'relcl'})
-                n_inf = sum(1 for t in doc if t.tag_ == 'VB' and t.dep_ in {'xcomp', 'ccomp', 'advcl'})
-                n_det = sum(1 for t in doc if t.dep_ == 'det')
-                n_cc = sum(1 for t in doc if t.dep_ == 'cc')
-                n_intj = sum(1 for t in doc if t.dep_ == 'intj')
-                pos_counts = {}
-                for token in doc:
-                    if not token.is_punct:
-                        pos = token.pos_
-                        pos_counts[pos] = pos_counts.get(pos, 0) + 1
-
-                def get_depth(token):
-                    depth = 0
-                    while token.head != token:
-                        depth += 1
-                        token = token.head
-                        if depth > 20:
-                            break
-                    return depth
-                depths = [get_depth(t) for t in doc if not t.is_punct]
-                avg_depth = sum(depths) / max(len(depths), 1)
-
-                # 23维基础特征
-                subordinate_ratio = n_subj / n_tokens
-                coordination_ratio = n_conj / n_tokens
-                negation_ratio = n_neg / n_tokens
-                length_depth = avg_depth / 10.0
-                upos_order = ['NOUN', 'VERB', 'ADJ', 'ADV', 'PRON', 'DET', 'AUX', 'PART', 'SCONJ', 'CCONJ', 'ADP']
-                pos_dist = [pos_counts.get(p, 0) / n_tokens for p in upos_order]
-                relative_clause_ratio = n_relcl / n_tokens
-                passive_ratio = n_pass / n_tokens
-                participial_ratio = n_part / n_tokens
-                infinitive_ratio = n_inf / n_tokens
-                appositive_ratio = n_intj / n_tokens
-                parenthetical_ratio = n_det / n_tokens
-                prep_phrase_ratio = n_prep / n_tokens
-                insertion_frequency = n_amod / n_tokens
-
-                base_features = [
-                    subordinate_ratio * 10, coordination_ratio * 10, negation_ratio * 10, length_depth,
-                    *pos_dist, relative_clause_ratio, passive_ratio, participial_ratio,
-                    infinitive_ratio, appositive_ratio, parenthetical_ratio, prep_phrase_ratio, insertion_frequency,
-                ]
-
-                # 7维开头特征
-                text_lower = text.lower().strip()
-                first_words = ' '.join(text_lower.split()[:5])
-                opening_features = [
-                    1.0 if text_lower.startswith('i am looking for') else 0.0,
-                    1.0 if text_lower.startswith('it is') or text_lower.startswith("it's") else 0.0,
-                    1.0 if text_lower.startswith('as for') else 0.0,
-                    1.0 if text_lower.startswith('there is') or text_lower.startswith("there's") or text_lower.startswith('there are') else 0.0,
-                    1.0 if text_lower.startswith('the requirement') else 0.0,
-                    1.0 if 'looking for is' in first_words else 0.0,
-                    1.0 if 'as it happens' in text_lower else 0.0,
-                ]
-
-                # 只使用23维基特征
-                return np.array(base_features, dtype=np.float32)
-
-            reviews = []
-            review_file = os.path.join(STAGE0_REVIEWS_DIR, f"reviews_{user_id}.json")
-            print(f"[DEBUG] Worker PID={pid} reading file={review_file} for user={user_id}", flush=True, file=sys.stderr)
-            if os.path.exists(review_file):
-                try:
-                    with open(review_file, 'r', encoding='utf-8') as f:
-                        review_data = json_module.load(f)
-                    for item in review_data.get("results", []):
-                        for review in item.get("target_reviews", []):
-                            if isinstance(review, str):
-                                text = review
-                            elif isinstance(review, dict):
-                                text = review.get("review_text", "")
-                            else:
-                                text = ""
-                            if text:
-                                reviews.append(text)
-                        for review in item.get("other_reviews", []):
-                            if isinstance(review, str):
-                                text = review
-                            elif isinstance(review, dict):
-                                text = review.get("review_text", "")
-                            else:
-                                text = ""
-                            if text:
-                                reviews.append(text)
-                    print(f"[DEBUG] Worker PID={pid} loaded {len(reviews)} reviews for user={user_id}", flush=True, file=sys.stderr)
-                except Exception as e:
-                    print(f"[DEBUG] Worker PID={pid} error loading reviews: {e}", flush=True, file=sys.stderr)
-
-            all_style_feats = []
-            for i, review in enumerate(reviews):
-                try:
-                    feat = _extract_lexical_features(review)
-                    if feat is not None:
-                        all_style_feats.append(feat)
-                except Exception as e:
-                    print(f"[DEBUG] Worker PID={pid} error processing review {i}: {e}", flush=True, file=sys.stderr)
-                    continue
-
-            print(f"[DEBUG] Worker PID={pid} processed {len(all_style_feats)} features for user={user_id}", flush=True, file=sys.stderr)
-
-            if all_style_feats:
-                result = (user_id, np.mean(all_style_feats, axis=0))
-                print(f"[DEBUG] Worker PID={pid} returning result for user={user_id}", flush=True, file=sys.stderr)
-                return result
-            else:
-                print(f"[DEBUG] Worker PID={pid} returning zeros for user={user_id}", flush=True, file=sys.stderr)
-                return (user_id, np.zeros(17, dtype=np.float32))
-
-        # 并行处理所有用户
-        log_with_timestamp(f"  Using {num_workers} parallel workers for {len(validated_users)} users")
-        precomputed_features = {}
-
-        print(f"  Creating pool with {num_workers} workers...", flush=True, file=sys.stderr)
-        with mp.Pool(num_workers, initializer=_init_precompute_worker) as pool:
-            print(f"  Pool created, starting imap_unordered...", flush=True, file=sys.stderr)
-            # Use imap_unordered with chunksize=1 to reduce memory pressure
-            results_gen = pool.imap_unordered(_precompute_user_features_worker, validated_users.items(), chunksize=1)
-            print(f"  Started receiving results...", flush=True, file=sys.stderr)
-            for i, (user_id, feat) in enumerate(results_gen):
-                precomputed_features[user_id] = feat
-                if (i + 1) % 500 == 0:
-                    print(f"  Processed {i + 1}/{len(validated_users)} users", flush=True, file=sys.stderr)
-            print(f"  All {len(precomputed_features)} users processed", flush=True, file=sys.stderr)
-
-        log_with_timestamp(f"  Processed {len(precomputed_features)} users")
-
-        # 保存预计算结果到文件，供所有 worker 共享
-        precompute_output = {}
-        for uid, feat in precomputed_features.items():
-            precompute_output[uid] = feat.tolist()
-        with open(_PRECOMPUTED_FEATURES_FILE, 'w') as f:
-            json.dump(precompute_output, f)
-        log_with_timestamp(f"Precomputed {len(precomputed_features)} user style features, saved to {_PRECOMPUTED_FEATURES_FILE}")
-
-    log_with_timestamp("=" * 80)
-    log_with_timestamp("Starting query generation (style-based template matching, multiprocessing)...")
-    log_with_timestamp("=" * 80)
-
-    failed_users = []
-    level_counts = Counter()
-    template_id_counts = Counter()
-    total_users = len(validated_users)
-
-    # Prepare work items
-    work_items = [
-        (user_id, user_data, config)
-        for user_id, user_data in validated_users.items()
-    ]
-
-    # Use multiprocessing with initializer to set up spaCy in each worker
-    num_workers = min(mp.cpu_count(), 16)  # Cap at 16 workers
-    log_with_timestamp(f"Using {num_workers} parallel workers")
-
-    with mp.Pool(num_workers, initializer=_init_worker) as pool:
-        for i, (user_id, success, result) in enumerate(pool.imap_unordered(_process_user_worker, work_items)):
-            if not success:
-                log_with_timestamp(f"[{user_id}] ✗ FAILED: {result}")
-                failed_users.append(user_id)
-            else:
-                # Collect level and template_id statistics
-                for res in result.get('results', []):
-                    level = res.get('target_subtype', 'unknown')
-                    level_counts[level] += 1
-                    template_id = res.get('target_user_query', {}).get('template_id', 'unknown')
-                    template_id_counts[template_id] += 1
-
-            if (i + 1) % 500 == 0:
-                log_with_timestamp(f"Progress: {i+1}/{total_users} users processed ({(i+1) * 100 // total_users}%)")
-
-    log_with_timestamp("=" * 80)
-    log_with_timestamp("TEMPLATE DISTRIBUTION SUMMARY")
-    log_with_timestamp("=" * 80)
-
-    # 按查询数量排序，打印所有模板
-    total_queries = sum(template_id_counts.values())
-    log_with_timestamp(f"\n[Template ID -> Query Count] (共 {total_queries} 条查询)")
-    log_with_timestamp("-" * 60)
-    for template_id, count in template_id_counts.most_common():
-        percentage = count / total_queries * 100
-        log_with_timestamp(f"  {template_id}: {count} ({percentage:.1f}%)")
-
-    if failed_users:
-        log_with_timestamp(f"WARNING: {len(failed_users)} users failed: {', '.join(failed_users)}")
-    else:
-        log_with_timestamp("All users completed successfully!")
-
-    if not config['skip_summary']:
-        summary = generate_summary(config['output_dir'], list(validated_users.keys()))
-        if summary['processed_users'] == 0:
-            log_with_timestamp("ERROR: No users were successfully processed!")
-            sys.exit(1)
-
-    log_with_timestamp("=" * 80)
-    log_with_timestamp("ALL PROCESSING COMPLETE!")
-    log_with_timestamp("=" * 80)
+    log_with_timestamp(f"汇总保存到: {summary_fp}")
 
 
 if __name__ == '__main__':
