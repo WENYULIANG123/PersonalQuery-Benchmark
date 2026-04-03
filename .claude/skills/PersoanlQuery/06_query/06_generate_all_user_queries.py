@@ -1,25 +1,47 @@
 #!/usr/bin/env python3
 """
-Stage 6: 句法结构提取 - 基于 LLM 的依存句法分析
+Stage 6 v2: 基于语言学框架的复杂度可控查询生成
 
-功能：
-1. 对用户评论逐句进行依存句法分析
-2. 保留功能词（连词、介词、关系代词、冠词等）和依存拓扑
-3. 将实义词替换为类型化槽位（如 {NOUN}、{ADJ}、{VERB}）
-4. 计算五个复杂度维度指标
-5. 筛选后保留高质量骨架，构建立体化的句法结构池
+核心思路：
+  1. 规则骨架生成（5维度 × 5属性 的 linguistically-motivated 映射）
+  2. LLM 润色（保持结构 + 保持属性 + 提升流畅度）
+  3. 本地spaCy评估（提取14D特征 → 算距离 → 排序选最佳）
+
+相比 v1 的改动：
+  - 移除 LingConv API（改用本地spaCy）
+  - 新增 linguistically-motivated 骨架生成
+  - 新增 LLM 润色步骤
 """
-
 import glob
 import json
 import os
 import sys
+import time
+import re
+import random
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 
-sys.path.insert(0, '/home/wlia0047/ar57/wenyu/.claude/skills')
-from llm_client import ChatGLMClient
+import numpy as np
+import pandas as pd
+
+# ============================================================
+# 强制刷新 stdout
+# ============================================================
+class Unbuffered:
+    def __init__(self, stream):
+        self.stream = stream
+    def write(self, msg):
+        self.stream.write(msg)
+        self.stream.flush()
+    def __getattr__(self, attr):
+        return getattr(self.stream, attr)
+
+sys.stdout = Unbuffered(sys.stdout)
+sys.stderr = Unbuffered(sys.stderr)
+
+print(f"[{datetime.now()}] [START] Stage 6 v2 启动", flush=True)
 
 # ============================================================
 # 路径配置
@@ -28,25 +50,554 @@ STAGE0_REVIEWS_DIR = "/fs04/ar57/wenyu/result/personal_query/00_data_preparation
 STAGE1_ATTRIBUTES_FILE = "/fs04/ar57/wenyu/result/personal_query/01_preference_extraction/attributes_Arts_Crafts_and_Sewing.json"
 OUTPUT_DIR = "/fs04/ar57/wenyu/result/personal_query/06_query"
 
-# 属性槽位名称（5个）
 ATTRIBUTE_SLOTS = ["A1", "A2", "A3", "A4", "A5"]
+MIN_WORDS_FOR_FEATURES = 10
 
 # ============================================================
-# 骨架筛选参数（TBD - 可调整）
+# LLM 配置
 # ============================================================
-MIN_WORD_COUNT = 6      # 词数下限
-MAX_WORD_COUNT = 25     # 词数上限
-MIN_SLOT_COUNT = 3      # 最少槽位数
-MAX_SKELETONS_PER_USER = 10  # 每用户保留的最大骨架数
+import sys
+sys.path.insert(0, '/home/wlia0047/ar57/wenyu/.claude/skills')
+from llm_client import MiniMaxClient
+
+llm_client = MiniMaxClient(model="MiniMax-M2.7")
 
 # ============================================================
-# Stage1 属性加载（缓存）
+# 本地 spaCy 14D 特征提取
 # ============================================================
+import spacy
+
+try:
+    nlp = spacy.load('en_core_web_sm')
+except OSError:
+    print("下载 en_core_web_sm 模型...", flush=True)
+    import subprocess
+    subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"], check=True)
+    nlp = spacy.load('en_core_web_sm')
+
+
+def extract_14d_features(text: str) -> Dict[str, float]:
+    """从文本提取14维复杂度特征（本地spaCy计算）"""
+    doc = nlp(text)
+    sentences = list(doc.sents)
+
+    if not sentences:
+        return {
+            'clause_depth': 0.0,
+            'dep_distance': 0.0,
+            'modifier_density': 0.0,
+            'coord_chain': 0.0,
+            'negation_scope': 0.0,
+            'voice_ratio': 0.0,
+            'branching_direction': 0.5,
+            'relative_clause_freq': 0.0,
+            'advcl_freq': 0.0,
+            'comp_clause_freq': 0.0,
+            'fanout': 0.0,
+            'parataxis_freq': 0.0,
+            'prep_density': 0.0,
+            'appos_freq': 0.0,
+            'word_count': 0
+        }
+
+    all_features = []
+    for sent in sentences:
+        tokens = [t for t in sent if not t.is_space and not t.is_punct]
+        n = len(tokens)
+        if n == 0:
+            continue
+
+        # 1. 从句深度（不含advcl/ccomp/xcomp）
+        SUBORDINATE_DEPS = {'acl', 'acl:relcl', 'relcl', 'csubj', 'csubjpass'}
+        clause_depth = sum(1 for t in tokens if t.dep_ in SUBORDINATE_DEPS) / n
+
+        # 2. 依存距离
+        total_dist = sum(abs(t.i - t.head.i) for t in tokens if t.head != t and t.head.i < len(tokens))
+        max_possible = n * (n - 1) / 2 if n > 1 else 1
+        dep_distance = total_dist / max_possible if max_possible > 0 else 0.0
+
+        # 3. 修饰语密度
+        MODIFIER_DEPS = {'amod', 'advmod', 'compound', 'nn', 'nummod', 'poss'}
+        modifier_density = sum(1 for t in tokens if t.dep_ in MODIFIER_DEPS) / n
+
+        # 4. 并列链
+        coord_chain = min(sum(1 for t in tokens if t.dep_ == 'conj'), 5) / 5.0
+
+        # 5. 否定作用域
+        neg_scope = 0
+        for t in tokens:
+            if t.dep_ == 'neg':
+                subtree = len(list(t.subtree))
+                neg_scope = max(neg_scope, subtree)
+        negation_scope = min(neg_scope / n, 1.0) if n > 0 else 0.0
+
+        # 6. Voice Ratio (主动/被动比例)
+        nsubj_count = sum(1 for t in tokens if t.dep_ == 'nsubj')
+        nsubjpass_count = sum(1 for t in tokens if t.dep_ == 'nsubjpass')
+        total_voice = nsubj_count + nsubjpass_count
+        voice_ratio = nsubjpass_count / total_voice if total_voice > 0 else 0.0
+
+        # 7. Branching Direction (左右分支比例)
+        left_children = sum(1 for t in tokens if len(list(t.lefts)) > 0)
+        right_children = sum(1 for t in tokens if len(list(t.rights)) > 0)
+        total_branches = left_children + right_children
+        branching_direction = left_children / total_branches if total_branches > 0 else 0.5
+
+        # 8. Relative Clause Frequency (关系从句频率)
+        RELCL_DEPS = {'relcl', 'acl:relcl'}
+        relcl_count = sum(1 for t in tokens if t.dep_ in RELCL_DEPS)
+        relative_clause_freq = relcl_count / n if n > 0 else 0.0
+
+        # 9. Adverbial Clause Frequency (状语从句频率) - 高优先级
+        advcl_count = sum(1 for t in tokens if t.dep_ == 'advcl')
+        advcl_freq = advcl_count / n if n > 0 else 0.0
+
+        # 10. Complement Clause Frequency (补语从句频率) - 高优先级
+        COMP_DEPS = {'ccomp', 'xcomp'}
+        comp_count = sum(1 for t in tokens if t.dep_ in COMP_DEPS)
+        comp_clause_freq = comp_count / n if n > 0 else 0.0
+
+        # 11. Dependency Tree Fan-out (依存树扇出度) - 高优先级
+        from collections import Counter
+        children_count = Counter(t.head.i for t in tokens if t.dep_ != 'ROOT')
+        fanout = sum(children_count.values()) / len(children_count) if children_count else 0.0
+
+        # 12. Parataxis Frequency (并置/插入语频率) - 中优先级
+        para_count = sum(1 for t in tokens if t.dep_ == 'parataxis')
+        parataxis_freq = para_count / n if n > 0 else 0.0
+
+        # 13. Prepositional Phrase Density (介词短语密度) - 中优先级
+        prep_count = sum(1 for t in tokens if t.dep_ == 'prep')
+        prep_density = prep_count / n if n > 0 else 0.0
+
+        # 14. Apposition Frequency (同位语频率) - 中优先级
+        appos_count = sum(1 for t in tokens if t.dep_ == 'appos')
+        appos_freq = appos_count / n if n > 0 else 0.0
+
+        all_features.append({
+            'clause_depth': clause_depth,
+            'dep_distance': dep_distance,
+            'modifier_density': modifier_density,
+            'coord_chain': coord_chain,
+            'negation_scope': negation_scope,
+            'voice_ratio': voice_ratio,
+            'branching_direction': branching_direction,
+            'relative_clause_freq': relative_clause_freq,
+            'advcl_freq': advcl_freq,
+            'comp_clause_freq': comp_clause_freq,
+            'fanout': fanout,
+            'parataxis_freq': parataxis_freq,
+            'prep_density': prep_density,
+            'appos_freq': appos_freq,
+            'word_count': n,
+        })
+
+    if not all_features:
+        return {
+            'clause_depth': 0.0, 'dep_distance': 0.0,
+            'modifier_density': 0.0, 'coord_chain': 0.0,
+            'negation_scope': 0.0, 'voice_ratio': 0.0,
+            'branching_direction': 0.5, 'relative_clause_freq': 0.0,
+            'advcl_freq': 0.0, 'comp_clause_freq': 0.0,
+            'fanout': 0.0, 'parataxis_freq': 0.0,
+            'prep_density': 0.0, 'appos_freq': 0.0,
+            'word_count': 0
+        }
+
+    n = len(all_features)
+    total_words = sum(f.get('word_count', 0) for f in all_features)
+    return {
+        'subordinate_clause_freq': round(sum((f.get('clause_depth', 0) + f.get('relative_clause_freq', 0)) / 2 for f in all_features) / n, 6),
+        'dep_distance': round(sum(f.get('dep_distance', 0) for f in all_features) / n, 6),
+        'modifier_density': round(sum(f.get('modifier_density', 0) for f in all_features) / n, 6),
+        'coord_chain': round(sum(f.get('coord_chain', 0) for f in all_features) / n, 6),
+        'negation_scope': round(sum(f.get('negation_scope', 0) for f in all_features) / n, 6),
+        'voice_ratio': round(sum(f.get('voice_ratio', 0) for f in all_features) / n, 6),
+        'branching_direction': round(sum(f.get('branching_direction', 0.5) for f in all_features) / n, 6),
+        'advcl_freq': round(sum(f.get('advcl_freq', 0) for f in all_features) / n, 6),
+        'comp_clause_freq': round(sum(f.get('comp_clause_freq', 0) for f in all_features) / n, 6),
+        'fanout': round(sum(f.get('fanout', 0) for f in all_features) / n, 6),
+        'parataxis_freq': round(sum(f.get('parataxis_freq', 0) for f in all_features) / n, 6),
+        'prep_density': round(sum(f.get('prep_density', 0) for f in all_features) / n, 6),
+        'appos_freq': round(sum(f.get('appos_freq', 0) for f in all_features) / n, 6),
+        'word_count': total_words,
+        'avg_sentence_length': round(total_words / n, 1),
+    }
+
+
+def complexity_distance(c: Dict[str, float], target: Dict[str, float]) -> float:
+    """计算候选与目标的复杂度距离（归一化）"""
+    # 每维的标准差（需要在数据集上预先计算，这里用经验值）
+    stds = {
+        "clause_depth": 0.3,
+        "dep_distance": 0.15,
+        "modifier_density": 0.25,
+        "coord_chain": 0.2,
+        "negation_scope": 0.2,
+    }
+    dist = 0.0
+    for dim in stds:
+        diff = abs(c.get(dim, 0) - target.get(dim, 0))
+        dist += (diff / stds[dim]) ** 2
+    return round(np.sqrt(dist), 4)
+
+
+# ============================================================
+# 属性匹配（沿用 v1 的宽松匹配）
+# ============================================================
+def check_attributes_present(candidate: str, attrs: Dict[str, str]) -> Tuple[bool, List[str]]:
+    missing = []
+    cand_lower = candidate.lower()
+    for key in ['A1', 'A2', 'A3', 'A4', 'A5']:
+        val = attrs.get(key, '')
+        if not val:
+            missing.append(key)
+            continue
+        if not is_present(val, cand_lower, key):
+            missing.append(key)
+    return len(missing) == 0, missing
+
+
+def is_present(val: str, cand_lower: str, attr_key: str) -> bool:
+    val_lower = val.lower().strip()
+    if val_lower in cand_lower:
+        return True
+    if is_numeric(val_lower):
+        return check_numeric(val_lower, cand_lower)
+    if attr_key == 'A2':
+        val_no_space = re.sub(r'[\s\-_]', '', val_lower)
+        cand_no_space = re.sub(r'[\s\-_]', '', cand_lower)
+        if val_no_space in cand_no_space:
+            return True
+    return check_fuzzy(val_lower, cand_lower)
+
+
+def is_numeric(val: str) -> bool:
+    cleaned = re.sub(r'[$€£¥,]', '', val)
+    try:
+        float(cleaned)
+        return True
+    except ValueError:
+        return False
+
+
+def check_numeric(val: str, cand: str) -> bool:
+    target = float(re.sub(r'[$€£¥,]', '', val))
+    numbers = re.findall(r'[\d]+\.?\d*', cand)
+    for n in numbers:
+        if abs(float(n) - target) < 0.01:
+            return True
+    return False
+
+
+def check_fuzzy(val_lower: str, cand: str) -> bool:
+    from difflib import SequenceMatcher
+    val_compact = re.sub(r'[\s\-_]', '', val_lower)
+    cand_compact = re.sub(r'[\s\-_]', '', cand)
+    if val_compact in cand_compact:
+        return True
+    val_tokens = val_lower.split()
+    if len(val_tokens) > 1 and all(t in cand for t in val_tokens):
+        return True
+    val_len = len(val_lower)
+    for i in range(len(cand) - val_len + 1):
+        window = cand[i:i + val_len + 2]
+        if SequenceMatcher(None, val_lower, window).ratio() > 0.85:
+            return True
+    return False
+
+
+# ============================================================
+# 核心改动 1: Linguistically-Motivated 骨架生成
+# ============================================================
+
+def profile_to_description(profile: Dict[str, float]) -> str:
+    """
+    将 14D 数值 profile 翻译成 LLM 能理解的自然语言风格描述
+    """
+    parts = []
+
+    cd = profile.get('clause_depth', 0)
+    if cd > 0.4:
+        parts.append("use subordinate clauses (e.g., 'which...', 'that...', 'because...')")
+    elif cd > 0.2:
+        parts.append("occasionally use a relative clause")
+    else:
+        parts.append("use simple, flat sentence structure without subordinate clauses")
+
+    cc = profile.get('coord_chain', 0)
+    if cc > 0.3:
+        parts.append("connect multiple ideas with 'and', 'but', 'or' (e.g., 'for X, Y, and Z')")
+    elif cc > 0.15:
+        parts.append("use one coordination (e.g., 'X and Y')")
+    else:
+        parts.append("avoid coordination, keep each idea separate")
+
+    md = profile.get('modifier_density', 0)
+    if md > 0.4:
+        parts.append("add many descriptive adjectives and adverbs")
+    elif md > 0.2:
+        parts.append("use some adjectives to describe the product")
+    else:
+        parts.append("be concise, avoid extra modifiers")
+
+    ns = profile.get('negation_scope', 0)
+    if ns > 0.3:
+        parts.append("include negation (e.g., 'not expensive', 'never disappoints')")
+    else:
+        parts.append("use positive/affirmative phrasing")
+
+    dd = profile.get('dep_distance', 0)
+    if dd > 0.4:
+        parts.append("write longer sentences where subject and verb are far apart, with inserted phrases in between")
+    elif dd > 0.2:
+        parts.append("write medium-length sentences with some inserted phrases")
+    else:
+        parts.append("keep subject and verb close together, write short sentences")
+
+    asl = profile.get('avg_sentence_length', 20)
+    parts.append(f"target approximately {int(asl)} words per sentence")
+
+    return ";\n- ".join(parts)
+
+
+def generate_structured_skeleton(
+    attrs: Dict[str, str],
+    profile: Dict[str, float],
+) -> List[str]:
+    """
+    根据 14D profile 生成多个骨架变体
+
+    核心映射（linguistically motivated）：
+      modifier_density → A4（材质）: 修饰语是名词的天然展开方式
+      clause_depth     → A2（品牌）: 品牌信息天然用从句补充说明
+      coord_chain      → A5（用途）: 用途天然可枚举并列
+      negation_scope   → A3（价格）: 价格天然是肯定/否定评价的对象
+      dep_distance     → A1（产品名）: 产品名做主语，控制主谓间距
+    """
+    A1 = attrs.get('A1', 'Product')
+    A2 = attrs.get('A2', 'Brand')
+    A3 = attrs.get('A3', '0')
+    A4 = attrs.get('A4', '')
+    A5 = attrs.get('A5', 'general use')
+
+    md = profile.get('modifier_density', 0.3)
+    cd = profile.get('clause_depth', 0.3)
+    cc = profile.get('coord_chain', 0.2)
+    ns = profile.get('negation_scope', 0.1)
+    dd = profile.get('dep_distance', 0.3)
+
+    # === modifier_density → A4（材质）展开程度 ===
+    if md < 0.2:
+        a4 = f"{A4} {A1}"
+    elif md < 0.4:
+        a4 = f"beautiful {A4} {A1}"
+    elif md < 0.6:
+        a4 = f"high-quality, beautiful {A4} {A1}"
+    else:
+        a4 = f"the exceptionally fine, premium {A4} {A1}"
+
+    # === clause_depth → A2（品牌）引入方式 ===
+    if cd < 0.2:
+        a2 = f"by {A2}"
+    elif cd < 0.4:
+        a2 = f"which are made by {A2}"
+    else:
+        a2 = f"which are made by {A2}, who is known for quality products"
+
+    # === coord_chain → A5（用途）并列展开 ===
+    extra_uses = _infer_related_uses(A5)
+    if cc < 0.15:
+        a5 = f"for {A5}"
+    elif cc < 0.3:
+        a5 = f"for {A5} and {extra_uses[0]}"
+    elif cc < 0.5:
+        a5 = f"for {A5}, {extra_uses[0]}, and {extra_uses[1]}"
+    else:
+        a5 = f"for {A5}, {extra_uses[0]}, {extra_uses[1]}, and {extra_uses[2]}"
+
+    # === negation_scope → A3（价格）评价框架 ===
+    if ns < 0.2:
+        a3 = f"priced at {A3}"
+    elif ns < 0.4:
+        a3 = f"not expensive at {A3}"
+    else:
+        a3 = f"neither overpriced at {A3} nor lacking in value"
+
+    # === dep_distance → 组装方式（主谓间距）===
+    if dd < 0.2:
+        skeletons = [f"{a4} {a2}, {a3}, {a5}"]
+    elif dd < 0.4:
+        skeletons = [f"{a4}, {a2}, {a3}, are good {a5}"]
+    else:
+        skeletons = [f"{a4}, {a2}, {a3}, are highly recommended {a5}"]
+
+    return skeletons
+
+
+def _infer_related_uses(primary_use: str) -> List[str]:
+    """推断与主用途相关的扩展用途（用于 coord_chain 展开）"""
+    use_lower = primary_use.lower()
+
+    # 常见用途映射
+    use_families = {
+        "embroidery": ["crafting", "decoration", "DIY projects", "sewing"],
+        "sewing": ["quilting", "crafting", "embroidery", "tailoring"],
+        "crafting": ["decoration", "DIY projects", "gift-making", "scrapbooking"],
+        "painting": ["drawing", "art projects", "illustration", "sketching"],
+        "knitting": ["crocheting", "weaving", "textile crafts", "yarn work"],
+        "jewelry": ["accessories", "gift-making", "fashion", "beading"],
+        "scrapbooking": ["card-making", "paper crafts", "journaling", "decoration"],
+    }
+
+    for key, related in use_families.items():
+        if key in use_lower:
+            return related
+
+    # 默认扩展
+    return ["crafting", "decoration", "DIY projects", "creative work"]
+
+
+# ============================================================
+# 核心改动 2: LLM 润色
+# ============================================================
+
+def call_llm(prompt: str, max_retries: int = 3, temperature: float = 0.7) -> str:
+    """调用 MiniMax LLM"""
+    for attempt in range(max_retries):
+        try:
+            response = llm_client.call(prompt, max_tokens=2000, temperature=temperature)
+            if response:
+                return response
+            print(f"[{datetime.now()}] [LLM] Attempt {attempt+1} returned empty", flush=True)
+        except Exception as e:
+            print(f"[{datetime.now()}] [LLM] Attempt {attempt+1} failed: {e}", flush=True)
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+    return ""
+
+
+def llm_polish_skeletons(
+    skeletons: List[str],
+    attrs: Dict[str, str],
+    profile: Dict[str, float],
+    num_outputs: int = 20,
+) -> List[str]:
+    """
+    用 LLM 润色骨架句，生成更自然的查询
+    """
+    cd = profile.get('clause_depth', 0.3)
+    ns = profile.get('negation_scope', 0.1)
+    md = profile.get('modifier_density', 0.3)
+    asl = profile.get('avg_sentence_length', 20)
+
+    a1 = attrs.get('A1', '')
+    a2 = attrs.get('A2', '')
+    a3 = attrs.get('A3', '')
+    a4 = attrs.get('A4', '')
+    a5 = attrs.get('A5', '')
+
+    prompt = f"""Write {num_outputs} product search queries about {a1}.
+
+Example: "Beautiful {a4} {a1} which are made by {a2}, not expensive at {a3}, perfect for {a5}"
+
+Now write {num_outputs} different queries about {a1}, each as a complete sentence.
+
+Requirements:
+- Include all: {a1}, {a2}, {a3}, {a4}, {a5}
+- Length: ~{int(asl)} words
+- Style: {"use which/that" if cd > 0.2 else "simple"}, {"negation" if ns > 0.2 else "positive"}, {"adjectives" if md > 0.3 else "concise"}
+
+Queries:"""
+
+    print(f"[{datetime.now()}] [LLM] 发送润色请求...", flush=True)
+    response = call_llm(prompt, temperature=0.5)
+
+    if not response:
+        print(f"[{datetime.now()}] [LLM] 未收到响应，返回原始骨架", flush=True)
+        return skeletons
+
+    # 解析候选行
+    candidates = []
+    for line in response.strip().split("\n"):
+        line = line.strip()
+        if not line or len(line) < 10:
+            continue
+        # 跳过meta-commentary行（包含多个指令性关键词）
+        line_lower = line.lower()
+        skip_keywords = ['generate', 'query', 'here', 'output', 'must', 'rules',
+                        'task', 'important', 'required', 'example', 'template',
+                        'follow', 'we need', 'avoid', 'coordination', 'subject',
+                        'negation', 'approximately', 'words', 'sentence',
+                        'count', 'think', 'need to', 'should', 'could', 'will',
+                        'product', 'brand', 'price', 'material', 'use', 'item',
+                        'clause', 'relative', 'subordinate', 'example:',
+                        "let's", 'potential:', 'now write', 'final:',
+                        'now ensure', 'ensure each', 'all tokens', 'each query']
+        kw_count = sum(1 for kw in skip_keywords if kw in line_lower)
+        if kw_count >= 2:
+            continue
+        # 移除可能的编号前缀
+        cleaned = re.sub(r'^[\d\.\)\-\*\•]+\s*', '', line)
+        # 移除 "let's write:" "Potential:" 等前缀
+        cleaned = re.sub(r'^(let\'s\s*write[:\s]*|potential[:\s]*|now\s*write[:\s]*|final[:\s]*)', '', cleaned, flags=re.IGNORECASE)
+        # 移除首尾引号
+        cleaned = cleaned.strip('"\'')
+        if cleaned and len(cleaned) > 10 and not cleaned.startswith('//'):
+            candidates.append(cleaned)
+
+    print(f"[{datetime.now()}] [LLM] 解析出 {len(candidates)} 个候选", flush=True)
+    return candidates
+
+
+# ============================================================
+# 质量过滤
+# ============================================================
+
+def quality_filter(candidate: str) -> bool:
+    """过滤低质量候选（重复、过长、乱码、meta-commentary等）"""
+    words = candidate.lower().split()
+
+    # 太短或太长
+    if len(words) < 5 or len(words) > 80:
+        return False
+
+    # n-gram 重复检测
+    if len(words) > 8:
+        ngrams = [tuple(words[i:i+4]) for i in range(len(words)-3)]
+        if len(ngrams) > 0 and len(set(ngrams)) / len(ngrams) < 0.7:
+            return False
+
+    # 包含明显乱码
+    if any(w in candidate.lower() for w in ['emoji', 'ringtone', 'earphone', 'maternity']):
+        return False
+
+    # 过滤meta-commentary类型的响应
+    cand_lower = candidate.lower()
+    meta_patterns = [
+        'we need to', 'each query must', 'here are', 'generate',
+        'output', 'exact value', 'must include', 'rules:',
+        'task:', 'important:', 'please provide', 'the query should'
+    ]
+    # 如果候选包含多个meta关键词，很可能是说明而不是查询
+    meta_count = sum(1 for p in meta_patterns if p in cand_lower)
+    if meta_count >= 2:
+        return False
+
+    # 包含括号编号（如 "Shimmering(1) Crystal(2)..."）
+    if re.search(r'\w+\s*\(\d+\)', candidate):
+        return False
+
+    return True
+
+
+# ============================================================
+# 数据加载（沿用 v1）
+# ============================================================
+
 _stage1_data_cache = None
 
-
 def _load_stage1_attributes() -> Dict:
-    """加载Stage1属性数据"""
     global _stage1_data_cache
     if _stage1_data_cache is None:
         with open(STAGE1_ATTRIBUTES_FILE, 'r', encoding='utf-8') as f:
@@ -55,1147 +606,202 @@ def _load_stage1_attributes() -> Dict:
 
 
 def _get_user_attributes(user_id: str) -> Dict[str, str]:
-    """获取用户的5个属性值"""
     data = _load_stage1_attributes()
-    products = data.get('products', [])
-
-    # 找该用户的第一个产品
-    user_attrs = {}
-    for p in products:
+    for p in data.get('products', []):
         if p.get('user_id') == user_id:
-            # 提取5个属性
+            attrs = {}
+            key_map = {1: 'A1_product_type', 2: 'A2_brand', 3: 'A3_price',
+                       4: 'A4_appearance', 5: 'A5_use_case'}
             for i, slot in enumerate(ATTRIBUTE_SLOTS, 1):
-                key = f'A{i}_product_type' if i == 1 else f'A{i}_brand' if i == 2 else f'A{i}_price' if i == 3 else f'A{i}_appearance' if i == 4 else f'A{i}_use_case'
-                val = p.get(key)
+                val = p.get(key_map[i])
                 if val:
-                    user_attrs[slot] = val if isinstance(val, str) else ', '.join(val) if isinstance(val, list) else str(val)
-            break
-    return user_attrs
-
-
-def _fill_skeleton_with_attributes(skeleton: str, attributes: Dict[str, str]) -> str:
-    """
-    将骨架中的槽位替换为属性槽位，基于语义角色映射
-    例如: "[NOUN:SUBJECT] [VERB] a [ADJ:MODIFIER] [NOUN:OBJECT]"
-    映射: SUBJECT→A1, OBJECT→A3, MODIFIER→A4
-    填充后: "{A1} [VERB] a [ADJ:MODIFIER] {A3}"
-    """
-    import re
-
-    ROLE_TO_ATTR = {
-        'SUBJECT': 'A1',
-        'OBJECT': 'A3',
-        'ADJUNCT': 'A5',
-    }
-    MODIFIER_ATTRS = ['A4', 'A2', 'A1']
-
-    attr_used = set()
-
-    def replace_match(match):
-        full_tag = match.group(1)
-        pos = full_tag.split(':')[0] if ':' in full_tag else full_tag
-        role = full_tag.split(':')[1] if ':' in full_tag else None
-
-        if role and role in ROLE_TO_ATTR:
-            attr = ROLE_TO_ATTR[role]
-            if attr in attributes and attr not in attr_used:
-                attr_used.add(attr)
-                return f'{{{attr}}}'
-        elif role == 'MODIFIER':
-            for a in MODIFIER_ATTRS:
-                if a in attributes and a not in attr_used:
-                    attr_used.add(a)
-                    return f'{{{a}}}'
-
-        return match.group(0)
-
-    pattern = r'\[([A-Za-z_]+(?::[A-Za-z_]+)?)\]'
-    filled_skeleton = re.sub(pattern, replace_match, skeleton)
-
-    return filled_skeleton
-
-
-# ============================================================
-# LLM Client (ChatGLM)
-# ============================================================
-_client = ChatGLMClient(
-    model="glm-5",
-    api_key="db2682f8a0024278a672f762ce36d7cd.RC8PtxIy5xdlh8Uj"
-)
-
-
-def _rule_based_question_formation(skeleton: str) -> str:
-    """
-    基于依存树的疑问句改写
-    核心：只在主句的主动词层面操作，其他结构（从句、并列、修饰语）不变
-    """
-    import re
-    import spacy
-
-    try:
-        nlp = spacy.load('en_core_web_sm')
-    except Exception:
-        return skeleton.rstrip('?') + '?'
-
-    TAG_TO_WORD = {
-        'NOUN:SUBJECT': 'someone', 'PRON:SUBJECT': 'someone',
-        'NOUN:OBJECT': 'something', 'PRON:OBJECT': 'it',
-        'NOUN:MODIFIER': 'item', 'ADJ:MODIFIER': 'nice',
-        'NOUN:ADJUNCT': 'place',
-        'NOUN': 'item', 'VERB': 'use', 'ADJ': 'good', 'ADV': 'well',
-        'DET': 'the', 'PRON': 'it', 'AUX': 'do', 'ADP': 'for',
-        'NUM': 'one', 'SCONJ': 'that', 'CCONJ': 'and', 'CONJ': 'and',
-    }
-
-    def skeleton_to_text(text):
-        result = text
-        for tag, word in TAG_TO_WORD.items():
-            result = re.sub(r'\[' + re.escape(tag) + r'\]', word, result, flags=re.IGNORECASE)
-        result = re.sub(r'\[[A-Za-z_:]+\]', 'item', result)
-        result = re.sub(r'\{A[1-5]\}', 'item', result)
-        result = result.replace(',', ' ,').replace('?', ' ?')
-        return result
-
-    text = skeleton_to_text(skeleton)
-    doc = nlp(text)
-
-    root = None
-    for token in doc:
-        if token.head == token:
-            root = token
-            break
-
-    if root is None:
-        return text.rstrip('?') + '?'
-
-    tokens_list = [token.text for token in doc]
-
-    def find_child_by_dep(dep):
-        for token in doc:
-            if token.head == root and token.dep_ == dep:
-                return token
-        return None
-
-    def find_subject():
-        for token in doc:
-            if token.head == root and token.dep_ == 'nsubj':
-                return token
-        for child in root.children:
-            if child.dep_ == 'nsubj':
-                return child
-        return None
-
-    aux = find_child_by_dep('aux')
-    neg = find_child_by_dep('neg')
-    subject = find_subject()
-
-    if aux and subject:
-        subj_idx = list(doc).index(subject)
-        aux_idx = list(doc).index(aux)
-        tokens_list.pop(aux_idx)
-        tokens_list.insert(0, 'Do')
-    elif subject:
-        subj_idx = list(doc).index(subject)
-        if subj_idx > 0:
-            tokens_list.insert(0, 'Do')
-
-    question = ' '.join(tokens_list)
-    if not question.endswith('?'):
-        question += '?'
-
-    return question
-
-
-def _rewrite_to_first_person_question(skeleton: str, user_attrs: Dict[str, str]) -> str:
-    """
-    规则化 + LLM 混合疑问句改写
-    优先使用规则化改写保持复杂度，复杂情况 fallback 到 LLM
-    """
-    skeleton_filled = skeleton
-    for attr, value in user_attrs.items():
-        skeleton_filled = skeleton_filled.replace(f'{{{attr}}}', str(value))
-
-    try:
-        rule_result = _rule_based_question_formation(skeleton_filled)
-        if rule_result and '?' in rule_result:
-            return rule_result
-    except Exception:
-        pass
-
-    prompt = f"""你是一个句型改写专家。请将下面的句法骨架改写为第一人称疑问句。
-
-规则：
-1. 只替换词性槽位，不要添加额外的词或短语
-2. 使用第一人称 "I" 作为主语
-3. 必须构成疑问句（以问号结尾）
-4. 尽量保持骨架中的功能词和标点位置不变
-5. 替换时只使用最简单、最常见的词语
-
-句法骨架：
-{skeleton_filled}
-
-请直接输出改写后的疑问句，不要解释。"""
-
-    try:
-        response = _client.call_json(prompt, max_tokens=2048, temperature=0.0)
-        result = response.strip()
-        if result.startswith("```"):
-            result = result.split("```")[1]
-            if result.startswith("json"):
-                result = result[4:]
-        result = result.strip()
-        try:
-            data = json.loads(result)
-            if isinstance(data, dict):
-                for key in ["rewritten_sentence", "sentence", "text", "query"]:
-                    if key in data:
-                        return data[key]
-        except json.JSONDecodeError:
-            pass
-        return result
-    except Exception as e:
-        _log(f"LLM 改写失败: {str(e)}", "SYSTEM")
-        attr_list = [str(v) for v in user_attrs.values() if v]
-        if len(attr_list) >= 3:
-            return f"Can I find {attr_list[0]} with {attr_list[1]} for {attr_list[2]}?"
-        elif attr_list:
-            return f"Can I find {attr_list[0]}?"
-        return "Can I find something?"
-
-
-def _compute_query_complexity(text: str) -> Dict[str, float]:
-    """
-    使用 LLM 计算文本的五个复杂度维度
-    """
-    prompt = f'''对以下疑问句进行复杂度分析，只返回纯JSON：
-
-文本：{text}
-
-输出格式（只需要第一个句子的分析）：
-{{"subordinate_depth":0-3的整数,"dependency_distance":0-1的小数,"modifier_density":0-1的小数,"conj_chain_depth":0-3的整数,"negation_scope":0-10的整数}}
-
-注意：只返回JSON，不要任何解释。'''
-
-    try:
-        result = _client.call_json(prompt, max_tokens=512, temperature=0.0)
-        result = result.strip()
-        if result.startswith("```"):
-            result = result.split("```")[1]
-            if result.startswith("json"):
-                result = result[4:]
-        result = result.strip()
-        data = json.loads(result)
-        return {
-            "subordinate_depth": int(data.get("subordinate_depth", 0)),
-            "dependency_distance": float(data.get("dependency_distance", 0)),
-            "modifier_density": float(data.get("modifier_density", 0)),
-            "conj_chain_depth": int(data.get("conj_chain_depth", 0)),
-            "negation_scope": int(data.get("negation_scope", 0))
-        }
-    except Exception as e:
-        _log(f"计算复杂度失败: {str(e)}", "SYSTEM")
-        return {"subordinate_depth": 0, "dependency_distance": 0, "modifier_density": 0, "conj_chain_depth": 0, "negation_scope": 0}
-
-
-# ============================================================
-# 五个复杂度维度计算函数（Python端计算）
-# ============================================================
-
-def _build_dependency_tree(dep_tree: List[Dict]) -> List[Dict]:
-    """
-    从 LLM 返回的 dependency_tree 构建内部树结构
-    dep_tree: [{"token": "I", "pos": "PRON", "dep": "nsubj", "head": 1}, ...]
-    返回: 添加了 children 列表的 tokens
-    """
-    n = len(dep_tree)
-    tokens = []
-    for i, t in enumerate(dep_tree):
-        tokens.append({
-            "index": i,
-            "token": t.get("token", ""),
-            "pos": t.get("pos", ""),
-            "dep": t.get("dep", ""),
-            "head": t.get("head", -1),
-            "children": []
-        })
-
-    # 构建 children 关系
-    for i, t in enumerate(tokens):
-        head = t["head"]
-        if head >= 0 and head < n and head != i:
-            tokens[head]["children"].append(i)
-
-    return tokens
-
-
-def _calculate_subordinate_depth(tokens: List[Dict], idx: int, depth: int = 0) -> int:
-    """
-    递归计算从句嵌套深度
-    从句关系包括: acl, acl:relcl, relcl, advcl, ccomp, xcomp, csubj, csubjpass
-    """
-    SUBORDINATE_DEPS = {"acl", "acl:relcl", "relcl", "advcl", "ccomp", "xcomp", "csubj", "csubjpass"}
-
-    token = tokens[idx]
-    max_depth = depth
-
-    for child_idx in token["children"]:
-        child_token = tokens[child_idx]
-        if child_token["dep"] in SUBORDINATE_DEPS:
-            child_depth = _calculate_subordinate_depth(tokens, child_idx, depth + 1)
-            max_depth = max(max_depth, child_depth)
-
-    return max_depth
-
-
-def _compute_five_dimensions(dep_tree: List[Dict]) -> Dict[str, float]:
-    """
-    从依存关系树计算五个复杂度维度
-    """
-    if not dep_tree or len(dep_tree) == 0:
-        return {
-            "subordinate_depth": 0,
-            "dependency_distance": 0.0,
-            "modifier_density": 0.0,
-            "conj_chain_depth": 0,
-            "negation_scope": 0
-        }
-
-    n = len(dep_tree)
-    tokens = _build_dependency_tree(dep_tree)
-
-    # 1. 从句嵌套深度
-    SUBORDINATE_DEPS = {"acl", "acl:relcl", "relcl", "advcl", "ccomp", "xcomp", "csubj", "csubjpass"}
-    subordinate_depth = 0
-    for i, t in enumerate(tokens):
-        if t["dep"] in SUBORDINATE_DEPS:
-            depth = _calculate_subordinate_depth(tokens, i, 1)
-            subordinate_depth = max(subordinate_depth, depth)
-
-    # 2. 依存距离（归一化）
-    total_distance = 0
-    for i, t in enumerate(tokens):
-        head = t["head"]
-        if head >= 0 and head != i:
-            total_distance += abs(i - head)
-    dependency_distance = total_distance / (n * (n + 1) / 2) if n > 0 else 0.0
-
-    # 3. 修饰语密度
-    MODIFIER_DEPS = {"amod", "advmod", "compound", "nn", "nummod"}
-    modifier_count = sum(1 for t in tokens if t["dep"] in MODIFIER_DEPS)
-    modifier_density = modifier_count / n if n > 0 else 0.0
-
-    # 4. 并列链深度 (Union-Find)
-    conj_pairs = []
-    for i, t in enumerate(tokens):
-        if t["dep"] == "conj":
-            head = t["head"]
-            if head >= 0 and head != i:
-                conj_pairs.append((min(i, head), max(i, head)))
-
-    if conj_pairs:
-        parent = list(range(n))
-        def find(x):
-            if parent[x] != x:
-                parent[x] = find(parent[x])
-            return parent[x]
-        def union(x, y):
-            px, py = find(x), find(y)
-            if px != py:
-                parent[px] = py
-
-        for i, j in conj_pairs:
-            union(i, j)
-
-        component_size = defaultdict(int)
-        for i in range(n):
-            component_size[find(i)] += 1
-        conj_chain_depth = max(component_size.values()) if component_size else 0
-    else:
-        conj_chain_depth = 0
-
-    # 5. 否定作用域 (BFS)
-    negation_scope = 0
-    for i, t in enumerate(tokens):
-        if t["dep"] == "neg":
-            visited = set()
-            queue = [i]
-            scope_size = 0
-            while queue:
-                curr = queue.pop(0)
-                if curr in visited:
-                    continue
-                visited.add(curr)
-                scope_size += 1
-                for child in tokens[curr]["children"]:
-                    if child not in visited:
-                        queue.append(child)
-            negation_scope = max(negation_scope, scope_size)
-
-    return {
-        "subordinate_depth": subordinate_depth,
-        "dependency_distance": round(dependency_distance, 4),
-        "modifier_density": round(modifier_density, 4),
-        "conj_chain_depth": conj_chain_depth,
-        "negation_scope": negation_scope
-    }
-
-
-def _count_subordinate_depth(doc_tokens: List[Dict], token_idx: int, depth: int = 0) -> int:
-    """
-    递归计算从句嵌套深度
-    从句关系包括: acl, acl:relcl, relcl, advcl, ccomp, xcomp, csubj, csubjpass
-    """
-    SUBORDINATE_DEPS = {"acl", "acl:relcl", "relcl", "advcl", "ccomp", "xcomp", "csubj", "csubjpass"}
-
-    token = doc_tokens[token_idx]
-    current_depth = depth
-    max_child_depth = depth
-
-    for child_idx in token.get("children", []):
-        if child_idx < len(doc_tokens):
-            child_token = doc_tokens[child_idx]
-            if child_token["dep"] in SUBORDINATE_DEPS:
-                child_depth = _count_subordinate_depth(doc_tokens, child_idx, depth + 1)
-                max_child_depth = max(max_child_depth, child_depth)
-
-    return max_child_depth
-
-
-def _calculate_dependency_distance(doc_tokens: List[Dict]) -> float:
-    """
-    计算依存距离：所有 head-dependent 词对的线性距离之和
-    """
-    total_distance = 0
-    for i, token in enumerate(doc_tokens):
-        head_idx = token.get("head", i)
-        if head_idx != i:  # 非根节点
-            distance = abs(i - head_idx)
-            total_distance += distance
-    return total_distance
-
-
-def _calculate_modifier_density(doc_tokens: List[Dict]) -> float:
-    """
-    计算修饰语密度：修饰性依存关系数与总词数之比
-    修饰性关系包括: amod, advmod, compound, nn, nummod, nsubj, nsubjpass
-    """
-    MODIFIER_DEPS = {"amod", "advmod", "compound", "nn", "nummod", "nsubj", "nsubjpass"}
-    modifier_count = sum(1 for t in doc_tokens if t.get("dep") in MODIFIER_DEPS)
-    total_tokens = len(doc_tokens)
-    return modifier_count / max(total_tokens, 1)
-
-
-def _calculate_conj_chain_depth(doc_tokens: List[Dict]) -> int:
-    """
-    计算并列链深度：conj 关系连接的最长链长度
-    """
-    # 构建 conj 关系图
-    conj_pairs = []
-    for i, token in enumerate(doc_tokens):
-        if token.get("dep") == "conj":
-            head_idx = token.get("head", i)
-            if head_idx != i:
-                conj_pairs.append((min(i, head_idx), max(i, head_idx)))
-
-    if not conj_pairs:
-        return 0
-
-    # 找最长链 - 使用 Union-Find
-    parent = list(range(len(doc_tokens)))
-
-    def find(x):
-        if parent[x] != x:
-            parent[x] = find(parent[x])
-        return parent[x]
-
-    def union(x, y):
-        px, py = find(x), find(y)
-        if px != py:
-            parent[px] = py
-
-    for i, j in conj_pairs:
-        union(i, j)
-
-    # 统计每个连通分量的大小
-    component_size = defaultdict(int)
-    for i in range(len(doc_tokens)):
-        component_size[find(i)] += 1
-
-    return max(component_size.values()) if component_size else 0
-
-
-def _calculate_negation_scope(doc_tokens: List[Dict], token_idx: int) -> int:
-    """
-    计算否定作用域：否定词所辖依存子树的节点数
-    """
-    if token_idx >= len(doc_tokens):
-        return 0
-
-    token = doc_tokens[token_idx]
-    if token.get("dep") != "neg":
-        return 0
-
-    # BFS 计算子树大小
-    visited = set()
-    queue = [token_idx]
-    scope_size = 0
-
-    while queue:
-        current_idx = queue.pop(0)
-        if current_idx in visited:
-            continue
-        visited.add(current_idx)
-        scope_size += 1
-
-        # 添加所有子节点
-        for child_idx in doc_tokens[current_idx].get("children", []):
-            if child_idx not in visited:
-                queue.append(child_idx)
-
-    return scope_size
-
-
-# ============================================================
-# 骨架提取核心（基于 LLM 的依存句法分析）
-# ============================================================
-def _extract_dependency_analysis_for_single_review(review: str) -> Optional[Dict]:
-    """
-    对单条评论进行 LLM 依存句法分析，提取骨架并计算五个复杂度维度。
-    """
-    text = review.strip() if isinstance(review, str) else str(review)
-    if len(text) > 400:
-        text = text[:400] + "..."
-
-    prompt = '''对评论进行依存句法分析，提取骨架并计算复杂度指标。
-
-## 任务
-对每句话进行以下处理：
-
-### 1. 骨架提取（带语义角色）
-- 功能词保留原词（the, a, an, in, on, at, for, with, to, from, by, and, but, or, that, which, who, what, where, when, how, why, because, since, while, although, if, unless, be, is, are, was, were, have, has, had, do, does, did, will, would, could, should, may, might, must, can, i, you, he, she, it, we, they, me, him, her, us, them, my, your, his, its, our, their, this, that, these, those, not, very, really, quite, too, also, just）
-- 实义词替换为{POS}，格式为 [POS:ROLE]，可用类型包括[NOUN:SUBJECT], [NOUN:OBJECT], [NOUN:MODIFIER], [NOUN:ADJUNCT], [VERB], [ADJ:MODIFIER], [ADV], [PRON], [DET], [AUX], [ADP], [NUM]
-- 语义角色：SUBJECT=主语, OBJECT=宾语, MODIFIER=修饰语, ADJUNCT=状语
-- 保留标点
-
-### 2. 五个复杂度维度（必须计算）
-- subordinate_depth: 从句嵌套深度（acl/relcl/advcl/ccomp/xcomp等从句关系最大嵌套层数，无则填0）
-- dependency_distance: 归一化依存距离（|token_i - head_i|之和/(n*(n+1)/2)，0到1之间）
-- modifier_density: 修饰语密度（amod/advmod/compound数除以总词数，0到1之间）
-- conj_chain_depth: 并列链深度（conj连接最长链节点数，无conj则填0）
-- negation_scope: 否定作用域（not节点的依存子树大小，无not则填0）
-
-### 3. 句法类型（仅分析用）
-- 简单陈述: 无从句无并列
-- 并列约束: 含and/but/or
-- 从句嵌套: 含that/which/who/because/if/when
-- 介词链: 含多个介词
-- 混合复杂: 多种结构混合
-
-### 4. 输出格式
-只返回纯JSON，不要任何解释文字：
-{"sentences":[{"original":"原句","skeleton":"[PRON] [VERB] a [ADJ:MODIFIER] [NOUN:SUBJECT] that [VERB] [ADV] for [NOUN:OBJECT] in [ADJ:MODIFIER] [NOUN]","word_count":12,"slot_count":9,"slot_roles":["PRON","VERB","DET","ADJ:MODIFIER","NOUN:SUBJECT","VERB","ADV","ADP","NOUN:OBJECT","ADP","ADJ:MODIFIER","NOUN"],"has_subject_predicate":true,"subordinate_depth":1,"dependency_distance":0.45,"modifier_density":0.25,"conj_chain_depth":0,"negation_scope":0,"syntax_type":"从句嵌套"}]}
-
-评论文本：''' + f'\n{text}\n'
-
-    try:
-        result = _client.call_json(prompt, max_tokens=2048, temperature=0.0)
-        result = result.strip() if result else ""
-
-        if not result:
-            return None
-
-        # 清理可能的markdown代码块
-        if result.startswith('```'):
-            lines = result.split('\n')
-            result = '\n'.join(lines[1:-1] if lines[-1] == '```' else lines[1:])
-
-        data = json.loads(result)
-        sentences = data.get("sentences", [])
-        if sentences:
-            return {"sentences": sentences}
-        return None
-    except json.JSONDecodeError as e:
-        _log(f"Parse failed: {e}", "LLM JSON Error")
-        _log(f"result[:500]: {result[:500] if result else 'empty'}", "LLM Raw")
-        return None
-    except Exception as e:
-        _log(f"Error: {e}", "LLM Dependency Analysis")
-        _log(f"result[:500]: {result[:500] if result else 'empty'}", "LLM Raw")
-        return None
-
-
-def _extract_skeleton_with_llm(reviews: List[str]) -> List[Dict]:
-    """使用 LLM 从用户评论中逐句提取依存骨架和复杂度指标。"""
-    if not reviews:
-        return []
-
-    results = []
-    for i, review in enumerate(reviews[:10]):  # 最多处理10条
-        _log(f"Processing review {i+1}/{min(len(reviews), 10)}...", "LLM Dependency")
-        analysis = _extract_dependency_analysis_for_single_review(review)
-
-        if analysis and "sentences" in analysis:
-            sentences = analysis["sentences"]
-            results.append({
-                "review_index": i,
-                "original_review": review[:200] + "..." if len(review) > 200 else review,
-                "sentences": sentences,
-            })
-            _log(f"{len(sentences)} sentence(s) extracted", "LLM Dependency")
-            for j, sent in enumerate(sentences[:3]):  # 最多显示前3句
-                _log(f"[{j+1}] {sent.get('skeleton', '')[:80]}...", "LLM Dependency")
-                _log(f"    sub_depth={sent.get('subordinate_depth', 0)}, "
-                      f"dep_dist={sent.get('dependency_distance', 0):.2f}, "
-                      f"mod_dens={sent.get('modifier_density', 0):.2f}, "
-                      f"conj_chain={sent.get('conj_chain_depth', 0)}, "
-                      f"neg_scope={sent.get('negation_scope', 0)}", "LLM Dependency")
-        else:
-            _log("Failed to extract skeletons", "LLM Dependency")
-
-    return results
-
-
-def _filter_and_diversify_skeletons(sentences: List[Dict]) -> List[Dict]:
-    """
-    筛选高质量骨架并多样化保留。
-
-    筛选条件：
-    - 词数 ∈ [MIN_WORD_COUNT, MAX_WORD_COUNT]
-    - 槽位数 ≥ MIN_SLOT_COUNT
-    - 必须有主谓结构
-
-    多样化策略：
-    - 按五个复杂度维度聚类
-    - 每类保留结构差异最大的
-    - 最多保留 MAX_SKELETONS_PER_USER 个
-    """
-    filtered = []
-
-    for sent in sentences:
-        word_count = sent.get("word_count", 0)
-        slot_count = sent.get("slot_count", 0)
-        has_subj_pred = sent.get("has_subject_predicate", False)
-
-        # 筛选
-        if (MIN_WORD_COUNT <= word_count <= MAX_WORD_COUNT and
-            slot_count >= MIN_SLOT_COUNT and
-            has_subj_pred):
-            filtered.append(sent)
-
-    if not filtered:
-        return []
-
-    # 按复杂度维度多样性选择
-    # 计算每个骨架的复杂度向量
-    def complexity_vector(sent):
-        return (
-            sent.get("subordinate_depth", 0),      # 从句嵌套深度
-            sent.get("dependency_distance", 0),    # 依存距离
-            sent.get("modifier_density", 0),       # 修饰语密度
-            sent.get("conj_chain_depth", 0),       # 并列链深度
-            sent.get("negation_scope", 0),         # 否定作用域
-        )
-
-    # 使用简单的多样性采样：优先选择复杂度向量差异大的
-    selected = []
-    remaining = filtered.copy()
-
-    while remaining and len(selected) < MAX_SKELETONS_PER_USER:
-        if not selected:
-            # 第一个：选择从句深度最大的
-            remaining.sort(key=lambda x: x.get("subordinate_depth", 0), reverse=True)
-            selected.append(remaining.pop(0))
-        else:
-            # 之后：选择与已选骨架差异最大的
-            best_idx = 0
-            best_min_distance = -1
-
-            for i, candidate in enumerate(remaining):
-                cand_vec = complexity_vector(candidate)
-                # 计算与所有已选骨架的最小距离
-                min_dist = float('inf')
-                for sel in selected:
-                    sel_vec = complexity_vector(sel)
-                    # 欧氏距离（简化版）
-                    dist = sum((a - b) ** 2 for a, b in zip(cand_vec, sel_vec))
-                    min_dist = min(min_dist, dist)
-
-                if min_dist > best_min_distance:
-                    best_min_distance = min_dist
-                    best_idx = i
-
-            selected.append(remaining.pop(best_idx))
-
-    return selected
-
-
-def _combine_skeletons(all_skeletons: List[Dict], user_attrs: Dict[str, str]) -> str:
-    """
-    组合多个骨架，生成包含所有语义角色的统一骨架
-    """
-    if not all_skeletons:
-        return ""
-
-    skeleton_contexts = []
-    for i, sk in enumerate(all_skeletons[:8]):
-        original = sk.get('original', '')[:100]
-        skeleton = sk.get('skeleton', '')
-        slot_roles = sk.get('slot_roles', [])
-        skeleton_contexts.append(f"骨架{i+1}: {skeleton}\n  原句: {original}\n  角色: {slot_roles}")
-
-    attr_str = ", ".join([f"{k}={v}" for k, v in user_attrs.items()])
-
-    context_text = "\n\n".join(skeleton_contexts)
-
-    prompt = f"""你是一个句型组合专家。请根据下面的多个骨架，组合成一个统一的句法骨架。
-
-## 任务
-1. 从多个骨架中提取不同语义角色的片段
-2. 将它们组合成一个自然流畅的疑问句骨架
-3. 必须包含所有5个属性角色：SUBJECT（主语）、OBJECT（宾语）、MODIFIER（修饰语）、ADJUNCT（状语）
-4. 保持骨架的复杂度和句法多样性
-5. 输出格式：只返回骨架字符串，用[POS:ROLE]标注
-
-## 属性信息
-{attr_str}
-
-## 骨架列表
-{context_text}
-
-## 输出要求
-- 只返回组合后的骨架字符串
-- 格式示例：[PRON:SUBJECT] [VERB] a [ADJ:MODIFIER] [NOUN:OBJECT] for [NOUN:ADJUNCT]?
-- 必须包含SUBJECT、OBJECT、MODIFIER、ADJUNCT四种角色
-- 以问号结尾表示疑问句
-
-请直接输出组合后的骨架："""
-
-    try:
-        response = _client.call_json(prompt, max_tokens=2048, temperature=0.0)
-        result = response.strip()
-        if result.startswith("```"):
-            result = result.split("```")[1]
-            if result.startswith("json"):
-                result = result[4:]
-        result = result.strip()
-        try:
-            data = json.loads(result)
-            if isinstance(data, dict):
-                for key in ["skeleton", "combined", "result", "sentence"]:
-                    if key in data:
-                        return data[key]
-            return result
-        except json.JSONDecodeError:
-            return result
-    except Exception as e:
-        _log(f"LLM 骨架组合失败: {str(e)}", "SYSTEM")
-        return ""
-
-
-def _build_template_library(user_id: str, reviews: List[str]) -> Dict:
-    """为单个用户构建依存骨架模板库，包含五个复杂度维度标注。"""
-    _log(f"使用 LLM 提取句法骨架和复杂度维度...", user_id)
-    skeleton_results = _extract_skeleton_with_llm(reviews)
-
-    if skeleton_results:
-        _log(f"成功提取 {len(skeleton_results)} 条评论的骨架", user_id)
-        # 收集所有句子骨架
-        all_skeletons = []
-        for sr in skeleton_results:
-            if "sentences" in sr:
-                all_skeletons.extend(sr["sentences"])
-
-        all_filtered = all_skeletons
-        _log(f"共提取 {len(all_filtered)} 个骨架，全部保留", user_id)
-
-        # 计算五个维度的平均值
-        mean_sub_depth = sum(s.get("subordinate_depth", 0) for s in all_filtered) / max(len(all_filtered), 1)
-        mean_dep_dist = sum(s.get("dependency_distance", 0) for s in all_filtered) / max(len(all_filtered), 1)
-        mean_mod_dens = sum(s.get("modifier_density", 0) for s in all_filtered) / max(len(all_filtered), 1)
-        mean_conj_chain = sum(s.get("conj_chain_depth", 0) for s in all_filtered) / max(len(all_filtered), 1)
-        mean_neg_scope = sum(s.get("negation_scope", 0) for s in all_filtered) / max(len(all_filtered), 1)
-
-        _log(f"五个维度平均值: 从句深度={mean_sub_depth:.2f}, 依存距离={mean_dep_dist:.2f}, "
-              f"修饰密度={mean_mod_dens:.2f}, 并列链={mean_conj_chain:.2f}, 否定域={mean_neg_scope:.2f}", user_id)
-
-        # 找到与平均值最接近的骨架
-        def _skeleton_distance(sk):
-            d_sub = (sk.get("subordinate_depth", 0) - mean_sub_depth) ** 2
-            d_dep = (sk.get("dependency_distance", 0) - mean_dep_dist) ** 2
-            d_mod = (sk.get("modifier_density", 0) - mean_mod_dens) ** 2
-            d_conj = (sk.get("conj_chain_depth", 0) - mean_conj_chain) ** 2
-            d_neg = (sk.get("negation_scope", 0) - mean_neg_scope) ** 2
-            return (d_sub + d_dep + d_mod + d_conj + d_neg) ** 0.5
-
-        if all_filtered:
-            closest_idx = min(range(len(all_filtered)), key=lambda i: _skeleton_distance(all_filtered[i]))
-            closest_skeleton = all_filtered[closest_idx]
-            _log(f"最接近平均值的骨架 (idx={closest_idx}): {closest_skeleton.get('skeleton', '')[:60]}...", user_id)
-            _log(f"    该骨架复杂度: 从句深度={closest_skeleton.get('subordinate_depth')}, 依存距离={closest_skeleton.get('dependency_distance', 0):.2f}, "
-                  f"修饰密度={closest_skeleton.get('modifier_density', 0):.2f}, 并列链={closest_skeleton.get('conj_chain_depth')}, 否定域={closest_skeleton.get('negation_scope')}", user_id)
-
-            # 获取用户属性
-            user_attrs = _get_user_attributes(user_id)
-            _log(f"用户属性: {user_attrs}", user_id)
-
-            if user_attrs:
-                # 使用骨架组合，生成包含所有角色的统一骨架
-                _log(f"正在使用 LLM 组合骨架以包含所有角色...", user_id)
-                combined_skeleton = _combine_skeletons(all_filtered, user_attrs)
-                
-                if combined_skeleton:
-                    _log(f"组合骨架: {combined_skeleton}", user_id)
-                    original_skeleton = combined_skeleton
-                else:
-                    _log(f"组合失败，使用最接近平均值的骨架", user_id)
-                    original_skeleton = closest_skeleton.get('skeleton', '')
-                
-                filled_skeleton = _fill_skeleton_with_attributes(original_skeleton, user_attrs)
-                _log(f"属性填充后骨架: {filled_skeleton}", user_id)
-
-                # 使用 LLM 将骨架改写为第一人称疑问句
-                _log(f"正在使用 LLM 改写为第一人称疑问句...", user_id)
-                final_query = _rewrite_to_first_person_question(filled_skeleton, user_attrs)
-                _log(f"最终生成查询语句: {final_query}", user_id)
-
-                # 计算改写后的复杂度
-                _log(f"正在计算改写后复杂度...", user_id)
-                rewritten_complexity = _compute_query_complexity(final_query)
-                original_complexity = closest_skeleton
-                _log(f"[改写前] 骨架复杂度: 从句深度={original_complexity.get('subordinate_depth')}, 依存距离={original_complexity.get('dependency_distance', 0):.2f}, "
-                      f"修饰密度={original_complexity.get('modifier_density', 0):.2f}, 并列链={original_complexity.get('conj_chain_depth')}, 否定域={original_complexity.get('negation_scope')}", user_id)
-                _log(f"[改写后] 查询复杂度: 从句深度={rewritten_complexity.get('subordinate_depth')}, 依存距离={rewritten_complexity.get('dependency_distance', 0):.2f}, "
-                      f"修饰密度={rewritten_complexity.get('modifier_density', 0):.2f}, 并列链={rewritten_complexity.get('conj_chain_depth')}, 否定域={rewritten_complexity.get('negation_scope')}", user_id)
-
-                # 创建填充后的骨架副本
-                filled_closest = dict(closest_skeleton)
-                filled_closest['skeleton'] = filled_skeleton
-                filled_closest['filled_skeleton'] = filled_skeleton
-                filled_closest['attributes'] = user_attrs
-                filled_closest['original_skeleton'] = original_skeleton
-            else:
-                filled_closest = dict(closest_skeleton)
-                filled_closest['attributes'] = {}
-        else:
-            closest_skeleton = {}
-            filled_closest = {}
-
-        # 打印骨架详情
-        _log(f"=== 骨架详情 ===", user_id)
-        for i, sk in enumerate(all_filtered):
-            _log(f"[{i+1}] 原句: {sk.get('original', '')[:80]}...", user_id)
-            _log(f"    骨架: {sk.get('skeleton', '')}", user_id)
-            _log(f"    词数={sk.get('word_count')}, 槽位数={sk.get('slot_count')}, 类型={sk.get('syntax_type')}", user_id)
-            _log(f"    复杂度: 从句深度={sk.get('subordinate_depth')}, 依存距离={sk.get('dependency_distance', 0):.2f}, "
-                  f"修饰密度={sk.get('modifier_density', 0):.2f}, 并列链={sk.get('conj_chain_depth')}, 否定域={sk.get('negation_scope')}", user_id)
-        _log(f"=== 骨架详情结束 ===", user_id)
-
-        return {
-            "user_id": user_id,
-            "num_reviews": len(reviews),
-            "num_patterns_extracted": len(all_skeletons),
-            "num_patterns_filtered": len(all_filtered),
-            "num_clusters": 1,
-            "template_clusters": [{
-                "cluster_id": 0,
-                "center_pattern": filled_closest if filled_closest else {},
-                "all_skeletons": all_filtered,
-                "frequency": len(skeleton_results),
-                "examples": skeleton_results,
-            }],
-            "llm_extracted": True,
-            "extraction_method": "llm_dependency_parsing",
-            # 五个复杂度维度的统计
-            "complexity_stats": {
-                "subordinate_depth": {
-                    "mean": mean_sub_depth,
-                    "max": max((s.get("subordinate_depth", 0) for s in all_filtered), default=0),
-                    "min": min((s.get("subordinate_depth", 0) for s in all_filtered), default=0),
-                },
-                "dependency_distance": {
-                    "mean": mean_dep_dist,
-                    "max": max((s.get("dependency_distance", 0) for s in all_filtered), default=0),
-                    "min": min((s.get("dependency_distance", 0) for s in all_filtered), default=0),
-                },
-                "modifier_density": {
-                    "mean": mean_mod_dens,
-                    "max": max((s.get("modifier_density", 0) for s in all_filtered), default=0),
-                    "min": min((s.get("modifier_density", 0) for s in all_filtered), default=0),
-                },
-                "conj_chain_depth": {
-                    "mean": mean_conj_chain,
-                    "max": max((s.get("conj_chain_depth", 0) for s in all_filtered), default=0),
-                    "min": min((s.get("conj_chain_depth", 0) for s in all_filtered), default=0),
-                },
-                "negation_scope": {
-                    "mean": mean_neg_scope,
-                    "max": max((s.get("negation_scope", 0) for s in all_filtered), default=0),
-                    "min": min((s.get("negation_scope", 0) for s in all_filtered), default=0),
-                },
-            },
-            # 最接近平均值的骨架
-            "closest_to_mean": closest_skeleton,
-        }
-    else:
-        _log(f"LLM 提取失败，返回空", user_id)
-        return {
-            "user_id": user_id,
-            "num_reviews": len(reviews),
-            "num_patterns_extracted": 0,
-            "num_patterns_filtered": 0,
-            "num_clusters": 0,
-            "template_clusters": [],
-        }
-
-
-# ============================================================
-# 缓存
-# ============================================================
-_user_template_library_cache: Dict[str, Dict] = {}
-_CACHE_FILE = os.path.join(OUTPUT_DIR, "template_library_cache.json")
-
-
-def _load_cache_from_file() -> Dict[str, Dict]:
-    if os.path.exists(_CACHE_FILE):
-        try:
-            with open(_CACHE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            pass
+                    attrs[slot] = val if isinstance(val, str) else ', '.join(val) if isinstance(val, list) else str(val)
+            return attrs
     return {}
 
 
-def _save_cache_to_file(cache: Dict[str, Dict]):
-    try:
-        with open(_CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(cache, f, ensure_ascii=False)
-    except Exception:
-        pass
-
-
-def _get_user_template_library(user_id: str, reviews: List[str]) -> Dict:
-    """获取用户的 phrase pattern 模板库（带缓存）。"""
-    if user_id in _user_template_library_cache:
-        return _user_template_library_cache[user_id]
-
-    file_cache = _load_cache_from_file()
-    if user_id in file_cache:
-        _user_template_library_cache[user_id] = file_cache[user_id]
-        return file_cache[user_id]
-
-    template_lib = _build_template_library(user_id, reviews)
-    _user_template_library_cache[user_id] = template_lib
-
-    file_cache[user_id] = template_lib
-    _save_cache_to_file(file_cache)
-
-    return template_lib
-
-
-# ============================================================
-# 数据加载
-# ============================================================
-def _load_user_reviews(user_id: str) -> List[str]:
-    """加载用户的所有评论。"""
-    user_reviews = []
+def load_user_reviews(user_id: str) -> List[str]:
     review_file = os.path.join(STAGE0_REVIEWS_DIR, f"reviews_{user_id}.json")
     if not os.path.exists(review_file):
         return []
-
-    try:
-        with open(review_file, 'r', encoding='utf-8') as f:
-            review_data = json.load(f)
-        for item in review_data.get("results", []):
-            for review in item.get("target_reviews", []):
-                if isinstance(review, str):
-                    text = review
-                elif isinstance(review, dict):
-                    text = review.get("review_text", "")
-                else:
-                    text = ""
-                if text:
-                    user_reviews.append(text)
-            for review in item.get("other_reviews", []):
-                if isinstance(review, str):
-                    text = review
-                elif isinstance(review, dict):
-                    text = review.get("review_text", "")
-                else:
-                    text = ""
-                if text:
-                    user_reviews.append(text)
-    except Exception as e:
-        _log(f"Warning: failed to load reviews for {user_id}: {e}", "Stage 6")
-
+    with open(review_file, 'r', encoding='utf-8') as f:
+        review_data = json.load(f)
+    user_reviews = []
+    for item in review_data.get("results", []):
+        for review in item.get("target_reviews", []) + item.get("other_reviews", []):
+            text = review if isinstance(review, str) else review.get("review_text", "") if isinstance(review, dict) else ""
+            if text:
+                user_reviews.append(text)
     return user_reviews
 
 
-# ============================================================
-# 主流程
-# ============================================================
-def run_skeleton_extraction(user_id: str, output_dir: str) -> Dict:
-    """为单个用户提取骨架并保存。"""
-    _log(f"开始提取骨架...", user_id)
+def simple_split_sentences(text: str) -> List[str]:
+    sentences = re.split(r'[.!?]+', text)
+    return [s.strip() for s in sentences if s.strip()]
 
-    user_reviews = _load_user_reviews(user_id)
-    _log(f"加载了 {len(user_reviews)} 条评论", user_id)
 
-    if not user_reviews:
-        _log(f"没有评论，跳过", user_id)
+def extract_long_sentences(reviews: List[str], min_words: int = 25) -> List[str]:
+    long_sentences = []
+    for review in reviews:
+        for sent in simple_split_sentences(review):
+            if len(sent.split()) >= min_words:
+                long_sentences.append(sent)
+    return long_sentences
+
+
+def compute_avg_14d_features(sentences: List[str]) -> Optional[Dict[str, float]]:
+    """使用本地spaCy计算平均14D特征"""
+    if not sentences:
         return None
+    all_features = []
+    for sent in sentences:
+        try:
+            features = extract_14d_features(sent)
+            all_features.append(features)  # extract_14d_features 返回的是单个 averaged dict
+        except Exception as e:
+            print(f"[{datetime.now()}] [EVAL] 特征提取失败: {e}", flush=True)
+            continue
+    if not all_features:
+        return None
+    n = len(all_features)
+    return {
+        'subordinate_clause_freq': round(sum(f.get('subordinate_clause_freq', 0) for f in all_features) / n, 6),
+        'dep_distance': round(sum(f.get('dep_distance', 0) for f in all_features) / n, 6),
+        'modifier_density': round(sum(f.get('modifier_density', 0) for f in all_features) / n, 6),
+        'coord_chain': round(sum(f.get('coord_chain', 0) for f in all_features) / n, 6),
+        'negation_scope': round(sum(f.get('negation_scope', 0) for f in all_features) / n, 6),
+        'voice_ratio': round(sum(f.get('voice_ratio', 0) for f in all_features) / n, 6),
+        'branching_direction': round(sum(f.get('branching_direction', 0.5) for f in all_features) / n, 6),
+        'advcl_freq': round(sum(f.get('advcl_freq', 0) for f in all_features) / n, 6),
+        'comp_clause_freq': round(sum(f.get('comp_clause_freq', 0) for f in all_features) / n, 6),
+        'fanout': round(sum(f.get('fanout', 0) for f in all_features) / n, 6),
+        'parataxis_freq': round(sum(f.get('parataxis_freq', 0) for f in all_features) / n, 6),
+        'prep_density': round(sum(f.get('prep_density', 0) for f in all_features) / n, 6),
+        'appos_freq': round(sum(f.get('appos_freq', 0) for f in all_features) / n, 6),
+        'avg_sentence_length': round(sum(f.get('word_count', 0) for f in all_features) / n, 1),
+    }
 
-    template_lib = _get_user_template_library(user_id, user_reviews)
 
-    result = {
+# ============================================================
+# 主处理函数（简化版：无LLM润色）
+# ============================================================
+
+def process_user(user_id: str) -> Optional[Dict]:
+    print(f"\n{'='*80}", flush=True)
+    print(f"[{datetime.now()}] [{user_id}] 开始处理...", flush=True)
+
+    # ===== 1. 加载数据 =====
+    all_reviews = load_user_reviews(user_id)
+    if not all_reviews:
+        print(f"[{datetime.now()}] [{user_id}] 没有评论，跳过", flush=True)
+        return None
+    print(f"[{datetime.now()}] [{user_id}] 加载 {len(all_reviews)} 条评论", flush=True)
+
+    user_attrs = _get_user_attributes(user_id)
+    if not user_attrs:
+        print(f"[{datetime.now()}] [{user_id}] 没有属性，跳过", flush=True)
+        return None
+    print(f"[{datetime.now()}] [{user_id}] 属性: {user_attrs}", flush=True)
+
+    # ===== 2. 提取用户风格 profile（本地spaCy计算）=====
+    long_sentences = extract_long_sentences(all_reviews, min_words=MIN_WORDS_FOR_FEATURES)
+    print(f"[{datetime.now()}] [{user_id}] 提取到 {len(long_sentences)} 个长句", flush=True)
+
+    avg_features = compute_avg_14d_features(long_sentences)
+
+    if avg_features:
+        target = avg_features
+    else:
+        # 使用默认值
+        target = {
+            "clause_depth": 0.3, "dep_distance": 0.1,
+            "modifier_density": 0.3, "coord_chain": 0.15,
+            "negation_scope": 0.1, "avg_sentence_length": 20.0,
+        }
+    print(f"[{datetime.now()}] [{user_id}] 目标 14D profile: {target}", flush=True)
+
+    # ===== 3. 保存结果 =====
+    return {
         "user_id": user_id,
         "timestamp": datetime.now().isoformat(),
-        "num_reviews": len(user_reviews),
-        "template_library": template_lib,
+        "pipeline": "local_spacy_14d_only",
+        "num_reviews_total": len(all_reviews),
+        "num_long_sentences": len(long_sentences),
+        "target_complexity": target,
+        "attributes": user_attrs,
+        "style_description": profile_to_description(target),
     }
 
-    os.makedirs(output_dir, exist_ok=True)
-    out_fp = os.path.join(output_dir, f"skeleton_{user_id}.json")
 
-    with open(out_fp, 'w', encoding='utf-8') as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
-
-    _log(f"骨架保存到: {out_fp}", user_id)
-    return result
-
-
-def find_users_from_stage1() -> List[str]:
-    """从 Stage 1 属性文件中获取所有用户 ID。"""
-    try:
-        with open(STAGE1_ATTRIBUTES_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        products = data.get('products', [])
-        users_set = set()
-        for product in products:
-            user_id = product.get('user_id')
-            if user_id:
-                users_set.add(user_id)
-        return sorted(list(users_set))
-    except Exception as e:
-        print(f"ERROR reading Stage 1 file: {e}")
-        return []
+# ============================================================
+# 配置参数
+# ============================================================
+MODE = "batch"
+TARGET_USER = "A13OFOB1394G31"
+BATCH_LIMIT = 0  # 0表示不限制，处理所有用户
 
 
-def validate_users(user_ids: List[str]) -> Dict[str, Dict]:
-    """验证用户，返回有效的用户-ASIN 映射。"""
-    validated_users = {}
-    try:
-        with open(STAGE1_ATTRIBUTES_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        products = data.get('products', [])
-
-        for product in products:
-            asin = product.get("asin")
-            user_id = product.get("user_id")
-            if asin and user_id and user_id in user_ids:
-                if user_id not in validated_users:
-                    validated_users[user_id] = {'user_id': user_id, 'asins': []}
-                if asin not in validated_users[user_id]['asins']:
-                    validated_users[user_id]['asins'].append(asin)
-    except Exception as e:
-        print(f"ERROR reading Stage 1 file: {e}")
-    return validated_users
-
-
-def log_with_timestamp(message: str):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] {message}", flush=True)
-
-
-def _log(msg: str, prefix: str = ""):
-    """带时间戳的日志打印"""
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    if prefix:
-        print(f"[{ts}] [{prefix}] {msg}", flush=True)
-    else:
-        print(f"[{ts}] {msg}", flush=True)
-
-
+# ============================================================
+# 主入口
+# ============================================================
 def main():
-    output_dir = OUTPUT_DIR
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    log_with_timestamp("清理缓存和旧骨架文件...")
-    if os.path.exists(_CACHE_FILE):
-        try:
-            os.remove(_CACHE_FILE)
-            log_with_timestamp("已删除缓存文件")
-        except Exception:
-            pass
-    old_files = glob.glob(os.path.join(output_dir, 'skeleton_*.json'))
-    for f in old_files:
-        try:
-            os.remove(f)
-        except Exception:
-            pass
-    log_with_timestamp(f"已删除 {len(old_files)} 个旧骨架文件")
+    # 清理之前的输出结果
+    print(f"[{datetime.now()}] [MAIN] 清理旧输出文件...", flush=True)
+    for pattern in [f"queries_*.json", "all_queries_summary_v2.json"]:
+        for fp in glob.glob(os.path.join(OUTPUT_DIR, pattern)):
+            os.remove(fp)
+            print(f"  删除: {fp}", flush=True)
+    print(f"[{datetime.now()}] [MAIN] 清理完成", flush=True)
 
-    log_with_timestamp("=" * 60)
-    log_with_timestamp("Stage 6: 句法结构提取 - 依存分析 + 五维复杂度标注")
-    log_with_timestamp("=" * 60)
+    if MODE == "single":
+        print(f"[{datetime.now()}] [MAIN] 单用户模式: {TARGET_USER}", flush=True)
+        result = process_user(TARGET_USER)
+        if result:
+            out_fp = os.path.join(OUTPUT_DIR, f"queries_{TARGET_USER}.json")
+            with open(out_fp, 'w', encoding='utf-8') as f:
+                json.dump(result, f, indent=2, ensure_ascii=False)
+            # print(f"[{datetime.now()}] [MAIN] 结果已保存: {out_fp}", flush=True)
+            # print(f"\n===== 结果摘要 =====", flush=True)
+            # print(f"目标 14D:  {result['target_complexity']}", flush=True)
+    else:
+        print(f"[{datetime.now()}] [MAIN] 批量处理模式", flush=True)
+        data = _load_stage1_attributes()
+        users_set = {p['user_id'] for p in data.get('products', []) if p.get('user_id')}
+        user_ids = sorted(list(users_set))
+        if BATCH_LIMIT > 0:
+            user_ids = user_ids[:BATCH_LIMIT]
+        print(f"[{datetime.now()}] [MAIN] 共 {len(user_ids)} 个用户", flush=True)
 
-    # 获取用户列表
-    user_ids = find_users_from_stage1()
-    if not user_ids:
-        log_with_timestamp("ERROR: 没有找到用户!")
-        sys.exit(1)
+        results = []
+        success_count = 0
+        fail_count = 0
 
-    log_with_timestamp(f"找到 {len(user_ids)} 个用户")
-
-    # 验证用户
-    validated_users = validate_users(user_ids)
-    log_with_timestamp(f"验证了 {len(validated_users)} 个有效用户")
-
-    # 只处理前1个用户（调试用，可调整）
-    validated_users = dict(list(validated_users.items())[:1])
-    log_with_timestamp(f"DEBUG: 限制处理前 1 个用户")
-
-    # 逐个处理
-    success_count = 0
-    fail_count = 0
-
-    for i, (user_id, user_data) in enumerate(validated_users.items()):
-        try:
-            result = run_skeleton_extraction(user_id, output_dir)
+        for i, uid in enumerate(user_ids):
+            result = process_user(uid)
             if result:
+                results.append(result)
                 success_count += 1
-        except Exception as e:
-            import traceback
-            log_with_timestamp(f"[{user_id}] ✗ FAILED: {e}")
-            fail_count += 1
+                out_fp = os.path.join(OUTPUT_DIR, f"queries_{uid}.json")
+                with open(out_fp, 'w', encoding='utf-8') as f:
+                    json.dump(result, f, indent=2, ensure_ascii=False)
+            else:
+                fail_count += 1
+            print(f"[{datetime.now()}] [PROGRESS] {i+1}/{len(user_ids)} 用户已完成: {uid}", flush=True)
 
-        if (i + 1) % 10 == 0:
-            log_with_timestamp(f"进度: {i+1}/{len(validated_users)}")
-
-    log_with_timestamp("=" * 60)
-    log_with_timestamp(f"完成! 成功: {success_count}, 失败: {fail_count}")
-    log_with_timestamp("=" * 60)
-
-    # 生成汇总
-    all_results = []
-    for user_id in validated_users:
-        fp = os.path.join(output_dir, f"skeleton_{user_id}.json")
-        if os.path.exists(fp):
-            with open(fp, 'r') as f:
-                all_results.append(json.load(f))
-
-    summary = {
-        "timestamp": datetime.now().isoformat(),
-        "total_users": len(validated_users),
-        "success_count": success_count,
-        "fail_count": fail_count,
-        "results": all_results,
-    }
-
-    summary_fp = os.path.join(output_dir, "all_skeletons_summary.json")
-    with open(summary_fp, 'w', encoding='utf-8') as f:
-        json.dump(summary, f, indent=2, ensure_ascii=False)
-
-    log_with_timestamp(f"汇总保存到: {summary_fp}")
+        summary = {
+            "timestamp": datetime.now().isoformat(),
+            "pipeline": "skeleton + llm_polish + local_spacy_eval",
+            "total_users": len(user_ids),
+            "success_count": success_count,
+            "fail_count": fail_count,
+            "results": results,
+        }
+        summary_fp = os.path.join(OUTPUT_DIR, "all_queries_summary_v2.json")
+        with open(summary_fp, 'w', encoding='utf-8') as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+        print(f"\n[{datetime.now()}] [MAIN] 完成! 成功: {success_count}, 失败: {fail_count}", flush=True)
 
 
 if __name__ == '__main__':

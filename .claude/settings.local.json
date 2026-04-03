@@ -1,14 +1,9 @@
 {
   "permissions": {
-    "allow": [
-      "Bash(lsof:*)",
-      "Bash(opencode session:*)",
-      "Bash(opencode run:*)",
-      "Bash(opencode:*)",
-      "Bash(netstat -tlnp)",
-      "Bash(taskoutput b5qm7ze9t:*)"
-    ],
-    "deny": [],
-    "ask": []
-  }
+    "allow": ["Edit(/)", "Write(/)", "Bash", "Edit(.claude/**)", "Write(.claude/**)"],
+    "defaultMode": "bypassPermissions",
+    "dangerouslySkipPermissions": true
+  },
+  "effortLevel": "high",
+  "skipDangerousModePermissionPrompt": true
 }
