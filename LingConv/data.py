@@ -346,3 +346,129 @@ class LingDataCollator:
                 batch[key] = torch.tensor([feature[key] for feature in features], dtype=torch.float32)
 
         return batch
+
+
+# 14维特征键顺序（与collect_user_sentences.py保持一致）
+FEATURE_KEYS_14D = [
+    'subordinate_clause_freq', 'dep_distance', 'modifier_density',
+    'coord_chain', 'negation_scope', 'voice_ratio', 'branching_direction',
+    'advcl_freq', 'comp_clause_freq', 'fanout', 'parataxis_freq',
+    'prep_density', 'appos_freq'
+]
+
+
+def load_backtrans_data(json_file: str, tokenizer, max_length: int = 128, test_size: float = 0.2):
+    """加载回译数据，生成训练/测试数据集
+
+    数据格式：
+        sentence (原句) + features_14d (14D特征) -> backtrans_sentence + backtrans_features_14d
+
+    返回：
+        DatasetDict with train/test splits
+    """
+    import json as json_module
+
+    with open(json_file, "r", encoding="utf-8") as f:
+        data = json_module.load(f)
+
+    rows = []
+    for user in data.get("users", []):
+        for sent_data in user.get("sentences", []):
+            orig_sent = sent_data.get("sentence", "")
+            orig_features = sent_data.get("features_14d", {})
+
+            backtrans_sent = sent_data.get("backtrans_sentence", "")
+            backtrans_features = sent_data.get("backtrans_features_14d", {})
+
+            if not orig_sent or not backtrans_sent:
+                continue
+
+            # 提取14维特征向量
+            orig_ling = [orig_features.get(k, 0.0) for k in FEATURE_KEYS_14D]
+            backtrans_ling = [backtrans_features.get(k, 0.0) for k in FEATURE_KEYS_14D]
+
+            rows.append({
+                "sentence1": orig_sent,
+                "sentence2": backtrans_sent,
+                "sentence1_ling": orig_ling,
+                "sentence2_ling": backtrans_ling,
+            })
+
+    # 划分训练/测试集
+    if test_size > 0:
+        n_test = max(1, int(len(rows) * test_size))
+        n_train = len(rows) - n_test
+        train_rows = rows[:n_train]
+        test_rows = rows[n_train:]
+    else:
+        train_rows = rows
+        test_rows = []
+
+    from datasets import Dataset, DatasetDict
+
+    def make_dataset(row_list):
+        if not row_list:
+            return None
+
+        # Tokenize
+        sentence1_enc = tokenizer(
+            [r["sentence1"] for r in row_list],
+            max_length=max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors=None,
+        )
+        sentence2_enc = tokenizer(
+            [r["sentence2"] for r in row_list],
+            max_length=max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors=None,
+        )
+
+        return Dataset.from_dict({
+            "sentence1": [r["sentence1"] for r in row_list],
+            "sentence2": [r["sentence2"] for r in row_list],
+            "input_ids": sentence1_enc["input_ids"],
+            "attention_mask": sentence1_enc["attention_mask"],
+            "labels": sentence2_enc["input_ids"],
+            "labels_attention_mask": sentence2_enc["attention_mask"],
+            "sentence1_ling": [r["sentence1_ling"] for r in row_list],
+            "sentence2_ling": [r["sentence2_ling"] for r in row_list],
+        })
+
+    train_dataset = make_dataset(train_rows)
+    test_dataset = make_dataset(test_rows) if test_rows else None
+
+    dataset_dict = DatasetDict()
+    if train_dataset:
+        dataset_dict["train"] = train_dataset
+    if test_dataset:
+        dataset_dict["test"] = test_dataset
+    else:
+        # 如果没有测试集，从训练集划分
+        if train_dataset and test_size > 0:
+            split_idx = int(len(train_dataset) * (1 - test_size))
+            dataset_dict["train"] = train_dataset.select(range(split_idx))
+            dataset_dict["test"] = train_dataset.select(range(split_idx, len(train_dataset)))
+
+    return dataset_dict
+
+
+class LingDataCollator14D:
+    """适用于14维特征的DataCollator"""
+    def __init__(self, tokenizer):
+        self.base_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, padding=True, return_tensors="pt")
+
+    def __call__(self, features):
+        seq2seq_features = [
+            {key: value for key, value in feature.items() if key in {"input_ids", "attention_mask", "labels"}}
+            for feature in features
+        ]
+        batch = self.base_collator(seq2seq_features)
+
+        for key in ["sentence1_ling", "sentence2_ling"]:
+            if key in features[0]:
+                batch[key] = torch.tensor([feature[key] for feature in features], dtype=torch.float32)
+
+        return batch
