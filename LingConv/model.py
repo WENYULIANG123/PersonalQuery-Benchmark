@@ -709,26 +709,27 @@ class EncoderDecoderVAE(LingConvT5ForConditionalGeneration):
             return False
 
         def get_loss(param):
-            if self.args.feedback_param == 'l':
-                batch.update({'sentence2_ling_embed': param})
-            elif self.args.feedback_param == 's':
-                batch.update({'inputs_embeds': param})
+            with torch.enable_grad():
+                if self.args.feedback_param == 'l':
+                    batch.update({'sentence2_ling_embed': param})
+                elif self.args.feedback_param == 's':
+                    batch.update({'inputs_embeds': param})
 
-            if self.args.feedback_param == 'logits':
-                logits = param
-                pred = param.argmax(-1)
-            else:
-                dec_output, cache = self.infer_with_cache(batch)
-                # Get sequences from GenerateEncoderDecoderOutput
-                pred = dec_output.sequences if hasattr(dec_output, 'sequences') else dec_output
-                logits = cache['scores']
-            out = ling_disc(logits = logits)
-            probs = F.softmax(out, 1)
-            if ling_disc.quant:
-                loss = F.cross_entropy(out, batch['sentence2_discr'])
-            else:
-                loss = F.mse_loss(out, batch['sentence2_ling'])
-            return loss, pred
+                if self.args.feedback_param == 'logits':
+                    logits = param
+                    pred = param.argmax(-1)
+                else:
+                    dec_output, cache = self.infer_with_cache(batch)
+                    # Get sequences from GenerateEncoderDecoderOutput
+                    pred = dec_output.sequences if hasattr(dec_output, 'sequences') else dec_output
+                    logits = cache['scores']
+                out = ling_disc(logits = logits)
+                probs = F.softmax(out, 1)
+                if ling_disc.quant:
+                    loss = F.cross_entropy(out, batch['sentence2_discr'])
+                else:
+                    loss = F.mse_loss(out, batch['sentence2_ling'])
+                return loss, pred
 
         if self.args.feedback_param == 'l':
             ling2_embed = self.ling_embed(batch['sentence2_ling'])
