@@ -64,7 +64,7 @@ def test_qc_feedback():
     parser.add_argument("--sem_ckpt", default=sem_ckpt)
     parser.add_argument("--sem_model_path", default="google/flan-t5-base")
     parser.add_argument("--max_length", type=int, default=128)
-    parser.add_argument("--feedback_param", default="logits")
+    parser.add_argument("--feedback_param", default="s")
     args = parser.parse_args([])
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -129,7 +129,6 @@ def test_qc_feedback():
         batch = {
             "input_ids": inputs['input_ids'].to(device),
             "sentence1_input_ids": inputs['input_ids'].to(device),
-            "sentence1_attention_mask": inputs['attention_mask'].to(device),
             "attention_mask": inputs['attention_mask'].to(device),
             "sentence1_ling": ling_tensor.to(device),
             "sentence2_ling": ling_tensor.to(device),

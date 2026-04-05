@@ -1,4 +1,8 @@
+import os
 import pandas as pd
+
+# 获取 const.py 所在目录，用于定位资源文件
+_CONST_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in dir() else os.getcwd()
 
 sca_names = "W,S,VP,C,T,DC,CT,CP,CN,MLS,MLT,MLC,C-S,VP-T,C-T,DC-C,DC-T,T-S,\
 CT-T,CP-T,CP-C,CN-T,CN-C".split(',')
@@ -1034,7 +1038,7 @@ used_indices = [
 eval_indices = [4,5,6,18,257,272]
 eval_indices = [used_indices.index(idx) for idx in eval_indices]
 
-lftk_df = pd.read_csv('lftk_ids.csv')
+lftk_df = pd.read_csv(os.path.join(_CONST_DIR, 'lftk_ids.csv'))
 
 lftk_types = {row['key']: row['domain'] for i,row in lftk_df.iterrows()}
 type_map.update(lftk_types)

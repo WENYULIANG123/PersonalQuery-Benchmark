@@ -146,19 +146,19 @@ def parse_args():
 
     args = parser.parse_args()
 
-    # ========== 硬编码参数 ==========
+    # ========== 硬编码参数（与 main.py 对齐）==========
     args.do_train = True
     args.data = "ling_conversion"
     args.ckpt_dir = "/home/wlia0047/ar57_scratch/wenyu/lingconv_checkpoints"
     args.model_name = "google/flan-t5-base"
-    args.batch_size = 64  # per_device_train_batch_size
-    args.grad_accumulation = 4  # 有效批次大小 = 64 * 4 = 256
+    args.batch_size = 64  # 与 main.py 一致
+    args.grad_accumulation = 1  # 与 main.py 一致
     args.epochs = 2
-    args.lr = 1e-4  # T5 默认学习率，降低以减少训练不稳定
-    args.max_length = 64  # 减小序列长度，加速训练
+    args.lr = 1e-3  # 与 main.py 一致
+    args.max_length = 200  # 与 main.py 一致
     args.combine_method = "decoder_add_first"
-    args.bf16 = True
-    args.gradient_checkpointing = False  # 关闭，用时间换显存不适合我们
+    args.bf16 = False  # 与 main.py 一致（默认 False）
+    args.gradient_checkpointing = False
     args.warmup_steps = 1000
     args.weight_decay = 1e-2
     args.max_grad_norm = 10.0
@@ -204,68 +204,41 @@ class GPUMonitorCallback(TrainerCallback):
 
 
 # ========================================
-# 数据处理
+# 数据处理 - 使用官方 LingConv 数据加载
 # ========================================
 def load_data(args, tokenizer):
-    """加载ling_conversion数据集，支持缓存"""
-    data_dir = "/home/wlia0047/ar57_scratch/wenyu/ling_conversion_data"
-    cache_dir = os.path.join(os.path.dirname(data_dir), "ling_conversion_data_cache")
+    """加载ling_conversion数据集 - 使用官方数据加载逻辑"""
+    import sys
+    lingconv_path = "/home/wlia0047/ar57/wenyu/LingConv"
+    if lingconv_path not in sys.path:
+        sys.path.insert(0, lingconv_path)
 
-    # 检查缓存是否存在
-    if os.path.exists(cache_dir):
-        print(f"发现缓存，加载缓存数据: {cache_dir}")
-        data = load_from_disk(cache_dir)
-        return data, None, None
+    # 使用官方的 data.py 中的 load_data
+    from data import load_data as official_load_data
 
-    # 无缓存，加载官方数据集 (qqp,mrpc,stsb only)
-    print(f"未发现缓存，从 HuggingFace 加载官方数据集 (qqp,mrpc,stsb)...")
-    from datasets import concatenate_datasets, load_dataset
+    # 设置正确的参数 - 匹配官方 load_data 所需的全部属性
+    args.data_dir = "/home/wlia0047/ar57_scratch/wenyu/ling_conversion_official"
+    args.data = "ling_conversion"
+    args.data_sources = ["qqp", "mrpc", "stsb"]
+    args.src_lng = "ling"
+    args.quantize_lng = False
+    args.quant_nbins = 20
+    args.do_imputation = False
+    args.imputation_percentage = 20
+    args.imputation_seed = 0
+    args.use_ica = False
+    args.n_ica = 10
+    args.lng_ids = None
+    args.max_length = 64
+    args.prepend_prompt = False
+    args.prompt_text = ''
+    args.max_eval_samples = 3000
+    args.seed = 0
+    args.use_lingpred = False
+    args.aug_same = False
 
-    def filter_positive(example):
-        if "label" in example:
-            return example["label"] in [0, 1] and example["label"] >= 1 if "stsb" not in example.get("source", "") else example["label"] >= 3
-        return True
-
-    def normalize_columns(data, source_name):
-        rename_map = {}
-        if "question1" in data.column_names and "question2" in data.column_names:
-            rename_map["question1"] = "sentence1"
-            rename_map["question2"] = "sentence2"
-        if rename_map:
-            data = data.rename_columns(rename_map)
-        if "source" not in data.column_names:
-            data = data.add_column("source", [source_name] * len(data))
-        keep_cols = [c for c in data.column_names if c.startswith("sentence") or c == "source"]
-        return data.remove_columns([c for c in data.column_names if c not in keep_cols])
-
-    # 加载各个数据集
-    datasets = []
-    source_specs = {
-        "qqp": {"keep": lambda x: x["label"] == 1},
-        "mrpc": {"keep": lambda x: x["label"] == 1},
-        "stsb": {"keep": lambda x: x["label"] >= 3.0},
-    }
-
-    for name, spec in source_specs.items():
-        print(f"  加载 {name}...")
-        ds = load_dataset("glue", name, split="train")
-        ds = ds.filter(spec["keep"])
-        ds = normalize_columns(ds, name)
-        datasets.append(ds)
-
-    data = concatenate_datasets(datasets)
-    print(f"  官方数据集样本数: {len(data)}")
-
-    # 分割成 train/dev/test
-    from datasets import DatasetDict
-    train_dev = data.train_test_split(test_size=0.1, seed=42)
-    dev_test = train_dev["test"].train_test_split(test_size=0.5, seed=42)
-    data = DatasetDict({
-        "train": train_dev["train"],
-        "dev": dev_test["train"],
-        "test": dev_test["test"],
-    })
-    print(f"  分割后: train={len(data['train'])}, dev={len(data['dev'])}, test={len(data['test'])}")
+    # 调用官方数据加载
+    data, scaler, _ = official_load_data(args, tokenizer)
 
     def preprocess_function(examples):
         inputs = examples["sentence1"]
@@ -280,12 +253,6 @@ def load_data(args, tokenizer):
         return model_inputs
 
     for split in data.keys():
-        # 添加 linguistic features 占位符
-        if "sentence1_ling" not in data[split].column_names:
-            data[split] = data[split].add_column("sentence1_ling", [[0.0]*40]*len(data[split]))
-        if "sentence2_ling" not in data[split].column_names:
-            data[split] = data[split].add_column("sentence2_ling", [[0.0]*40]*len(data[split]))
-
         data[split] = data[split].map(
             preprocess_function,
             batched=True,
@@ -293,11 +260,9 @@ def load_data(args, tokenizer):
             desc=f"Tokenizing {split}"
         )
 
-    # 保存缓存
-    print(f"保存缓存到: {cache_dir}")
-    data.save_to_disk(cache_dir)
+    print(f"数据加载完成: train={len(data['train'])}, dev={len(data['dev'])}, test={len(data['test'])}")
 
-    return data, None, None
+    return data, scaler, None
 
 
 class LingDataCollator(DataCollatorForSeq2Seq):

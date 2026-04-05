@@ -132,10 +132,6 @@ def prepare_ling(
             raise FileNotFoundError("No train split available to fit the linguistic scaler.")
         train_key = "sentence1_ling" if "sentence1_ling" in data["train"].column_names else "sentence2_ling"
         scaler = _fit_scaler(data["train"][train_key], quantize, n_bins)
-        # 保存训练好的 scaler 以便后续使用
-        if scaler_path:
-            os.makedirs(os.path.dirname(scaler_path), exist_ok=True)
-            joblib.dump(scaler, scaler_path)
 
     def scale(rows):
         output = {"sentence2_ling": scaler.transform(rows["sentence2_ling"])}
