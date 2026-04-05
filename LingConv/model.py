@@ -680,6 +680,78 @@ class EncoderDecoderVAE(LingConvT5ForConditionalGeneration):
         dec_output, _ = self.infer_with_cache(batch)
         return dec_output
 
+    def infer_with_target_ling(self, ling_disc, target_ling, batch, tokenizer, max_iter=10, loss_threshold=1.0):
+        """
+        直接指定目标语言特征，迭代优化生成符合该复杂度的句子。
+
+        Args:
+            ling_disc: 语言判别器模型
+            target_ling: 目标语言特征 (40维 tensor)
+            batch: 输入批次
+            tokenizer: 分词器
+            max_iter: 最大迭代次数
+            loss_threshold: loss 收敛阈值
+
+        Returns:
+            pred: 优化后的生成 token ids
+            info: 迭代信息
+        """
+        from torch.autograd import grad
+
+        interpolations = []
+        target_ling = target_ling.to(self.device)
+
+        def get_loss(param):
+            with torch.enable_grad():
+                # param 是 logits, shape: [batch, seq_len, vocab_size]
+                out = ling_disc(logits=param)  # [batch, ling_dim]
+                loss = F.mse_loss(out, target_ling)
+                pred = param.argmax(-1)  # greedy 解码
+                return loss, pred
+
+        def line_search():
+            eta = 1e3
+            patience = 4
+            while patience > 0:
+                param_ = param - eta * grads
+                with torch.no_grad():
+                    new_loss, _ = get_loss(param_)
+                if new_loss < loss:
+                    return param_
+                eta *= 2.25
+                patience -= 1
+            return False
+
+        # 初始化 logits
+        logits = self.infer_with_cache(batch)[1]['scores']
+        param = torch.nn.Parameter(logits.clone(), requires_grad=True)
+
+        for iteration in range(max_iter):
+            loss, pred = get_loss(param)
+            pred_text = tokenizer.batch_decode(pred.cpu().numpy(), skip_special_tokens=True)[0]
+            interpolations.append(pred_text)
+
+            print(f"  [Iter {iteration+1}] loss={loss.item():.4f} | {pred_text[:60]}...")
+
+            if loss < loss_threshold:
+                print(f"  收敛! loss={loss.item():.4f} < {loss_threshold}")
+                break
+
+            if iteration == max_iter - 1:
+                print(f"  达到最大迭代次数，停止")
+                break
+
+            self.zero_grad()
+            grads = grad(loss, param)[0]
+            new_param = line_search()
+            if new_param is False:
+                print(f"  Line search 失败，停止迭代")
+                break
+            # 确保新 param 也有梯度追踪
+            param = torch.nn.Parameter(new_param.clone().detach(), requires_grad=True)
+
+        return pred, [pred_text, interpolations]
+
     def infer_with_feedback_BP(self, ling_disc, sem_emb, batch, tokenizer):
         from torch.autograd import grad
         interpolations = []
