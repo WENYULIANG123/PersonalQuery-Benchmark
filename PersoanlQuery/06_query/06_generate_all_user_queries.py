@@ -60,7 +60,7 @@ import sys
 sys.path.insert(0, '/home/wlia0047/ar57/wenyu/.claude/skills')
 from llm_client import MiniMaxClient
 
-llm_client = MiniMaxClient(model="MiniMax-M2.7")
+llm_client = MiniMaxClient(model="MiniMax-M2.7-highspeed")
 
 # ============================================================
 # 本地 spaCy 14D 特征提取

@@ -243,6 +243,9 @@ def prepare_inputs_for_generation(
         elif combine_method == 'decoder_add_first':
             sentence2_ling = torch.cat([sentence2_ling,
                 torch.repeat_interleave(torch.zeros_like(sentence2_ling), input_ids.shape[1] - 1, dim=1)], dim = 1)
+        elif combine_method == 'decoder_add':
+            # decoder_add: 每个位置都加，不需要padding，ling特征会broadcast到所有位置
+            pass
         elif combine_method == 'decoder_concat':
             if ling2_only:
                 decoder_inputs_embeds = torch.cat([sentence2_ling, decoder_inputs_embeds], dim=1)
@@ -250,7 +253,13 @@ def prepare_inputs_for_generation(
                 decoder_inputs_embeds = torch.cat([sentence1_ling, sentence2_ling, decoder_inputs_embeds], dim=1)
 
         is_first_step = past_key_values is None or len(past_key_values) == 0
-        if combine_method == 'decoder_add' or (is_first_step and combine_method == 'decoder_add_first'):
+        if combine_method == 'decoder_add':
+            # decoder_add: 每个decoder位置都加ling特征（通过broadcast）
+            if ling2_only:
+                decoder_inputs_embeds = decoder_inputs_embeds + sentence2_ling
+            else:
+                decoder_inputs_embeds = decoder_inputs_embeds + sentence1_ling + sentence2_ling
+        elif combine_method == 'decoder_add_first' and is_first_step:
             if ling2_only:
                 decoder_inputs_embeds = decoder_inputs_embeds + sentence2_ling
             else:
@@ -368,34 +377,40 @@ class EncoderDecoderVAE(LingConvT5ForConditionalGeneration):
         std = torch.exp(0.5 * logvar)
         return mu + std * torch.randn_like(std)
 
-    def _process_ling_embeddings(self, sentence1_ling, sentence2_ling, 
+    def _process_ling_embeddings(self, sentence1_ling, sentence2_ling,
                                sentence1_ling_embed, sentence2_ling_embed, bs):
         """Helper method to process linguistic embeddings"""
         cache = {}
-        
+
         # Process sentence1 embedding
         if sentence1_ling_embed is not None:
             sentence1_ling = sentence1_ling_embed
         elif sentence1_ling is not None:
-            sentence1_ling = self.ling_embed(self.ling_dropout(sentence1_ling))
+            # Cast input to match weight dtype (handles BF16/FP32 mismatch with DeepSpeed)
+            weight_dtype = self.ling_embed.weight.dtype
+            sentence1_ling = self.ling_embed(self.ling_dropout(sentence1_ling.to(weight_dtype)))
         else:
             sentence1_ling = None
-            
+
         # Process sentence2 embedding
         if sentence2_ling_embed is not None:
             sentence2_ling = sentence2_ling_embed
         elif sentence2_ling is not None:
-            sentence2_ling = self.ling_embed(self.ling_dropout(sentence2_ling))
+            # Cast input to match weight dtype (handles BF16/FP32 mismatch with DeepSpeed)
+            weight_dtype = self.ling_embed.weight.dtype
+            sentence2_ling = self.ling_embed(self.ling_dropout(sentence2_ling.to(weight_dtype)))
         else:
             sentence2_ling = None
 
         # Apply VAE if configured
         if self.args.ling_vae and sentence1_ling is not None and sentence2_ling is not None:
-            sentence1_ling = F.leaky_relu(sentence1_ling)
+            # Cast to match weight dtype (handles BF16/FP32 mismatch with DeepSpeed)
+            mu_weight_dtype = self.ling_mu.weight.dtype
+            sentence1_ling = F.leaky_relu(sentence1_ling.to(mu_weight_dtype))
             sent1_mu, sent1_logvar = self.ling_mu(sentence1_ling), self.ling_logvar(sentence1_ling)
             sentence1_ling = self.sample(sent1_mu, sent1_logvar)
 
-            sentence2_ling = F.leaky_relu(sentence2_ling)
+            sentence2_ling = F.leaky_relu(sentence2_ling.to(mu_weight_dtype))
             sent2_mu, sent2_logvar = self.ling_mu(sentence2_ling), self.ling_logvar(sentence2_ling)
             sentence2_ling = self.sample(sent2_mu, sent2_logvar)
             

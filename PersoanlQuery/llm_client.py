@@ -24,7 +24,7 @@ class MiniMaxAnthropicClient:
     def call_with_thinking(
         self,
         prompt: str,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
         temperature: Optional[float] = None,
         max_retries: int = 5,
     ) -> tuple:
@@ -39,7 +39,7 @@ class MiniMaxAnthropicClient:
         if not safe_prompt:
             return "", ""
 
-        safe_max_tokens = max(128, min(int(max_tokens), 4096))
+        safe_max_tokens = max(128, int(max_tokens))
         safe_temp = temperature if temperature is not None else 0.7
 
         for attempt in range(max_retries):

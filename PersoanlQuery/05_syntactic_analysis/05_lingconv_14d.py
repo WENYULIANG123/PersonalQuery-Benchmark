@@ -40,7 +40,7 @@ def main():
     MAX_LENGTH = 200
     BATCH_SIZE = 32
     GRADIENT_ACCUMULATION = 4  # 等效 batch_size = 32 * 4 = 128
-    EPOCHS = 10
+    EPOCHS = 2
     LR = 1e-3
     WARMUP_RATIO = 0.1
     WEIGHT_DECAY = 0.01
@@ -77,14 +77,14 @@ def main():
 
     # 创建模型参数
     class Args:
-        combine_method = "decoder_add_first"
+        combine_method = "decoder_add"
         ling2_only = True
         use_semantic_pooling = False
         sem_loss = False
         disc_loss = False
         combine_weight = 1.0
         hidden_dim = 500
-        lng_dim = 14  # 关键改变：14维特征
+        lng_dim = 13  # 13维特征（无长度相关特征）
         ling_dropout = 0.1
         initializer_range = 0.02
         model_name = MODEL_NAME

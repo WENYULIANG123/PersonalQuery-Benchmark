@@ -15,7 +15,89 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 import spacy
-from deep_translator import GoogleTranslator
+
+# 翻译模型
+import torch
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+
+
+class Translator:
+    """本地翻译模型"""
+    def __init__(self):
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        log_with_timestamp(f"Translator device: {self.device}")
+
+        log_with_timestamp("Loading EN->ZH model...")
+        self.en_zh_tokenizer = AutoTokenizer.from_pretrained("Helsinki-NLP/opus-mt-en-zh")
+        self.en_zh_model = AutoModelForSeq2SeqLM.from_pretrained("Helsinki-NLP/opus-mt-en-zh").to(self.device)
+
+        log_with_timestamp("Loading ZH->EN model...")
+        self.zh_en_tokenizer = AutoTokenizer.from_pretrained("Helsinki-NLP/opus-mt-zh-en")
+        self.zh_en_model = AutoModelForSeq2SeqLM.from_pretrained("Helsinki-NLP/opus-mt-zh-en").to(self.device)
+
+    def translate(self, text: str, src_lang: str, tgt_lang: str) -> Optional[str]:
+        """翻译单个文本"""
+        if src_lang == "en" and tgt_lang == "zh":
+            tokenizer, model = self.en_zh_tokenizer, self.en_zh_model
+        elif src_lang == "zh" and tgt_lang == "en":
+            tokenizer, model = self.zh_en_tokenizer, self.zh_en_model
+        else:
+            raise ValueError(f"Unsupported language pair: {src_lang} -> {tgt_lang}")
+
+        try:
+            inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+            with torch.no_grad():
+                outputs = model.generate(**inputs, max_length=512)
+
+            return tokenizer.decode(outputs[0], skip_special_tokens=True)
+        except Exception as e:
+            log_with_timestamp(f"  [Warning] Translation error: {e}")
+            return None
+
+    def translate_batch(self, texts: list, src_lang: str, tgt_lang: str) -> list:
+        """批量翻译文本"""
+        if src_lang == "en" and tgt_lang == "zh":
+            tokenizer, model = self.en_zh_tokenizer, self.en_zh_model
+        elif src_lang == "zh" and tgt_lang == "en":
+            tokenizer, model = self.zh_en_tokenizer, self.zh_en_model
+        else:
+            raise ValueError(f"Unsupported language pair: {src_lang} -> {tgt_lang}")
+
+        try:
+            inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=512)
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+            with torch.no_grad():
+                outputs = model.generate(**inputs, max_length=512)
+
+            results = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            return results
+        except Exception as e:
+            log_with_timestamp(f"  [Warning] Batch translation error: {e}")
+            return [None] * len(texts)
+
+    def backtranslate_batch(self, texts: list) -> list:
+        """批量回译：EN -> ZH -> EN"""
+        # Step 1: EN -> ZH
+        zh_texts = self.translate_batch(texts, "en", "zh")
+        if not zh_texts or all(t is None for t in zh_texts):
+            return [None] * len(texts)
+
+        # Step 2: ZH -> EN
+        en_texts = self.translate_batch(zh_texts, "zh", "en")
+        return en_texts
+
+
+# 全局翻译器实例
+_translator = None
+
+def get_translator():
+    global _translator
+    if _translator is None:
+        _translator = Translator()
+    return _translator
 
 
 def log_with_timestamp(message: str) -> None:
@@ -197,31 +279,16 @@ def extract_14d_features(text: str, nlp) -> Dict[str, float]:
     }
 
 
-def backtranslate_en2zh2en(sentence: str, max_retries: int = 3) -> Optional[str]:
-    """回译：英文 -> 中文 -> 英文 (使用 Google Translate)"""
-    for attempt in range(max_retries):
-        try:
-            # Step 1: 英文 -> 中文 (简体中文)
-            chinese_text = GoogleTranslator(source='en', target='zh-CN').translate(sentence)
-            if not chinese_text:
-                continue
+def backtranslate_en2zh2en(sentence: str) -> Optional[str]:
+    """回译单个句子：英文 -> 中文 -> 英文 (使用本地翻译模型)"""
+    translator = get_translator()
+    return translator.backtranslate(sentence)
 
-            time.sleep(0.5)  # 避免请求过快
 
-            # Step 2: 中文 -> 英文
-            english_back = GoogleTranslator(source='zh-CN', target='en').translate(chinese_text)
-            if not english_back:
-                continue
-
-            return english_back
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(1)
-                continue
-            log_with_timestamp(f"  [Warning] Back-translation failed: {e}")
-            return None
-
-    return None
+def backtranslate_batch(sentences: list) -> list:
+    """批量回译：英文 -> 中文 -> 英文 (使用本地翻译模型)"""
+    translator = get_translator()
+    return translator.backtranslate_batch(sentences)
 
 
 def main() -> None:
@@ -229,7 +296,7 @@ def main() -> None:
     STAGE0_DIR = "/fs04/ar57/wenyu/result/personal_query/00_data_preparation"
     OUTPUT_DIR = "/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis/user_sentences"
     TARGET_SENTENCES = 10     # 每个用户收集的句子数
-    MAX_USERS = 10            # 最大用户数
+    MAX_USERS = None          # 最大用户数（None表示处理所有用户）
 
     import shutil
     if os.path.isdir(OUTPUT_DIR):
@@ -268,71 +335,110 @@ def main() -> None:
     log_with_timestamp("Loading spaCy model for 14D feature extraction...")
     nlp = spacy.load("en_core_web_sm")
 
-    # 收集所有用户数据
+    # 加载翻译模型
+    log_with_timestamp("Loading translation models...")
+    translator = get_translator()
+
+    # 串行处理所有用户
     all_users_data = []
     success_count = 0
 
-    for idx, user_id in enumerate(selected_user_ids, start=1):
-        log_with_timestamp(f"[{idx}/{len(selected_user_ids)}] Processing user {user_id}...")
+    # 每批处理10个用户（100个句子）
+    BATCH_USERS = 1
+    BATCH_SENTENCES = BATCH_USERS * 10  # 100
 
-        # 直接读取 Stage 0 输出的用户评论文件
-        user_review_file = os.path.join(STAGE0_DIR, f"reviews_{user_id}.json")
-        if not os.path.exists(user_review_file):
-            log_with_timestamp(f"  User file not found: {user_review_file}, skip")
+    for batch_start in range(0, len(selected_user_ids), BATCH_USERS):
+        batch_end = min(batch_start + BATCH_USERS, len(selected_user_ids))
+        batch_user_ids = selected_user_ids[batch_start:batch_end]
+        batch_idx = batch_start + 1
+        log_with_timestamp(f"[{batch_idx}/{len(selected_user_ids)}] Processing users {batch_start+1}-{batch_end} ({len(batch_user_ids)} users)...")
+
+        # 收集本批次所有用户的句子
+        batch_sents = []  # 所有句子
+        batch_user_indices = []  # 每个句子属于哪个用户(0-9)
+        batch_user_sents_count = []  # 每个用户收集到的句子数
+
+        for user_id in batch_user_ids:
+            user_review_file = os.path.join(STAGE0_DIR, f"reviews_{user_id}.json")
+            if not os.path.exists(user_review_file):
+                batch_user_sents_count.append(0)
+                continue
+
+            with open(user_review_file, "r", encoding="utf-8") as f:
+                user_data = json.load(f)
+
+            all_long_sentences = []
+            results = user_data.get("results", [])
+            for result in results:
+                target_reviews = result.get("target_reviews", [])
+                for review_text in target_reviews:
+                    long_sents = extract_long_sentences(review_text, 20)
+                    all_long_sentences.extend(long_sents)
+
+            selected_sents = all_long_sentences[:10] if len(all_long_sentences) >= 10 else all_long_sentences
+            batch_user_sents_count.append(len(selected_sents))
+
+            for sent in selected_sents:
+                batch_sents.append(sent)
+                batch_user_indices.append(len(batch_user_sents_count) - 1)
+
+        # 跳过句子数不足的用户
+        valid_mask = [count >= 10 for count in batch_user_sents_count]
+        if not any(valid_mask):
+            log_with_timestamp(f"  No valid users in this batch, skip")
             continue
 
-        with open(user_review_file, "r", encoding="utf-8") as f:
-            user_data = json.load(f)
+        # 批量计算原句特征
+        orig_features_list = [extract_14d_features(sent, nlp) for sent in batch_sents]
 
-        # 从 target_reviews 中提取长句子
-        all_long_sentences = []
-        results = user_data.get("results", [])
-        for result in results:
-            target_reviews = result.get("target_reviews", [])
-            for review_text in target_reviews:
-                long_sents = extract_long_sentences(review_text, 20)  # MIN_WORDS = 20
-                all_long_sentences.extend(long_sents)
+        # 批量回译所有句子
+        backtrans_sents = backtranslate_batch(batch_sents)
 
-        if len(all_long_sentences) < TARGET_SENTENCES:
-            log_with_timestamp(f"  User {user_id} only has {len(all_long_sentences)} long sentences, skip")
-            continue
+        # 批量计算回译句特征
+        backtrans_features_list = []
+        for bt in backtrans_sents:
+            if bt:
+                backtrans_features_list.append(extract_14d_features(bt, nlp))
+            else:
+                backtrans_features_list.append(None)
 
-        selected_sents = all_long_sentences[:TARGET_SENTENCES]
+        # 按用户组装结果
+        user_idx = 0
+        sent_idx = 0
+        for user_id in batch_user_ids:
+            if batch_user_sents_count[user_idx] < 10:
+                user_idx += 1
+                continue
 
-        # 为每个句子计算14维特征，并进行回译
-        sentences_with_features = []
-        for sent_idx, sent in enumerate(selected_sents):
-            log_with_timestamp(f"  [{sent_idx+1}/{len(selected_sents)}] Processing sentence...")
-            features = extract_14d_features(sent, nlp)
+            num_sents = batch_user_sents_count[user_idx]
+            user_sents = batch_sents[sent_idx:sent_idx + num_sents]
+            user_orig_features = orig_features_list[sent_idx:sent_idx + num_sents]
+            user_bt_sents = backtrans_sents[sent_idx:sent_idx + num_sents]
+            user_bt_features = backtrans_features_list[sent_idx:sent_idx + num_sents]
 
-            # 回译：英->中->英
-            log_with_timestamp(f"    Back-translating...")
-            backtrans_sent = backtranslate_en2zh2en(sent)
+            sentences_with_features = []
+            for i, sent in enumerate(user_sents):
+                sentence_data = {
+                    "sentence": sent,
+                    "features_14d": user_orig_features[i],
+                }
+                if user_bt_sents[i]:
+                    sentence_data["backtrans_sentence"] = user_bt_sents[i]
+                    sentence_data["backtrans_features_14d"] = user_bt_features[i]
+                sentences_with_features.append(sentence_data)
 
-            # 为回译句子计算14维特征
-            backtrans_features = None
-            if backtrans_sent:
-                backtrans_features = extract_14d_features(backtrans_sent, nlp)
-                log_with_timestamp(f"    Original: {sent[:60]}...")
-                log_with_timestamp(f"    Backtrans: {backtrans_sent[:60]}...")
+            all_users_data.append({
+                "user_id": user_id,
+                "long_sentence_count": user_counts[user_id],
+                "product_count": user_product_counts[user_id],
+                "sentences": sentences_with_features,
+            })
+            success_count += 1
 
-            sentence_data = {
-                "sentence": sent,
-                "features_14d": features,
-            }
-            if backtrans_sent:
-                sentence_data["backtrans_sentence"] = backtrans_sent
-                sentence_data["backtrans_features_14d"] = backtrans_features
+            sent_idx += num_sents
+            user_idx += 1
 
-            sentences_with_features.append(sentence_data)
-
-        all_users_data.append({
-            "user_id": user_id,
-            "long_sentence_count": user_counts[user_id],
-            "product_count": user_product_counts[user_id],
-            "sentences": sentences_with_features,
-        })
-        success_count += 1
+        log_with_timestamp(f"  -> Completed users {batch_start+1}-{batch_end}")
 
     # 保存到合并文件
     merged_output = {
@@ -342,8 +448,9 @@ def main() -> None:
         "selection_criteria": {
             "min_words": 20,
             "min_long_sentences": 10,
-            "target_sentences_per_user": TARGET_SENTENCES,
+            "target_sentences_per_user": 10,
             "max_users": MAX_USERS,
+            "batch_size_users": BATCH_USERS,
         },
         "total_selected": len(selected_user_ids),
         "successfully_collected": success_count,
