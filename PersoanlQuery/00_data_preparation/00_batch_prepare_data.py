@@ -100,12 +100,11 @@ def build_user_output(
     user_asins: Set[str],
     user_product_titles: Dict[str, str],
     asin_reviews: Dict[str, List[Dict]],
-    output_dir: str,
     min_words: int = 25,
-) -> None:
+) -> dict:
     """
     收集用户的所有长句子（词数 >= min_words），按商品组织输出。
-    输出格式兼容 Stage 5：使用 target_reviews 字段存储完整评论文本。
+    返回用户数据字典，不写文件。
     """
     results = []
     for asin in sorted(user_asins):
@@ -142,19 +141,16 @@ def build_user_output(
         "total_products": len(results),
         "results": results,
     }
-
-    output_file = os.path.join(output_dir, f"reviews_{user_id}.json")
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(output_data, f, indent=2, ensure_ascii=False)
+    return output_data
 
 
 def main() -> None:
     # ============ 硬编码参数 ============
     REVIEW_FILE = "/fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/Arts_Crafts_and_Sewing.json.gz"
     OUTPUT_DIR = "/fs04/ar57/wenyu/result/personal_query/00_data_preparation"
-    MIN_WORDS = 20            # 每句话最少词数
+    MIN_WORDS = 15            # 每句话最少词数
     MIN_LONG_SENTENCES = 10  # 每个用户最少长句子数（词数 >= MIN_WORDS）
-    MAX_USERS = 10000         # 最大用户数（0表示不限制）
+    MAX_USERS = 0         # 最大用户数（0表示不限制）
 
     if os.path.isdir(OUTPUT_DIR):
         log_with_timestamp(f"Removing existing output directory: {OUTPUT_DIR}")
@@ -192,16 +188,23 @@ def main() -> None:
     )
 
     log_with_timestamp(f"Preparing output for {len(selected_user_ids)} users...")
+    all_users_data = []
     for idx, user_id in enumerate(sorted(selected_user_ids), start=1):
         log_with_timestamp(f"[{idx}/{len(selected_user_ids)}] Processing user {user_id}...")
-        build_user_output(
+        user_data = build_user_output(
             user_id=user_id,
             user_asins=user_products.get(user_id, set()),
             user_product_titles=user_product_titles.get(user_id, {}),
             asin_reviews=asin_reviews,
-            output_dir=OUTPUT_DIR,
             min_words=MIN_WORDS,
         )
+        all_users_data.append(user_data)
+
+    # 写入单个JSON文件
+    OUTPUT_FILE = os.path.join(OUTPUT_DIR, "all_users_reviews.json")
+    log_with_timestamp(f"Writing all users to single file: {OUTPUT_FILE}")
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        json.dump({"users": all_users_data}, f, ensure_ascii=False)
 
     selected_users_file = os.path.join(OUTPUT_DIR, "selected_users.json")
     selected_users = [
@@ -233,6 +236,7 @@ def main() -> None:
     log_with_timestamp("Stage 0 Complete")
     log_with_timestamp(f"Selected users: {len(selected_users)}")
     log_with_timestamp(f"Output directory: {OUTPUT_DIR}")
+    log_with_timestamp(f"All users file: {OUTPUT_FILE}")
     log_with_timestamp(f"User list: {selected_users_file}")
     log_with_timestamp("=" * 80)
 

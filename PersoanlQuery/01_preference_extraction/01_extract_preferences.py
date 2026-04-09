@@ -937,15 +937,14 @@ def main():
     log_with_timestamp("")
     log_with_timestamp("🔍 读取 Stage 0 用户评论数据...")
 
-    # 读取所有 Stage 0 用户评论文件
+    # 读取单一用户评论文件
     reviewed_asins = set()
     asin_to_users = {}  # asin -> list of user_ids
-    user_review_files = [f for f in os.listdir(STAGE0_DIR) if f.startswith('reviews_') and f.endswith('.json')]
+    all_users_file = os.path.join(STAGE0_DIR, 'all_users_reviews.json')
 
-    for filename in user_review_files:
-        filepath = os.path.join(STAGE0_DIR, filename)
-        with open(filepath, 'r', encoding='utf-8') as f:
-            user_data = json.load(f)
+    with open(all_users_file, 'r', encoding='utf-8') as f:
+        all_users_data = json.load(f)
+        for user_data in all_users_data.get('users', []):
             user_id = user_data['user_id']
             for product in user_data.get('results', []):
                 asin = product.get('asin', '')
@@ -1119,6 +1118,30 @@ def main():
     for i, item in enumerate(matched_results[:3]):
         p = item['product']
         log_with_timestamp(f"  {i+1}. user={item['user_id']}, asin={p.get('asin')}, brand={p.get('A2_brand')}, type={p.get('A1_product_type')}")
+
+    # ========== 生成匹配用户的过滤后评论文件 ==========
+    log_with_timestamp("")
+    log_with_timestamp("=" * 80)
+    log_with_timestamp("🔄 生成匹配用户的过滤后评论文件...")
+
+    # 获取成功匹配的用户ID集合
+    matched_user_ids = set(item['user_id'] for item in matched_results)
+
+    # 只保留匹配用户，保留所有原始商品（不过滤商品）
+    filtered_users = []
+    for user_data in all_users_data.get('users', []):
+        user_id = user_data['user_id']
+        if user_id not in matched_user_ids:
+            continue  # 跳过未匹配用户
+
+        filtered_users.append(user_data)  # 保留用户的所有原始数据
+
+    # 保存过滤后的用户文件
+    STAGE1_FILTERED_FILE = os.path.join(os.path.dirname(OUTPUT_FILE), 'stage1_filtered_users_reviews.json')
+    log_with_timestamp(f"💾 保存过滤后用户文件到: {STAGE1_FILTERED_FILE}")
+    with open(STAGE1_FILTERED_FILE, 'w', encoding='utf-8') as f:
+        json.dump({'users': filtered_users}, f, ensure_ascii=False, indent=2)
+    log_with_timestamp(f"  匹配用户数: {len(filtered_users)}")
 
     log_with_timestamp("")
     log_with_timestamp("=" * 80)
