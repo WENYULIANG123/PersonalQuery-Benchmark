@@ -1013,7 +1013,7 @@ class BatchedLazyRetrieverWrapper(LazyRetrieverWrapper):
 # ========== retriever_manager.py ==========
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
-DENSE_RETRIEVERS = ['e5', 'bge', 'dense', 'ance', 'minilm', 'mpnet', 'star', 'colbert', 'gritlm']
+DENSE_RETRIEVERS = ['e5', 'bge', 'dense', 'ance', 'minilm', 'mpnet', 'star', 'gritlm']
 
 log_with_timestamp = lambda msg: print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
@@ -1065,7 +1065,6 @@ class RetrieverManager:
             'minilm': retrievers.MiniLMRetriever,
             'mpnet': retrievers.MPNetRetriever,
             'star': retrievers.STARRetriever,
-            'colbert': retrievers.ColBERTRetriever,
             'gritlm': retrievers.GritLMRetriever
         }
     
@@ -1497,7 +1496,7 @@ DEFAULT_K_VALUES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 100]
 
 RETRIEVER_TYPES = {
     'sparse': ['bm25'],
-    'dense': ['bge', 'e5', 'minilm', 'star', 'colbert', 'gritlm'],
+    'dense': ['bge', 'e5', 'minilm', 'star', 'gritlm'],
     'late': []
 }
 
