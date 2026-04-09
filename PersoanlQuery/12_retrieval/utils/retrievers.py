@@ -235,6 +235,9 @@ class DenseRetriever:
             from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer(self.model_name, device=self.device)
             log_with_timestamp(f"  Using device: {self.device}")
+            model_path = self.model.tokenizer.name_or_path
+            log_with_timestamp(f"  Model path: {model_path}")
+            log_with_timestamp(f"  HF_HOME: {os.environ.get('HF_HOME', 'not set')}")
         return self.model
 
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
@@ -326,6 +329,9 @@ class E5Retriever:
             log_with_timestamp(f"  Loading E5 model: {self.model_name}")
             from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer(self.model_name, device=self.device)
+            model_path = self.model.tokenizer.name_or_path
+            log_with_timestamp(f"  Model path: {model_path}")
+            log_with_timestamp(f"  HF_HOME: {os.environ.get('HF_HOME', 'not set')}")
         return self.model
 
     def _add_instruction(self, text: str, is_query: bool = False) -> str:
@@ -536,6 +542,9 @@ class BGERetriever:
             log_with_timestamp(f"  Loading BGE model: {self.model_name}")
             from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer(self.model_name, device=self.device)
+            model_path = self.model.tokenizer.name_or_path
+            log_with_timestamp(f"  Model path: {model_path}")
+            log_with_timestamp(f"  HF_HOME: {os.environ.get('HF_HOME', 'not set')}")
         return self.model
 
     def _add_instruction(self, text: str, is_query: bool = False) -> str:
@@ -1143,6 +1152,8 @@ class GritLMRetriever:
                 torch.backends.cudnn.allow_tf32 = True
                 
             log_with_timestamp(f"  GritLM loaded on {self.device}")
+            log_with_timestamp(f"  Model name: {self.model_name}")
+            log_with_timestamp(f"  HF_HOME: {os.environ.get('HF_HOME', 'not set')}")
         return self.model
 
     def _encode_text(self, text: str) -> torch.Tensor:
@@ -1668,6 +1679,9 @@ class FAISSRetriever:
             from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer(self.model_name, device=self.device)
             log_with_timestamp(f"  Using device: {self.device}")
+            model_path = self.model.tokenizer.name_or_path
+            log_with_timestamp(f"  Model path: {model_path}")
+            log_with_timestamp(f"  HF_HOME: {os.environ.get('HF_HOME', 'not set')}")
         return self.model
 
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):

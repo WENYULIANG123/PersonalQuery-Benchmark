@@ -36,8 +36,8 @@ sys.path.insert(0, str(retrieval_root))
 sys.path.insert(0, str(personquery_root))
 
 from utils.retrievers import (
-    ANCERetriever, DenseRetriever, E5Retriever, BGERetriever,
-    STARRetriever, MiniLMRetriever, MPNetRetriever
+    E5Retriever, BGERetriever,
+    STARRetriever, MiniLMRetriever, GritLMRetriever
 )
 
 STAGE9_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/09_targeted_noisy_query"
@@ -47,13 +47,12 @@ PERSONA_GENERATED_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_quer
 CACHE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/12_retrieval/query_cache"
 
 AVAILABLE_RETRIEVERS = {
-    'ANCE': ANCERetriever,
-    'Dense': DenseRetriever,
-    'E5': E5Retriever,
     'BGE': BGERetriever,
-    'STAR': STARRetriever,
+    'E5': E5Retriever,
     'MiniLM': MiniLMRetriever,
-    'MPNet': MPNetRetriever,
+    'STAR': STARRetriever,
+    'GRITLM': GritLMRetriever,
+    'BM25': None,  # BM25 不需要预计算查询嵌入
 }
 
 def log_with_timestamp(msg: str):
@@ -697,13 +696,17 @@ def generate_cache_for_all_retrievers(
 
 def main():
     # ==================== 硬编码配置 ====================
-    # 检索器列表：默认使用所有可用检索器
-    RETRIEVER_NAMES = ['ANCE', 'Dense', 'E5', 'BGE', 'STAR', 'MiniLM', 'MPNet']
+    # 检索器列表：核心5个 + GritLM
+    RETRIEVER_NAMES = ['BGE', 'E5', 'MiniLM', 'STAR', 'GRITLM']
     # 是否清理旧缓存
     CLEAR_CACHE_BEFORE = True
     # 数据源：persona_generated_queries.json
     PERSONA_SOURCE = True
     # =================================================
+
+    # 打印环境变量
+    log_with_timestamp(f"HF_HOME: {os.environ.get('HF_HOME', 'not set')}")
+    log_with_timestamp(f"TRANSFORMERS_CACHE: {os.environ.get('TRANSFORMERS_CACHE', 'not set')}")
 
     if PERSONA_SOURCE:
         log_with_timestamp("📋 使用 persona_generated_queries.json 作为数据源")

@@ -64,7 +64,7 @@ def compute_document_hash(documents: List[Dict]) -> str:
 
 def get_cache_paths(retriever_name: str, doc_hash: str, cache_dir: str) -> Dict[str, str]:
     """Get cache file paths for a retriever"""
-    DENSE_RETRIEVERS = ['dense', 'ance', 'bge', 'e5', 'minilm', 'mpnet', 'star', 'multi_qa_minilm']
+    DENSE_RETRIEVERS = ['bge', 'e5', 'minilm', 'star', 'gritlm']
     
     if retriever_name in DENSE_RETRIEVERS:
         base_path = os.path.join(cache_dir, f"{retriever_name}_{doc_hash}")
@@ -82,7 +82,7 @@ def get_cache_paths(retriever_name: str, doc_hash: str, cache_dir: str) -> Dict[
 
 def cache_exists(retriever_name: str, doc_hash: str, cache_dir: str) -> bool:
     """Check if retriever cache already exists"""
-    DENSE_RETRIEVERS = ['dense', 'ance', 'bge', 'e5', 'minilm', 'mpnet', 'star', 'multi_qa_minilm']
+    DENSE_RETRIEVERS = ['bge', 'e5', 'minilm', 'star', 'gritlm']
     
     if retriever_name in DENSE_RETRIEVERS:
         paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
@@ -162,7 +162,7 @@ def _normalize_embeddings_for_save(embeddings, retriever_name: str) -> np.ndarra
 
 def save_retriever_to_cache(retriever_name: str, doc_hash: str, retriever: object, cache_dir: str) -> bool:
     """Save retriever to disk cache. Returns True if successful."""
-    DENSE_RETRIEVERS = ['dense', 'ance', 'bge', 'e5', 'minilm', 'mpnet', 'star', 'multi_qa_minilm']
+    DENSE_RETRIEVERS = ['bge', 'e5', 'minilm', 'star', 'gritlm']
     
     log_with_timestamp(f"[DEBUG] save_retriever_to_cache called for {retriever_name}")
     
@@ -241,12 +241,6 @@ def build_retriever(retriever_name: str, documents: List[Dict], doc_hash: str, c
         if retriever_name == 'bm25':
             retriever = retrievers.BM25()
             log_with_timestamp(f"[DEBUG] BM25 instance created")
-        elif retriever_name == 'dense':
-            retriever = retrievers.DenseRetriever()
-            log_with_timestamp(f"[DEBUG] DenseRetriever instance created")
-        elif retriever_name == 'ance':
-            retriever = retrievers.ANCERetriever()
-            log_with_timestamp(f"[DEBUG] ANCERetriever instance created")
         elif retriever_name == 'bge':
             retriever = retrievers.BGERetriever()
             log_with_timestamp(f"[DEBUG] BGERetriever instance created")
@@ -256,15 +250,12 @@ def build_retriever(retriever_name: str, documents: List[Dict], doc_hash: str, c
         elif retriever_name == 'minilm':
             retriever = retrievers.MiniLMRetriever()
             log_with_timestamp(f"[DEBUG] MiniLMRetriever instance created")
-        elif retriever_name == 'multi_qa_minilm':
-            retriever = retrievers.MultiQAMiniLMRetriever()
-            log_with_timestamp(f"[DEBUG] MultiQAMiniLMRetriever instance created")
-        elif retriever_name == 'mpnet':
-            retriever = retrievers.MPNetRetriever()
-            log_with_timestamp(f"[DEBUG] MPNetRetriever instance created")
         elif retriever_name == 'star':
             retriever = retrievers.STARRetriever()
             log_with_timestamp(f"[DEBUG] STARRetriever instance created")
+        elif retriever_name == 'gritlm':
+            retriever = retrievers.GritLMRetriever()
+            log_with_timestamp(f"[DEBUG] GritLMRetriever instance created")
         else:
             return False, f"Unknown retriever type: {retriever_name}"
         
@@ -340,9 +331,9 @@ def main():
     log_with_timestamp(f"Cache directory: {cache_dir}")
     
     # Define retrievers to build
-    DENSE_RETRIEVERS = ['dense', 'ance', 'bge', 'e5', 'minilm', 'multi_qa_minilm', 'mpnet', 'star']
+    DENSE_RETRIEVERS = ['bge', 'e5', 'minilm', 'star', 'gritlm']
     SPARSE_RETRIEVERS = ['bm25']
-    ALL_RETRIEVERS = DENSE_RETRIEVERS + SPARSE_RETRIEVERS
+    ALL_RETRIEVERS = DENSE_RETRIEVERS + SPARSE_RETRIEVERS  # ['bge', 'e5', 'minilm', 'star', 'gritlm', 'bm25']
     
     log_with_timestamp(f"\nBuilding {len(ALL_RETRIEVERS)} retrievers:")
     log_with_timestamp(f"  Dense: {DENSE_RETRIEVERS}")
