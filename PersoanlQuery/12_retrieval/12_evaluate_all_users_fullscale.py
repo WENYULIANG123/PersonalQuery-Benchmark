@@ -607,14 +607,14 @@ class LazyRetrieverProxy:
         self._actual_retriever = None
         self._loaded = False
         
-        log_with_timestamp(f"[PROXY_CREATE] Created lazy proxy for {retriever_name}")
+        # log_with_timestamp(f"[PROXY_CREATE] Created lazy proxy for {retriever_name}")
     
     def _load_actual_retriever(self):
         """真正加载retriever的地方"""
         if self._loaded:
             return
         
-        log_with_timestamp(f"[PROXY_LOAD_START] Loading actual retriever: {self.retriever_name}")
+        # log_with_timestamp(f"[PROXY_LOAD_START] Loading actual retriever: {self.retriever_name}")
         
         self._actual_retriever = self.retriever_manager.get_retriever(
             self.retriever_name,
@@ -624,7 +624,7 @@ class LazyRetrieverProxy:
         )
         
         self._loaded = True
-        log_with_timestamp(f"[PROXY_LOAD_DONE] {self.retriever_name} loaded (type={type(self._actual_retriever).__name__})")
+        # log_with_timestamp(f"[PROXY_LOAD_DONE] {self.retriever_name} loaded (type={type(self._actual_retriever).__name__})")
     
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """
@@ -642,7 +642,7 @@ class LazyRetrieverProxy:
         # 检查 embeddings 列表中的 None 值
         if hasattr(retriever, 'doc_embeddings') and isinstance(retriever.doc_embeddings, list) and any(e is None for e in retriever.doc_embeddings):
             non_none_count = sum(1 for e in retriever.doc_embeddings if e is not None)
-            log_with_timestamp(f"[PROXY_WARN] {self.retriever_name}: {non_none_count}/{len(retriever.doc_embeddings)} embeddings are valid")
+            # log_with_timestamp(f"[PROXY_WARN] {self.retriever_name}: {non_none_count}/{len(retriever.doc_embeddings)} embeddings are valid")
         
         return retriever.search(query, top_k)
     
@@ -1013,7 +1013,7 @@ class BatchedLazyRetrieverWrapper(LazyRetrieverWrapper):
 # ========== retriever_manager.py ==========
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
-DENSE_RETRIEVERS = ['e5', 'bge', 'dense', 'ance', 'minilm', 'mpnet', 'star']
+DENSE_RETRIEVERS = ['e5', 'bge', 'dense', 'ance', 'minilm', 'mpnet', 'star', 'colbert', 'gritlm']
 
 log_with_timestamp = lambda msg: print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
@@ -1065,7 +1065,8 @@ class RetrieverManager:
             'minilm': retrievers.MiniLMRetriever,
             'mpnet': retrievers.MPNetRetriever,
             'star': retrievers.STARRetriever,
-            'colbert': retrievers.ColBERTRetriever
+            'colbert': retrievers.ColBERTRetriever,
+            'gritlm': retrievers.GritLMRetriever
         }
     
     def _compute_document_hash(self, documents: List[Dict]) -> str:
@@ -1185,39 +1186,39 @@ class RetrieverManager:
         if retriever_name not in self._available_retrievers:
             raise ValueError(f"Unknown retriever: {retriever_name}")
         
-        log_with_timestamp(f"[GET_RETRIEVER] Getting {retriever_name} with {len(documents)} documents")
+        # log_with_timestamp(f"[GET_RETRIEVER] Getting {retriever_name} with {len(documents)} documents")
         doc_hash = self._compute_document_hash(documents)
-        log_with_timestamp(f"[GET_RETRIEVER_HASH] Computed doc_hash: {doc_hash}")
+        # log_with_timestamp(f"[GET_RETRIEVER_HASH] Computed doc_hash: {doc_hash}")
         cache_key = f"{retriever_name}_{doc_hash}"
-        log_with_timestamp(f"[GET_RETRIEVER_KEY] Cache key: {cache_key}")
+        # log_with_timestamp(f"[GET_RETRIEVER_KEY] Cache key: {cache_key}")
         
         with self._cache_lock:
-            log_with_timestamp(f"[GET_RETRIEVER_LOCK] Acquired cache lock")
+            # log_with_timestamp(f"[GET_RETRIEVER_LOCK] Acquired cache lock")
             if cache_key in self._retrievers:
-                log_with_timestamp(f"[GET_RETRIEVER_MEMORY_HIT] Using {retriever_name} from memory cache")
+                # log_with_timestamp(f"[GET_RETRIEVER_MEMORY_HIT] Using {retriever_name} from memory cache")
                 return self._retrievers[cache_key]
             
-            log_with_timestamp(f"[GET_RETRIEVER_MEMORY_MISS] Not in memory cache, checking disk...")
+            # log_with_timestamp(f"[GET_RETRIEVER_MEMORY_MISS] Not in memory cache, checking disk...")
             cached_retriever = self._load_from_cache(retriever_name, doc_hash)
-            log_with_timestamp(f"[GET_RETRIEVER_DISK_RESULT] _load_from_cache returned: {type(cached_retriever).__name__ if cached_retriever else 'None'}")
+            # log_with_timestamp(f"[GET_RETRIEVER_DISK_RESULT] _load_from_cache returned: {type(cached_retriever).__name__ if cached_retriever else 'None'}")
             if cached_retriever is not None:
-                log_with_timestamp(f"[CACHE_LOADED] Using cached {retriever_name}")
+                # log_with_timestamp(f"[CACHE_LOADED] Using cached {retriever_name}")
                 
                 if hasattr(cached_retriever, '_embeddings_path') and cached_retriever._embeddings_path:
                     if cached_retriever.doc_embeddings is None:
-                        log_with_timestamp(f"[EMBEDDINGS_LOAD] {retriever_name} loading from mmap, making writable copy")
+                        # log_with_timestamp(f"[EMBEDDINGS_LOAD] {retriever_name} loading from mmap, making writable copy")
                         try:
                             embeddings_mmap = np.load(cached_retriever._embeddings_path, mmap_mode='r')
-                            log_with_timestamp(f"[EMBEDDINGS_SIZE] Shape: {embeddings_mmap.shape}")
+                            # log_with_timestamp(f"[EMBEDDINGS_SIZE] Shape: {embeddings_mmap.shape}")
                             embeddings_tensor = torch.from_numpy(embeddings_mmap).float().clone()
                             
                             device = 'cuda' if torch.cuda.is_available() else 'cpu'
                             embeddings_tensor = embeddings_tensor.to(device)
                             cached_retriever.doc_embeddings = embeddings_tensor
                             
-                            log_with_timestamp(f"[EMBEDDINGS_READY] Shape: {embeddings_tensor.shape}, device: {device}")
+                            # log_with_timestamp(f"[EMBEDDINGS_READY] Shape: {embeddings_tensor.shape}, device: {device}")
                         except Exception as e:
-                            log_with_timestamp(f"[EMBEDDINGS_FAIL] {str(e)[:200]}")
+                            # log_with_timestamp(f"[EMBEDDINGS_FAIL] {str(e)[:200]}")
                             raise RuntimeError(f"Failed to load embeddings for {retriever_name}: {e}")
                 
                 self._retrievers[cache_key] = cached_retriever
@@ -1328,7 +1329,7 @@ def _print_metrics_summary(retriever_name: str, user_id: str, mode: str, metrics
         log_progress(f"      Robustness: {robustness:.1%}")
 
 
-def _print_retriever_summary(retriever_name: str, user_ids: List[str], output_dir: str, logger):
+def _print_retriever_summary(retriever_name: str, user_ids: List[str], output_dir: str, logger, retriever_all_user_results: List[Dict] = None):
     """汇总并打印一个检索器对所有用户的评估结果，同时保存到单个JSON文件"""
     # 加载 persona 文件获取每个用户的 relcl_count
     user_relcl_map = {}
@@ -1343,31 +1344,32 @@ def _print_retriever_summary(retriever_name: str, user_ids: List[str], output_di
         except Exception:
             pass
 
+    # 使用传入的retriever_all_user_results，不再从文件读取
+    if retriever_all_user_results is None:
+        retriever_all_user_results = []
+
     # 收集所有用户的metrics
     all_metrics_list = []
     all_user_results = []
     user_relcl_groups = {0: [], 1: [], 2: []}  # 按 relcl_count 分组
 
-    for user_id in user_ids:
-        result_file = os.path.join(output_dir, user_id, f"retrieval_{retriever_name}_persona_fullscale.json")
-        if os.path.exists(result_file):
-            try:
-                with open(result_file, 'r') as f:
-                    data = json.load(f)
-                    metrics = data.get('metrics', {})
-                    all_metrics_list.append(metrics)
-                    all_user_results.append({
-                        'user_id': user_id,
-                        'num_queries': data.get('num_queries', 0),
-                        'metrics': metrics,
-                        'relcl_count': user_relcl_map.get(user_id, 0)
-                    })
-                    # 按 relcl_count 分组
-                    relcl = user_relcl_map.get(user_id, 0)
-                    if relcl in user_relcl_groups:
-                        user_relcl_groups[relcl].append(metrics)
-            except Exception:
-                pass
+    for ur in retriever_all_user_results:
+        user_id = ur.get('user_id', '')
+        metrics = ur.get('metrics', {})
+        query_results = ur.get('query_results', [])
+        relcl = user_relcl_map.get(user_id, 0)
+
+        all_metrics_list.append(metrics)
+        all_user_results.append({
+            'user_id': user_id,
+            'num_queries': ur.get('num_queries', 0),
+            'metrics': metrics,
+            'relcl_count': relcl,
+            'query_results': query_results  # 包含top10结果
+        })
+        # 按 relcl_count 分组
+        if relcl in user_relcl_groups:
+            user_relcl_groups[relcl].append(metrics)
 
     if not all_metrics_list:
         logger.warning(f"  [{retriever_name.upper()}] No metrics found for summary")
@@ -1487,17 +1489,16 @@ LOG_FILE = "/home/wlia0047/ar57/wenyu/stage12_fullscale_evaluation.log"
 ERR_FILE = "/home/wlia0047/ar57/wenyu/stage12_fullscale_evaluation.err"
 
 RETRIEVER_NAMES = [
-    'bm25', 'dirichlet',
-    'dense', 'ance', 'bge', 'e5', 'minilm', 'mpnet', 'star',
-    'colbert'
+    'bm25',
+    'bge', 'e5', 'minilm', 'star', 'colbert', 'gritlm'
 ]
 
 DEFAULT_K_VALUES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 100]
 
 RETRIEVER_TYPES = {
     'sparse': ['bm25'],
-    'dense': ['dense', 'ance', 'bge', 'e5', 'minilm', 'mpnet', 'star'],
-    'late': []  # ['colbert']  ← 暂时禁用 ColBERT 评估
+    'dense': ['bge', 'e5', 'minilm', 'star', 'colbert', 'gritlm'],
+    'late': []
 }
 
 RETRIEVER_ORDER = ['sparse', 'dense']
@@ -1725,33 +1726,33 @@ def _evaluate_single_mode(retriever, retriever_name: str, user_id: str, mode: st
             'query_type': 'target_user',
             'metrics': metrics
         }
-        
-        user_output_dir = os.path.join(output_dir, user_id)
-        os.makedirs(user_output_dir, exist_ok=True)
-        
-        # 保存metrics文件（已有）
-        output_file = os.path.join(user_output_dir, f"retrieval_{retriever_name}_{mode}_fullscale.json")
-        with open(output_file, 'w') as f:
-            json.dump(output_data, f, indent=2)
-        
-        # 保存top10结果文件（新增）
-        if query_results:
-            top10_output_file = os.path.join(user_output_dir, f"retrieval_{retriever_name}_{mode}_top10_results.json")
-            top10_data = {
-                'user_id': user_id,
-                'retriever': retriever_name,
-                'mode': mode,
-                'timestamp': datetime.now().isoformat(),
-                'num_queries': len(query_results),
-                'query_results': query_results
-            }
-            with open(top10_output_file, 'w') as f:
-                json.dump(top10_data, f, indent=2, ensure_ascii=False)
-            # log_progress(f"  ✓ 已保存top10结果: {top10_output_file}")
+
+        # 用户级别结果已取消保存（数据已汇总到retrieval_*_summary.json）
+        # user_output_dir = os.path.join(output_dir, user_id)
+        # os.makedirs(user_output_dir, exist_ok=True)
+
+        # 保存metrics文件（已有）- 已取消
+        # output_file = os.path.join(user_output_dir, f"retrieval_{retriever_name}_{mode}_fullscale.json")
+        # with open(output_file, 'w') as f:
+        #     json.dump(output_data, f, indent=2)
+
+        # 保存top10结果文件（新增）- 已取消
+        # if query_results:
+        #     top10_output_file = os.path.join(user_output_dir, f"retrieval_{retriever_name}_{mode}_top10_results.json")
+        #     top10_data = {
+        #         'user_id': user_id,
+        #         'retriever': retriever_name,
+        #         'mode': mode,
+        #         'timestamp': datetime.now().isoformat(),
+        #         'num_queries': len(query_results),
+        #         'query_results': query_results
+        #     }
+        #     with open(top10_output_file, 'w') as f:
+        #         json.dump(top10_data, f, indent=2, ensure_ascii=False)
 
         # log_progress(f"[EVAL_MODE_SUCCESS] {retriever_name}/{user_id} ({mode}) completed")
         # log_progress(f"  ✓ 已保存metrics: {output_file}")
-        return mode, metrics
+        return mode, metrics, query_results
         
     except Exception as e:
         log_with_timestamp(f"[EVAL_MODE_ERROR] {retriever_name}/{user_id} ({mode}) FAILED")
@@ -1792,14 +1793,14 @@ def evaluate_user_with_retriever(
     try:
         # log_progress(f"[RETRIEVER_EVAL_START] {retriever_name}/{user_id}: {len(queries)} queries")
 
-        result, metrics = _evaluate_single_mode(
+        result, metrics, query_results = _evaluate_single_mode(
             retriever, retriever_name, user_id, 'persona', queries,
             all_asins, output_dir, k_values, use_persona_cache=use_persona_cache
         )
 
         # log_progress(f"[RETRIEVER_EVAL_DONE] {retriever_name}/{user_id}: Completed")
 
-        return {'persona': metrics}
+        return {'persona': {'metrics': metrics, 'query_results': query_results}}
 
     except Exception as e:
         log_with_timestamp(f"[RETRIEVER_EVAL_ERROR] {retriever_name}/{user_id}: {type(e).__name__}: {str(e)}")
@@ -1948,6 +1949,7 @@ def evaluate_batch_fullscale(logger = None) -> Dict:
                 # 收集该检索器所有用户的metrics用于汇总
                 retriever_all_metrics = []
                 retriever_all_user_ids = []
+                retriever_all_user_results = []  # 收集完整结果（含top10）
 
                 # 为该检索器提交所有用户的任务
                 futures_for_retriever = []
@@ -1971,7 +1973,20 @@ def evaluate_batch_fullscale(logger = None) -> Dict:
                 retriever_succeeded = 0
                 for future, user_id_inner, retriever_name_inner, retriever_type_inner in futures_for_retriever:
                     try:
-                        user_results = future.result(timeout=1800)
+                        user_result = future.result(timeout=1800)
+                        # user_result = {'persona': {'metrics': ..., 'query_results': [...]}}
+                        if 'persona' in user_result:
+                            persona_data = user_result['persona']
+                            metrics = persona_data.get('metrics', {})
+                            query_results = persona_data.get('query_results', [])
+                            retriever_all_user_results.append({
+                                'user_id': user_id_inner,
+                                'num_queries': len(query_results),
+                                'metrics': metrics,
+                                'query_results': query_results,
+                                'relcl_count': 0  # 稍后在_print_retriever_summary中填充
+                            })
+                            retriever_all_metrics.append(metrics)
                         results['succeeded'][user_id_inner].append(retriever_name_inner)
                         completed += 1
                         retriever_completed += 1
@@ -1994,8 +2009,8 @@ def evaluate_batch_fullscale(logger = None) -> Dict:
                         completed += 1
                         retriever_completed += 1
 
-                # 该检索器完成后，加载结果文件并打印汇总
-                _print_retriever_summary(retriever_name, valid_users, OUTPUT_DIR, logger)
+                # 该检索器完成后，使用收集的结果数据打印汇总
+                _print_retriever_summary(retriever_name, valid_users, OUTPUT_DIR, logger, retriever_all_user_results)
 
             # logger.info(f"[{phase_name}_PHASE_DONE] All {retriever_type} retrievers completed")
 
