@@ -22,7 +22,6 @@ import sys
 import json
 import pickle
 import time
-import argparse
 import numpy as np
 import torch
 from pathlib import Path
@@ -44,6 +43,7 @@ from utils.retrievers import (
 STAGE9_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/09_targeted_noisy_query"
 STAGE7_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/07_iterative_refinement"
 STAGE6_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query"
+PERSONA_GENERATED_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/persona_generated_queries_1000users.json"
 CACHE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/12_retrieval/query_cache"
 
 AVAILABLE_RETRIEVERS = {
@@ -82,6 +82,29 @@ def find_all_users() -> Set[str]:
                     users.add(user_id)
 
     return users
+
+
+def load_persona_generated_queries() -> List[Dict]:
+    """从 persona_generated_queries.json 加载所有查询"""
+    if not os.path.exists(PERSONA_GENERATED_QUERIES_FILE):
+        log_with_timestamp(f"⚠️  文件不存在: {PERSONA_GENERATED_QUERIES_FILE}")
+        return []
+
+    with open(PERSONA_GENERATED_QUERIES_FILE, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    if not isinstance(data, list):
+        log_with_timestamp(f"⚠️  persona_generated_queries.json 格式错误：期望 list，实际 {type(data)}")
+        return []
+
+    log_with_timestamp(f"✓ 从 {PERSONA_GENERATED_QUERIES_FILE} 加载了 {len(data)} 条查询")
+    return data
+
+
+def get_users_from_persona_generated() -> Set[str]:
+    """从 persona_generated_queries.json 获取所有用户 ID"""
+    queries = load_persona_generated_queries()
+    return {q.get('user_id', '') for q in queries if q.get('user_id')}
 
 def load_stage9_queries(user_id: str) -> Dict[str, List[Dict]]:
     query_file = os.path.join(STAGE9_DIR, f"noisy_queries_{user_id}.json")
@@ -330,6 +353,7 @@ def initialize_cache_dir():
     os.makedirs(os.path.join(CACHE_DIR, "stage6_noisy_query"), exist_ok=True)
     os.makedirs(os.path.join(CACHE_DIR, "stage7_clean_query"), exist_ok=True)
     os.makedirs(os.path.join(CACHE_DIR, "stage7_noisy_query"), exist_ok=True)
+    os.makedirs(os.path.join(CACHE_DIR, "persona_query"), exist_ok=True)
     log_with_timestamp(f"✓ 缓存目录: {CACHE_DIR}")
 
 
@@ -344,6 +368,8 @@ def get_cache_subdir(mode: str) -> str:
         return os.path.join(CACHE_DIR, "stage7_clean_query")
     if mode in {'stage7_noisy', 'stage7'}:
         return os.path.join(CACHE_DIR, "stage7_noisy_query")
+    if mode == 'persona':
+        return os.path.join(CACHE_DIR, "persona_query")
     raise ValueError(f"Unsupported mode for cache subdir: {mode}")
 
 
@@ -354,15 +380,21 @@ def get_mode_suffix(mode: str) -> str:
         return 'clean'
     if mode in {'noisy', 'stage7_noisy', 'stage7'}:
         return 'noisy'
+    if mode == 'persona':
+        return 'persona'
     raise ValueError(f"Unsupported mode for filename suffix: {mode}")
 
 def get_cache_file_path(retriever_name: str, user_id: str, mode: str) -> str:
-    """获取缓存文件路径"""
+    """获取缓存文件路径
+
+    persona 模式下，所有用户共享一个文件：{retriever_name}_{suffix}_cache.pkl
+    其他模式下，每个用户一个文件：{retriever_name}_{user_id}_{suffix}_cache.pkl
+    """
     suffix = get_mode_suffix(mode)
-    return os.path.join(
-        get_cache_subdir(mode),
-        f"{retriever_name.lower()}_{user_id}_{suffix}_cache.pkl"
-    )
+    subdir = get_cache_subdir(mode)
+    if mode == 'persona':
+        return os.path.join(subdir, f"{retriever_name.lower()}_{suffix}_cache.pkl")
+    return os.path.join(subdir, f"{retriever_name.lower()}_{user_id}_{suffix}_cache.pkl")
 
 def cache_exists_for_query(retriever_name: str, user_id: str, mode: str) -> bool:
     """检查查询缓存文件是否已存在"""
@@ -371,14 +403,165 @@ def cache_exists_for_query(retriever_name: str, user_id: str, mode: str) -> bool
 
 def save_cache_for_retriever(retriever_name: str, user_id: str, mode: str, cache: Dict):
     cache_file = get_cache_file_path(retriever_name, user_id, mode)
-    
+
     with open(cache_file, 'wb') as f:
         pickle.dump(cache, f)
-    
+
     file_size_mb = os.path.getsize(cache_file) / (1024 * 1024)
     log_with_timestamp(f"      ✓ 缓存已保存到文件: {cache_file}")
     log_with_timestamp(f"        - 查询数: {len(cache)}")
     log_with_timestamp(f"        - 文件大小: {file_size_mb:.2f} MB")
+
+
+def generate_cache_from_persona_source(retriever_names: Optional[List[str]] = None, clear_cache_before: bool = False):
+    """从 persona_generated_queries.json 生成缓存
+
+    每个检索器生成一个缓存文件，内容结构为：
+    {
+        "user_id_1": {query_text: embedding, ...},
+        "user_id_2": {query_text: embedding, ...},
+        ...
+    }
+    """
+    if retriever_names is None:
+        retriever_names = list(AVAILABLE_RETRIEVERS.keys())
+
+    persona_data = load_persona_generated_queries()
+    if not persona_data:
+        log_with_timestamp("⚠️  没有从 persona_generated_queries.json 加载到任何查询")
+        return {'total_queries': 0, 'total_cached': 0, 'retrievers_processed': 0}
+
+    # 按 user_id 分组查询
+    queries_by_user: Dict[str, List[Dict]] = {}
+    for item in persona_data:
+        user_id = item.get('user_id', '')
+        query_text = item.get('generated_query', '')
+        asin = item.get('asin', '')
+        if not user_id or not query_text:
+            continue
+        if user_id not in queries_by_user:
+            queries_by_user[user_id] = []
+        queries_by_user[user_id].append({
+            'query': query_text,
+            'asin': asin,
+            'user_id': user_id,
+            'source': 'persona',
+        })
+
+    # 汇总所有查询（用于批量编码）
+    all_queries: List[Dict] = []
+    for queries in queries_by_user.values():
+        all_queries.extend(queries)
+
+    log_with_timestamp("=" * 80)
+    log_with_timestamp("🚀 开始生成查询缓存 (persona_generated_queries.json)")
+    log_with_timestamp("=" * 80)
+    log_with_timestamp(f"")
+    log_with_timestamp(f"📋 任务配置:")
+    log_with_timestamp(f"  • 检索器: {len(retriever_names)} 个 - {', '.join(retriever_names)}")
+    log_with_timestamp(f"  • 用户: {len(queries_by_user)} 个")
+    log_with_timestamp(f"  • 查询总数: {len(all_queries)} 条")
+    log_with_timestamp(f"  • 缓存目录: {CACHE_DIR}")
+    log_with_timestamp(f"")
+
+    if clear_cache_before:
+        clear_cache()
+    initialize_cache_dir()
+
+    start_time = time.time()
+    stats = {
+        'total_queries': len(all_queries),
+        'total_cached': 0,
+        'retrievers_processed': 0,
+    }
+
+    for retriever_name in retriever_names:
+        if retriever_name not in AVAILABLE_RETRIEVERS:
+            log_with_timestamp(f"⚠️  检索器不存在: {retriever_name}")
+            continue
+
+        cache_file = get_cache_file_path(retriever_name, '', 'persona')
+
+        log_with_timestamp(f"\n{'='*80}")
+        log_with_timestamp(f"【{stats['retrievers_processed'] + 1}/{len(retriever_names)}】正在处理检索器: {retriever_name}")
+        log_with_timestamp(f"{'='*80}")
+
+        # 每次运行都重新生成，不检查缓存
+
+        retriever_class = AVAILABLE_RETRIEVERS[retriever_name]
+        log_with_timestamp(f"  初始化检索器 {retriever_name}...")
+        retriever = retriever_class()
+        log_with_timestamp(f"  ✓ 检索器初始化完成，模型已加载")
+
+        # 批量编码所有查询
+        log_with_timestamp(f"  开始编码 {len(all_queries)} 条查询...")
+        full_cache = encode_queries(retriever, all_queries, retriever_name, 'all_users', 'persona')
+
+        if not full_cache:
+            log_with_timestamp(f"  ⚠️  未生成任何缓存")
+            stats['retrievers_processed'] += 1
+            continue
+
+        # 按 user_id 重新组织缓存
+        # full_cache: {query_text: embedding}
+        # 目标: {user_id: {query_text: embedding}}
+        result_cache: Dict[str, Dict[str, np.ndarray]] = {uid: {} for uid in queries_by_user.keys()}
+        for query_text, embedding in full_cache.items():
+            for uid, queries in queries_by_user.items():
+                if any(q['query'] == query_text for q in queries):
+                    result_cache[uid][query_text] = embedding
+                    break
+
+        # 保存为一个文件
+        log_with_timestamp(f"  保存缓存到: {cache_file}")
+        with open(cache_file, 'wb') as f:
+            pickle.dump(result_cache, f)
+
+        file_size_mb = os.path.getsize(cache_file) / (1024 * 1024)
+        total_embedded = sum(len(v) for v in result_cache.values())
+        log_with_timestamp(f"  ✓ 缓存已保存")
+        log_with_timestamp(f"    - 用户数: {len(result_cache)}")
+        log_with_timestamp(f"    - 查询数: {total_embedded}")
+        log_with_timestamp(f"    - 文件大小: {file_size_mb:.2f} MB")
+
+        stats['total_cached'] += total_embedded
+        log_with_timestamp(f"✓ 检索器 {retriever_name} 处理完成\n")
+        stats['retrievers_processed'] += 1
+
+    elapsed = time.time() - start_time
+
+    # 统计缓存目录
+    cache_files = 0
+    cache_dir_size = 0.0
+    persona_cache_dir = os.path.join(CACHE_DIR, "persona_query")
+    if os.path.exists(persona_cache_dir):
+        for name in os.listdir(persona_cache_dir):
+            if name.endswith('.pkl'):
+                cache_files += 1
+                cache_dir_size += os.path.getsize(os.path.join(persona_cache_dir, name))
+        cache_dir_size /= (1024 * 1024)
+
+    log_with_timestamp("\n" + "=" * 80)
+    log_with_timestamp("✅ 缓存生成完成!")
+    log_with_timestamp("=" * 80)
+    log_with_timestamp(f"")
+    log_with_timestamp(f"⏱️  执行统计:")
+    log_with_timestamp(f"  • 总耗时: {elapsed:.1f} 秒 ({elapsed/60:.1f} 分钟)")
+    log_with_timestamp(f"  • 检索器处理数: {stats['retrievers_processed']}/{len(retriever_names)}")
+    log_with_timestamp(f"")
+    log_with_timestamp(f"📊 数据统计:")
+    log_with_timestamp(f"  • 总查询数: {stats['total_queries']}")
+    log_with_timestamp(f"  • 已缓存查询: {stats['total_cached']}")
+    log_with_timestamp(f"  • 缓存命中率: {(stats['total_cached']/stats['total_queries']*100 if stats['total_queries'] > 0 else 0):.1f}%")
+    log_with_timestamp(f"")
+    log_with_timestamp(f"💾 缓存存储:")
+    log_with_timestamp(f"  • 缓存目录: {persona_cache_dir}")
+    log_with_timestamp(f"  • 缓存文件数: {cache_files}")
+    log_with_timestamp(f"  • 总大小: {cache_dir_size:.2f} MB")
+    log_with_timestamp(f"")
+
+    return stats
+
 
 def generate_cache_for_all_retrievers(
     retriever_names: Optional[List[str]] = None,
@@ -513,79 +696,28 @@ def generate_cache_for_all_retrievers(
     return stats
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='为所有检索器生成查询缓存 (支持 stage6/7 clean/noisy 分目录输出)'
-    )
-    parser.add_argument(
-        '--retrievers',
-        nargs='+',
-        default=None,
-        help=f'要处理的检索器 (默认: 全部). 可选: {", ".join(AVAILABLE_RETRIEVERS.keys())}'
-    )
-    parser.add_argument(
-        '--users',
-        nargs='+',
-        default=None,
-        help='要处理的用户 (默认: 全部)'
-    )
-    parser.add_argument(
-        '--modes',
-        nargs='+',
-        default=['stage6'],
-        help='查询模式 (默认: stage6). 可选: stage6 clean noisy stage7_clean stage7_noisy stage7'
-    )
-    parser.add_argument(
-        '--include-stage7',
-        action='store_true',
-        help='在当前模式基础上额外加入 stage7_clean 与 stage7_noisy'
-    )
-    parser.add_argument(
-        '--list-users',
-        action='store_true',
-        help='列出所有可用用户并退出'
-    )
-    parser.add_argument(
-        '--list-retrievers',
-        action='store_true',
-        help='列出所有可用检索器并退出'
-    )
-    parser.add_argument(
-        '--clear-cache',
-        action='store_true',
-        help='运行前先清理旧的查询缓存'
-    )
+    # ==================== 硬编码配置 ====================
+    # 检索器列表：默认使用所有可用检索器
+    RETRIEVER_NAMES = ['ANCE', 'Dense', 'E5', 'BGE', 'STAR', 'MiniLM', 'MPNet']
+    # 是否清理旧缓存
+    CLEAR_CACHE_BEFORE = True
+    # 数据源：persona_generated_queries.json
+    PERSONA_SOURCE = True
+    # =================================================
 
-    args = parser.parse_args()
-    
-    if args.list_users:
-        users = find_all_users()
-        log_with_timestamp(f"可用用户 ({len(users)}):")
-        for user in sorted(users):
-            log_with_timestamp(f"  - {user}")
+    if PERSONA_SOURCE:
+        log_with_timestamp("📋 使用 persona_generated_queries.json 作为数据源")
+        stats = generate_cache_from_persona_source(
+            retriever_names=RETRIEVER_NAMES,
+            clear_cache_before=CLEAR_CACHE_BEFORE,
+        )
         return
-    
-    if args.list_retrievers:
-        log_with_timestamp("可用检索器:")
-        for name in sorted(AVAILABLE_RETRIEVERS.keys()):
-            log_with_timestamp(f"  - {name}")
-        return
-    
-    valid_modes = {'stage6', 'clean', 'noisy', 'stage7', 'stage7_clean', 'stage7_noisy'}
-    invalid_modes = [m for m in args.modes if m not in valid_modes]
-    if invalid_modes:
-        raise ValueError(f"不支持的查询模式: {invalid_modes}. 可选: {sorted(valid_modes)}")
 
-    extra_modes = ['stage7_clean', 'stage7_noisy'] if args.include_stage7 else []
-    final_modes = list(dict.fromkeys(args.modes + extra_modes))
-
-    # 清理旧缓存
-    if args.clear_cache:
-        clear_cache()
-
+    # 默认旧逻辑（保留但不使用）
     stats = generate_cache_for_all_retrievers(
-        retriever_names=args.retrievers,
-        user_ids=args.users,
-        modes=final_modes
+        retriever_names=RETRIEVER_NAMES,
+        user_ids=None,
+        modes=['stage6']
     )
 
 if __name__ == '__main__':
