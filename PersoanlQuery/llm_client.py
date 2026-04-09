@@ -75,3 +75,23 @@ class MiniMaxAnthropicClient:
                 return "", ""
 
         return "", ""
+
+    def call(
+        self,
+        prompt: str,
+        max_tokens: int = 4096,
+        temperature: Optional[float] = None,
+        max_retries: int = 5,
+    ) -> str:
+        """Call MiniMax API and return text content only.
+
+        Returns:
+            str: The text content from the response.
+        """
+        _, text_content = self.call_with_thinking(
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            max_retries=max_retries,
+        )
+        return text_content
