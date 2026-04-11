@@ -665,12 +665,32 @@ def main():
         for etype, count in sorted(all_error_types.items(), key=lambda x: x[1], reverse=True):
             log_with_timestamp(f"  {etype}: {count}")
 
-    log_with_timestamp("="*80)
-    log_with_timestamp("Generating summary...")
-    log_with_timestamp("="*80)
-    summary = generate_summary(OUTPUT_DIR, user_ids_to_process)
+        summary_data = {
+            "timestamp": datetime.now().isoformat(),
+            "total_users": len(user_ids_to_process),
+            "processed_users": len(successful),
+            "failed_users": [r["user_id"] for r in failed],
+            "total_reviews": total_reviews,
+            "total_errors": total_errors,
+            "error_type_distribution": dict(all_error_types),
+            "user_results": [
+                {
+                    "user_id": r["user_id"],
+                    "reviews_processed": r["reviews_processed"],
+                    "reviews_with_errors": r["reviews_with_errors"],
+                    "total_errors": r["total_errors"],
+                    "error_types": r["error_types"]
+                }
+                for r in successful
+            ]
+        }
 
-    if summary["processed_users"] == 0:
+        summary_file = os.path.join(OUTPUT_DIR, "all_users_summary.json")
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            json.dump(summary_data, f, ensure_ascii=False, indent=2)
+        log_with_timestamp(f"Summary saved to {summary_file}")
+
+    if len(successful) == 0:
         log_with_timestamp("ERROR: No users were successfully processed!")
         sys.exit(1)
 
