@@ -424,17 +424,21 @@ class P3ComprehensiveAnalyzer:
                 if len(errors) > 0:
                     reviews_with_errors += 1
 
-                total_errors += len(errors)
+                    # 只保存有错误的评论，简化为：原文、修正后、错误修正列表
+                    corrections = []
+                    for error in errors:
+                        orig_word = error.get("details", {}).get("original", "")
+                        corr_word = error.get("details", {}).get("corrected", "")
+                        if orig_word or corr_word:
+                            corrections.append(f"{orig_word} → {corr_word}")
 
-                detailed_results.append({
-                    "review_idx": review_idx,
-                    "asin": asin,
-                    "original": original,
-                    "corrected": corrected,
-                    "has_errors": len(errors) > 0,
-                    "total_errors": len(errors),
-                    "errors": errors
-                })
+                    detailed_results.append({
+                        "original": original,
+                        "corrected": corrected,
+                        "corrections": corrections
+                    })
+
+                total_errors += len(errors)
 
                 if (review_idx + 1) % 10 == 0:
                     logger.info(f"[{user_id}] Progress: {review_idx + 1}/{len(flattened_reviews)} reviews, {total_errors} errors found so far")
@@ -713,7 +717,7 @@ def main():
             ]
         }
 
-        summary_file = os.path.join(OUTPUT_DIR, "all_users_summary.json")
+        summary_file = os.path.join(OUTPUT_DIR, "writingError_user_profile.json")
         with open(summary_file, 'w', encoding='utf-8') as f:
             json.dump(summary_data, f, ensure_ascii=False, indent=2)
         log_with_timestamp(f"Summary saved to {summary_file}")
