@@ -30,7 +30,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 
 sys.path.insert(0, '/home/wlia0047/ar57/wenyu/PersoanlQuery')
-from llm_client import MiniMaxAnthropicClient as LLMClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,8 +63,9 @@ class P3ErrorExtractor:
 
     P3_TEMPLATE = """Edit the following text for spelling and grammar mistakes, make minimal changes, and return only the corrected text. If the text is already correct, return it without any explanations:."""
 
-    def __init__(self, llm_client: LLMClient):
-        self.llm_client = llm_client
+    def __init__(self):
+        from llm_client import MiniMaxAnthropicClient
+        self.client = MiniMaxAnthropicClient(model='MiniMax-M2.7-highspeed')
 
     def create_p3_prompt(self, review_text: str) -> str:
         return f"""<s>[INST] {self.P3_TEMPLATE}
@@ -75,17 +75,20 @@ class P3ErrorExtractor:
 Please return ONLY the corrected text. If no corrections are needed, return the original text exactly as it is.
 [/INST]"""
 
-    def extract_errors(self, original_text: str, max_retries: int = 5) -> Dict:
+    def extract_errors(self, original_text: str) -> Dict:
         prompt = self.create_p3_prompt(original_text)
+
+        wait_seconds = 5
+        max_retries = 20
 
         for attempt in range(max_retries):
             try:
-                response = self.llm_client.call(
-                    prompt=prompt,
-                    max_tokens=256
-                )
+                thinking, text = self.client.call_with_thinking(prompt, max_tokens=8192, temperature=0.3)
+                corrected_text = text.strip()
 
-                corrected_text = response.strip()
+                # 如果返回为空，保留原文
+                if not corrected_text:
+                    corrected_text = original_text
 
                 return {
                     "status": "success",
@@ -95,8 +98,21 @@ Please return ONLY the corrected text. If no corrections are needed, return the 
                 }
 
             except Exception as e:
+                error_str = str(e).lower()
+                is_rate_limit = 'rate' in error_str or 'limit' in error_str or '429' in error_str or 'too many request' in error_str
+                if not is_rate_limit:
+                    return {
+                        "status": "error",
+                        "original": original_text,
+                        "corrected": original_text,
+                        "error": str(e),
+                        "has_errors": False
+                    }
                 if attempt < max_retries - 1:
-                    continue
+                    logger.warning(f"Rate limit, retrying in {wait_seconds}s (attempt {attempt + 1}/{max_retries})")
+                    import time
+                    time.sleep(wait_seconds)
+                    wait_seconds += 5
                 else:
                     return {
                         "status": "error",
@@ -329,8 +345,7 @@ class P3ComprehensiveAnalyzer:
     def __init__(self, analysis_dir: Path = None, reviews_dir: Path = None):
         self.analysis_dir = analysis_dir or Path(OUTPUT_DIR)
         self.reviews_dir = reviews_dir or Path(os.path.dirname(INPUT_FILE))
-        self.llm_client = LLMClient()
-        self.p3_extractor = P3ErrorExtractor(self.llm_client)
+        self.p3_extractor = P3ErrorExtractor()
         self.error_extractor = DetailedErrorExtractor()
 
         self._merged_data = None
