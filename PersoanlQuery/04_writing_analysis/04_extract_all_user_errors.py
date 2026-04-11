@@ -61,25 +61,28 @@ MAX_WORKERS = 20
 class P3ErrorExtractor:
     """Extract errors using P3 optimal template - LLM直接返回错误类型"""
 
-    ERROR_TYPES = ["spelling", "grammar", "capitalization", "formatting"]
+    ERROR_TYPES = ["spelling", "grammar", "capitalization"]
 
     P3_TEMPLATE = """You are an expert at identifying and correcting errors in text.
 For each error you find, you must identify:
 1. The original error word (SINGLE WORD only, not phrase)
 2. The corrected word (SINGLE WORD only, not phrase)
-3. The error type (one of: spelling, grammar, capitalization, formatting)
+3. The error type (one of: spelling, grammar, capitalization)
 
 IMPORTANT: original and corrected MUST be single words, not phrases or sentences.
 
 Error type definitions:
 - spelling: misspelled words (e.g., "teh" -> "the", "recieve" -> "receive")
-- grammar: wrong word form (e.g., "goods" -> "good", "works" -> "work", verb tense issues)
+- grammar: wrong word form (e.g., "goods" -> "good", "works" -> "work", verb tense issues, "measuring" -> "measurement")
 - capitalization: wrong case (e.g., "i" -> "I", "monday" -> "Monday")
-- formatting: hyphenation issues (e.g., "ice cream" -> "ice-cream")
 
-NOTE: Punctuation marks are NOT considered errors. Ignore punctuation issues.
+NOTE: Ignore the following (NOT errors):
+- Punctuation marks (comma, period, etc.)
+- Hyphenation issues (e.g., "plastic-like" vs "plastic like")
+- Quote style issues
+- Whitespace issues
 
-If the text has no errors or only punctuation issues, return {"corrected_text": "<original>", "errors": []}.
+If the text has no errors or only ignored issues, return {"corrected_text": "<original>", "errors": []}.
 
 If there are errors, return JSON in this format:
 {"corrected_text": "<corrected sentence>", "errors": [{"original": "word", "corrected": "word", "type": "error_type"}, ...]}
