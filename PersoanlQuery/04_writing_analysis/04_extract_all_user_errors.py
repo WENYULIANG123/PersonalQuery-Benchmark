@@ -413,6 +413,17 @@ class P3ComprehensiveAnalyzer:
         self._merged_data = None
         self._users_map = None
 
+    @staticmethod
+    def _calculate_similarity(s1: str, s2: str) -> float:
+        """计算两个字符串的相似度（基于字符集合交集）"""
+        if not s1 or not s2:
+            return 0.0
+        set1 = set(s1)
+        set2 = set(s2)
+        intersection = len(set1 & set2)
+        union = len(set1 | set2)
+        return intersection / union if union > 0 else 0.0
+
     def _load_merged_file(self):
         """懒加载合并文件"""
         if self._users_map is None:
@@ -485,10 +496,18 @@ class P3ComprehensiveAnalyzer:
                     orig = error.get("original", "").strip()
                     corr = error.get("corrected", "").strip()
                     # 只有当 original 和 corrected 都是单个单词（无空格）时才保留
-                    if orig and corr and " " not in orig and " " not in corr:
-                        valid_errors.append(error)
-                        error_type = error.get("type", "unknown")
-                        error_type_counts[error_type] += 1
+                    if not (orig and corr and " " not in orig and " " not in corr):
+                        continue
+                    # 跳过 original == corrected 的情况（没有实际变化）
+                    if orig == corr:
+                        continue
+                    # 跳过相似度太低的修正（如 "Attached" -> "I" 差距太大）
+                    similarity = self._calculate_similarity(orig.lower(), corr.lower())
+                    if similarity < 0.3:  # 如果相似度低于30%，跳过
+                        continue
+                    valid_errors.append(error)
+                    error_type = error.get("type", "unknown")
+                    error_type_counts[error_type] += 1
 
                 errors = valid_errors
 
