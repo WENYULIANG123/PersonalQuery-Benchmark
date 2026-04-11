@@ -65,22 +65,24 @@ class P3ErrorExtractor:
 
     P3_TEMPLATE = """You are an expert at identifying and correcting errors in text.
 For each error you find, you must identify:
-1. The original error word/phrase
-2. The corrected version
+1. The original error word (SINGLE WORD only, not phrase)
+2. The corrected word (SINGLE WORD only, not phrase)
 3. The error type (one of: spelling, grammar, capitalization, formatting)
+
+IMPORTANT: original and corrected MUST be single words, not phrases or sentences.
 
 Error type definitions:
 - spelling: misspelled words (e.g., "teh" -> "the", "recieve" -> "receive")
-- grammar: wrong word form or sentence structure (e.g., "I goed" -> "I went", "works perfect" -> "works perfectly", "there their" confusion)
-- capitalization: wrong case at start of sentence (e.g., "i" -> "I")
-- formatting: hyphenation, quote style issues
+- grammar: wrong word form (e.g., "goods" -> "good", "works" -> "work", verb tense issues)
+- capitalization: wrong case (e.g., "i" -> "I", "monday" -> "Monday")
+- formatting: hyphenation issues (e.g., "ice cream" -> "ice-cream")
 
-NOTE: Punctuation marks (comma, period, etc.) are NOT considered errors. Ignore punctuation issues.
+NOTE: Punctuation marks are NOT considered errors. Ignore punctuation issues.
 
-If the text is correct or only has punctuation issues, return {"corrected_text": "<original>", "errors": []}.
+If the text has no errors or only punctuation issues, return {"corrected_text": "<original>", "errors": []}.
 
 If there are errors, return JSON in this format:
-{"corrected_text": "<corrected sentence>", "errors": [{"original": "wrong", "corrected": "right", "type": "error_type"}, ...]}
+{"corrected_text": "<corrected sentence>", "errors": [{"original": "word", "corrected": "word", "type": "error_type"}, ...]}
 
 Analyze this text and return the result:"""
 
