@@ -59,9 +59,29 @@ MAX_WORKERS = 20
 # ============================================================================
 
 class P3ErrorExtractor:
-    """Extract errors using P3 optimal template"""
+    """Extract errors using P3 optimal template - LLM直接返回错误类型"""
 
-    P3_TEMPLATE = """Edit the following text for spelling and grammar mistakes, make minimal changes, and return only the corrected text. If the text is already correct, return it without any explanations:."""
+    ERROR_TYPES = ["spelling", "grammar", "punctuation", "capitalization", "formatting"]
+
+    P3_TEMPLATE = """You are an expert at identifying and correcting errors in text.
+For each error you find, you must identify:
+1. The original error word/phrase
+2. The corrected version
+3. The error type (one of: spelling, grammar, punctuation, capitalization, formatting)
+
+Error type definitions:
+- spelling: misspelled words (e.g., "teh" -> "the")
+- grammar: wrong word form or sentence structure (e.g., "I goed" -> "I went", "works perfect" -> "works perfectly")
+- punctuation: missing or wrong punctuation marks
+- capitalization: wrong case (e.g., "i" -> "I" at sentence start)
+- formatting: hyphenation, quote style, or other formatting issues
+
+If the text is correct, return {"corrected_text": "<original>", "errors": []}.
+
+If there are errors, return JSON in this format:
+{"corrected_text": "<corrected sentence>", "errors": [{"original": "wrong", "corrected": "right", "type": "error_type"}, ...]}
+
+Analyze this text and return the result:"""
 
     def __init__(self):
         from llm_client import MiniMaxAnthropicClient
@@ -71,8 +91,6 @@ class P3ErrorExtractor:
         return f"""<s>[INST] {self.P3_TEMPLATE}
 
 "{review_text}"
-
-Please return ONLY the corrected text. If no corrections are needed, return the original text exactly as it is.
 [/INST]"""
 
     def extract_errors(self, original_text: str) -> Dict:
@@ -84,18 +102,50 @@ Please return ONLY the corrected text. If no corrections are needed, return the 
         for attempt in range(max_retries):
             try:
                 thinking, text = self.client.call_with_thinking(prompt, max_tokens=8192, temperature=0.3)
-                corrected_text = text.strip()
+                result_text = text.strip()
 
                 # 如果返回为空，保留原文
-                if not corrected_text:
-                    corrected_text = original_text
+                if not result_text:
+                    result_text = original_text
 
-                return {
-                    "status": "success",
-                    "original": original_text,
-                    "corrected": corrected_text,
-                    "has_errors": original_text != corrected_text
-                }
+                # 尝试解析 JSON
+                import json
+                try:
+                    # 提取 JSON（可能在 markdown 代码块中）
+                    if "```json" in result_text:
+                        start = result_text.find("```json") + 7
+                        end = result_text.find("```", start)
+                        result_text = result_text[start:end].strip()
+                    elif "```" in result_text:
+                        start = result_text.find("```") + 3
+                        end = result_text.find("```", start)
+                        result_text = result_text[start:end].strip()
+
+                    result = json.loads(result_text)
+                    corrected_text = result.get("corrected_text", original_text)
+                    errors = result.get("errors", [])
+
+                    # 如果没有错误但文本被修改了，保留修改
+                    if not errors and corrected_text != original_text:
+                        errors = [{"original": original_text, "corrected": corrected_text, "type": "unknown"}]
+
+                    return {
+                        "status": "success",
+                        "original": original_text,
+                        "corrected": corrected_text,
+                        "has_errors": len(errors) > 0,
+                        "errors": errors
+                    }
+
+                except json.JSONDecodeError:
+                    # JSON 解析失败，返回原文，不标记错误
+                    return {
+                        "status": "success",
+                        "original": original_text,
+                        "corrected": original_text,
+                        "has_errors": False,
+                        "errors": []
+                    }
 
             except Exception as e:
                 error_str = str(e).lower()
@@ -106,7 +156,8 @@ Please return ONLY the corrected text. If no corrections are needed, return the 
                         "original": original_text,
                         "corrected": original_text,
                         "error": str(e),
-                        "has_errors": False
+                        "has_errors": False,
+                        "errors": []
                     }
                 if attempt < max_retries - 1:
                     logger.warning(f"Rate limit, retrying in {wait_seconds}s (attempt {attempt + 1}/{max_retries})")
@@ -119,7 +170,8 @@ Please return ONLY the corrected text. If no corrections are needed, return the 
                         "original": original_text,
                         "corrected": original_text,
                         "error": str(e),
-                        "has_errors": False
+                        "has_errors": False,
+                        "errors": []
                     }
 
 
@@ -415,22 +467,23 @@ class P3ComprehensiveAnalyzer:
                     continue
 
                 corrected = p3_result["corrected"]
-
-                errors = self.error_extractor.extract_errors(original, corrected)
+                errors = p3_result.get("errors", [])
 
                 for error in errors:
-                    error_type_counts[error["type"]] += 1
+                    error_type = error.get("type", "unknown")
+                    error_type_counts[error_type] += 1
 
                 if len(errors) > 0:
                     reviews_with_errors += 1
 
-                    # 只保存有错误的评论，简化为：原文、修正后、错误修正列表
+                    # 直接使用 LLM 返回的错误信息
                     corrections = []
                     for error in errors:
-                        orig_word = error.get("details", {}).get("original", "")
-                        corr_word = error.get("details", {}).get("corrected", "")
-                        if orig_word or corr_word:
-                            corrections.append(f"{orig_word} → {corr_word}")
+                        corrections.append({
+                            "original": error.get("original", ""),
+                            "corrected": error.get("corrected", ""),
+                            "error_type": error.get("type", "unknown")
+                        })
 
                     detailed_results.append({
                         "original": original,
