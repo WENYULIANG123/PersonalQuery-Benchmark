@@ -385,7 +385,7 @@ class P3ComprehensiveAnalyzer:
             if max_reviews:
                 flattened_reviews = flattened_reviews[:max_reviews]
 
-            detailed_results = []
+            reviews_with_errors = 0
             total_errors = 0
             error_type_counts = defaultdict(int)
 
@@ -405,42 +405,13 @@ class P3ComprehensiveAnalyzer:
                 for error in errors:
                     error_type_counts[error["type"]] += 1
 
-                detailed_results.append({
-                    "review_idx": review_idx,
-                    "asin": asin,
-                    "has_errors": len(errors) > 0,
-                    "total_errors": len(errors),
-                    "original_length": len(original),
-                    "corrected_length": len(corrected),
-                    "errors": errors
-                })
+                if len(errors) > 0:
+                    reviews_with_errors += 1
 
                 total_errors += len(errors)
 
                 if (review_idx + 1) % 10 == 0:
                     logger.info(f"[{user_id}] Progress: {review_idx + 1}/{len(flattened_reviews)} reviews, {total_errors} errors found so far")
-
-            error_type_percentages = {}
-            for etype, count in error_type_counts.items():
-                error_type_percentages[etype] = round(100 * count / total_errors, 1) if total_errors > 0 else 0
-
-            output_data = {
-                "user_id": user_id,
-                "timestamp": datetime.now().isoformat(),
-                "analysis_type": "p3_optimal_template_comprehensive",
-                "paper_reference": "MTSummit 2025 - arXiv:2505.06004",
-                "total_reviews": len(flattened_reviews),
-                "reviews_with_errors": sum(1 for r in detailed_results if r["has_errors"]),
-                "reviews_without_errors": sum(1 for r in detailed_results if not r["has_errors"]),
-                "total_errors": total_errors,
-                "error_type_distribution": dict(error_type_counts),
-                "error_type_percentages": error_type_percentages,
-                "detailed_errors": detailed_results
-            }
-
-            output_file = self.analysis_dir / f"writing_analysis_{user_id}.json"
-            with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(output_data, f, ensure_ascii=False, indent=2)
 
             logger.info(f"✅ [{user_id}] P3 comprehensive analysis completed: {len(flattened_reviews)} reviews, {total_errors} errors")
 
@@ -448,9 +419,9 @@ class P3ComprehensiveAnalyzer:
                 "user_id": user_id,
                 "status": "success",
                 "reviews_processed": len(flattened_reviews),
+                "reviews_with_errors": reviews_with_errors,
                 "total_errors": total_errors,
                 "error_types": dict(error_type_counts),
-                "output_file": str(output_file)
             }
 
         except Exception as e:
