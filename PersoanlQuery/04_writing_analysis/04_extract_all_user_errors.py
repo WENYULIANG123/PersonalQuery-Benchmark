@@ -49,7 +49,7 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 
 INPUT_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction/stage1_filtered_users_reviews.json"
 OUTPUT_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis"
-MAX_USERS = 10  # 测试用：只处理前N个用户
+MAX_USERS = 20  # 测试用：只处理前N个用户
 MAX_REVIEWS = None  # None 表示处理所有
 MAX_WORKERS = 20
 
