@@ -65,24 +65,28 @@ class P3ErrorExtractor:
 
     P3_TEMPLATE = """You are an expert at identifying and correcting errors in text.
 For each error you find, you must identify:
-1. The original error word (SINGLE WORD only, not phrase)
-2. The corrected word (SINGLE WORD only, not phrase)
+1. The original error word (SINGLE WORD only, not phrase, not sentence)
+2. The corrected word (SINGLE WORD only, not phrase, not sentence)
 3. The error type (one of: spelling, grammar, capitalization)
 
-IMPORTANT: original and corrected MUST be single words, not phrases or sentences.
+CRITICAL RULES:
+- ONLY return single words as original/corrected. NEVER return phrases or sentences.
+- If the error involves multiple words or whitespace, do NOT include it.
+- If the text has no single-word errors, return {"corrected_text": "<original>", "errors": []}.
 
 Error type definitions:
 - spelling: misspelled words (e.g., "teh" -> "the", "recieve" -> "receive")
 - grammar: wrong word form (e.g., "goods" -> "good", "works" -> "work", verb tense issues, "measuring" -> "measurement")
 - capitalization: wrong case (e.g., "i" -> "I", "monday" -> "Monday")
 
-NOTE: Ignore the following (NOT errors):
+COMPLETELY IGNORE (do NOT report as errors):
 - Punctuation marks (comma, period, etc.)
 - Hyphenation issues (e.g., "plastic-like" vs "plastic like")
 - Quote style issues
-- Whitespace issues
+- Whitespace issues (extra spaces, missing spaces, double spaces)
+- Multiple word issues
 
-If the text has no errors or only ignored issues, return {"corrected_text": "<original>", "errors": []}.
+If the text has no single-word errors or only ignored issues, return {"corrected_text": "<original>", "errors": []}.
 
 If there are errors, return JSON in this format:
 {"corrected_text": "<corrected sentence>", "errors": [{"original": "word", "corrected": "word", "type": "error_type"}, ...]}
@@ -475,9 +479,18 @@ class P3ComprehensiveAnalyzer:
                 corrected = p3_result["corrected"]
                 errors = p3_result.get("errors", [])
 
+                # 只保留单个单词的错误（过滤掉包含空格的）
+                valid_errors = []
                 for error in errors:
-                    error_type = error.get("type", "unknown")
-                    error_type_counts[error_type] += 1
+                    orig = error.get("original", "").strip()
+                    corr = error.get("corrected", "").strip()
+                    # 只有当 original 和 corrected 都是单个单词（无空格）时才保留
+                    if orig and corr and " " not in orig and " " not in corr:
+                        valid_errors.append(error)
+                        error_type = error.get("type", "unknown")
+                        error_type_counts[error_type] += 1
+
+                errors = valid_errors
 
                 if len(errors) > 0:
                     reviews_with_errors += 1
