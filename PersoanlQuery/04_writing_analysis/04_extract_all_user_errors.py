@@ -388,6 +388,7 @@ class P3ComprehensiveAnalyzer:
             reviews_with_errors = 0
             total_errors = 0
             error_type_counts = defaultdict(int)
+            detailed_results = []
 
             for review_idx, (review_text, asin) in enumerate(flattened_reviews):
                 original = review_text
@@ -410,6 +411,16 @@ class P3ComprehensiveAnalyzer:
 
                 total_errors += len(errors)
 
+                detailed_results.append({
+                    "review_idx": review_idx,
+                    "asin": asin,
+                    "original": original,
+                    "corrected": corrected,
+                    "has_errors": len(errors) > 0,
+                    "total_errors": len(errors),
+                    "errors": errors
+                })
+
                 if (review_idx + 1) % 10 == 0:
                     logger.info(f"[{user_id}] Progress: {review_idx + 1}/{len(flattened_reviews)} reviews, {total_errors} errors found so far")
 
@@ -422,6 +433,7 @@ class P3ComprehensiveAnalyzer:
                 "reviews_with_errors": reviews_with_errors,
                 "total_errors": total_errors,
                 "error_types": dict(error_type_counts),
+                "detailed_results": detailed_results,
             }
 
         except Exception as e:
@@ -679,7 +691,8 @@ def main():
                     "reviews_processed": r["reviews_processed"],
                     "reviews_with_errors": r["reviews_with_errors"],
                     "total_errors": r["total_errors"],
-                    "error_types": r["error_types"]
+                    "error_types": r["error_types"],
+                    "detailed_results": r.get("detailed_results", [])
                 }
                 for r in successful
             ]
