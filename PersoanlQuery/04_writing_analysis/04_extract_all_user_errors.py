@@ -29,8 +29,8 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/../../")
-from llm_client import LLMClient
+sys.path.insert(0, '/home/wlia0047/ar57/wenyu/PersoanlQuery')
+from llm_client import MiniMaxAnthropicClient as LLMClient
 
 logging.basicConfig(
     level=logging.INFO,
