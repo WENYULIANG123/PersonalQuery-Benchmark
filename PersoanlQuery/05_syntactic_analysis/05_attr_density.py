@@ -7,12 +7,55 @@ import json, numpy as np
 import warnings
 import time
 import re
+import sys
+import os
 from datetime import datetime
 from collections import Counter
+from multiprocessing import Pool, cpu_count
 warnings.filterwarnings('ignore')
 import spacy
-nlp = spacy.load('en_core_web_sm')
 from sklearn.linear_model import LinearRegression
+
+# 全局变量，用于worker进程
+_nlp = None
+_asin_to_attrs = None
+_worker_id = None
+_worker_start_time = None
+
+def _init_worker(asin_to_attrs):
+    """初始化worker进程的spaCy模型和商品属性映射"""
+    global _nlp, _asin_to_attrs, _worker_id, _worker_start_time
+    _worker_id = os.getpid()
+    _worker_start_time = time.time()
+    _nlp = spacy.load('en_core_web_sm')
+    _asin_to_attrs = asin_to_attrs
+    # 强制输出到父进程
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+def _process_user_wrapper(args):
+    """包装process_user以适配Pool.map"""
+    worker_id = os.getpid()
+    user_data, idx, total = args
+    user_id = user_data.get('user_id', 'unknown')
+    # 记录任务开始
+    start = time.time()
+    log(f"[WORKER {worker_id}] 开始处理用户 {idx}/{total} (user_id={user_id})")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        result = process_user(user_data, idx, total, _nlp, _asin_to_attrs)
+        elapsed = time.time() - start
+        log(f"[WORKER {worker_id}] 完成用户 {idx}/{total} (user_id={user_id}), 耗时: {elapsed:.2f}s")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        return result
+    except Exception as e:
+        elapsed = time.time() - start
+        log(f"[WORKER {worker_id}] 错误用户 {idx}/{total} (user_id={user_id}), 耗时: {elapsed:.2f}s, 错误: {e}")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        raise
 
 def log(msg):
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -276,26 +319,17 @@ def get_length_label(avg_len):
         return 'long'
 
 
-def process_user(user_data, idx, total):
+def process_user(user_data, idx, total, nlp, asin_to_attrs):
     reviews = []
     for p in user_data.get('results', []):
         reviews.extend(p.get('target_reviews', []))
 
     user_id = user_data['user_id']
 
-    # 筛选15-35词的句子
-    valid_sentences = []
-    for r in reviews:
-        if not r:
-            continue
-        n = count_tokens(r)
-        if 15 <= n <= 35:
-            valid_sentences.append(r)
-
-    if not valid_sentences:
+    if not reviews:
         return None, []
 
-    # 只对有效句子进行spaCy解析
+    # 直接对每条评论进行spaCy解析，不拆句子
     total_sentences = 0
     sentences_with_attr = 0
     total_attr_count = 0
@@ -313,7 +347,9 @@ def process_user(user_data, idx, total):
     token_lengths_for_eq = []
     attr_counts_for_eq = []
 
-    for r in valid_sentences:
+    for r in reviews:
+        if not r:
+            continue
         doc = nlp(r)
         tokens = [t for t in doc if not t.is_punct and not t.is_space]
         n = len(tokens)
@@ -400,7 +436,17 @@ def process_user(user_data, idx, total):
     mean_gap = float(np.mean(all_gaps)) if len(all_gaps) > 0 else None
     median_gap = float(np.median(all_gaps)) if len(all_gaps) > 0 else None
 
-    return {
+    # 添加用户的商品属性信息
+    user_products = []
+    for product in user_data.get('results', []):
+        asin = product.get('asin', '')
+        if asin in asin_to_attrs:
+            user_products.append({
+                'asin': asin,
+                **asin_to_attrs[asin]
+            })
+
+    result = {
         'user_id': user_id,
         'attr_sentence_ratio': attr_sentence_ratio,
         'attr_per_sentence': attr_per_sentence,
@@ -420,8 +466,11 @@ def process_user(user_data, idx, total):
         'expected_query_length': expected_query_length,
         # 属性词间隔分析
         'mean_gap': mean_gap,
-        'median_gap': median_gap
-    }, sentence_details
+        'median_gap': median_gap,
+        'products': user_products
+    }
+
+    return result, sentence_details
 
 
 def main():
@@ -459,30 +508,56 @@ def main():
     # 清空并打开输出文件（流式写入）
     fp_out = open(OUTPUT_JSONL, 'w', encoding='utf-8')
 
+    # 确定worker数量
+    n_workers = min(cpu_count(), 16)
+    log(f'使用 {n_workers} 个worker进程并行处理')
+    log(f'总任务数: {total}')
+    log(f'chunksize: 10')
+    log(f'每个worker预计处理任务数: ~{total // n_workers}')
+
     users = []
     sentence_count = 0
-    for idx, user_data in enumerate(user_list):
-        if idx % 500 == 0:
-            elapsed = time.time() - start_time
-            log(f'进度: {idx}/{total} ({idx/total*100:.1f}%), 耗时: {elapsed:.1f}s')
-        result, sentences = process_user(user_data, idx, total)
-        if result is not None:
-            # 添加用户的商品属性信息
-            user_id = result['user_id']
-            user_products = []
-            for product in user_data.get('results', []):
-                asin = product.get('asin', '')
-                if asin in asin_to_attrs:
-                    user_products.append({
-                        'asin': asin,
-                        **asin_to_attrs[asin]
-                    })
-            result['products'] = user_products
-            users.append(result)
-            # 流式写入每个句子
-            for s in sentences:
-                fp_out.write(json.dumps(s, ensure_ascii=False) + '\n')
-            sentence_count += len(sentences)
+    completed = 0
+
+    # 准备参数列表
+    args_list = [(user_data, idx, total) for idx, user_data in enumerate(user_list)]
+    log(f'任务列表准备完成，共 {len(args_list)} 个任务')
+
+    # 使用Pool并行处理，asin_to_attrs通过initializer传入（只传一次）
+    log(f'创建Pool (processes={n_workers}), 开始分发任务...')
+    log(f'主进程PID: {os.getpid()}')
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+    task_start_time = time.time()
+    last_log_time = task_start_time
+
+    with Pool(processes=n_workers, initializer=_init_worker, initargs=(asin_to_attrs,)) as pool:
+        log(f'Pool已创建，等待任务完成...')
+        sys.stdout.flush()
+        for result, sentences in pool.imap_unordered(_process_user_wrapper, args_list, chunksize=10):
+            completed += 1
+            current_time = time.time()
+            # 每100个任务或每隔1秒打印一次详细进度
+            if completed % 100 == 0 or current_time - last_log_time > 1.0:
+                elapsed = current_time - task_start_time
+                rate = completed / elapsed if elapsed > 0 else 0
+                eta = (total - completed) / rate if rate > 0 else 0
+                log(f'[主进程] 进度: {completed}/{total} ({completed/total*100:.1f}%), '
+                    f'速率: {rate:.1f} 用户/秒, 已耗时: {elapsed:.1f}s, 预计剩余: {eta:.1f}s')
+                last_log_time = current_time
+                sys.stdout.flush()
+
+            if completed % 500 == 0 or completed == total:
+                elapsed = time.time() - start_time
+                log(f'进度: {completed}/{total} ({completed/total*100:.1f}%), 耗时: {elapsed:.1f}s')
+
+            if result is not None:
+                users.append(result)
+                # 流式写入每个句子
+                for s in sentences:
+                    fp_out.write(json.dumps(s, ensure_ascii=False) + '\n')
+                sentence_count += len(sentences)
 
     fp_out.close()
 

@@ -181,19 +181,10 @@ def process_user(user_data, idx, total):
 
     user_id = user_data['user_id']
 
-    # 筛选15-35词的句子
-    valid_sentences = []
-    for r in reviews:
-        if not r:
-            continue
-        n = count_tokens(r)
-        if 15 <= n <= 35:
-            valid_sentences.append(r)
-
-    if not valid_sentences:
+    if not reviews:
         return None, []
 
-    # 只对有效句子进行spaCy解析
+    # 直接对每条评论进行spaCy解析，不拆句子不过滤长度
     total_sentences = 0
     sentences_with_acl = 0
     total_acl_count = 0
@@ -203,7 +194,9 @@ def process_user(user_data, idx, total):
     marker_counter = Counter()  # 统计引导词使用
     all_gaps = []  # 收集所有间隔
 
-    for r in valid_sentences:
+    for r in reviews:
+        if not r:
+            continue
         doc = nlp(r)
         tokens = [t for t in doc if not t.is_punct and not t.is_space]
         n = len(tokens)
