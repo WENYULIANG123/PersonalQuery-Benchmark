@@ -179,20 +179,17 @@ def validate_cache() -> bool:
 UNIQUE_GROUPS = [0, 1, 2, 3]  # 默认值，会在 load_raw_queries 时更新
 GROUP_FIELD = 'ccomp'  # 默认值，会在 load_raw_queries 时更新
 
-def load_raw_queries() -> Tuple[Dict, List[int], str]:
+def load_raw_queries(query_category: str = 'acl') -> Tuple[Dict, List[int], str]:
     """加载原始查询数据用于分析，返回 (groups_dict, unique_groups, group_field_name)"""
     global UNIQUE_GROUPS, GROUP_FIELD
 
-    with open(QUERIES_FILE, 'r') as f:
+    # 根据 query_category 选择查询文件
+    queries_file = ACL_QUERIES_FILE if query_category == 'acl' else CCOMP_QUERIES_FILE
+    with open(queries_file, 'r') as f:
         data = json.load(f)
 
-    # 检测字段名：ccomp 或 acl
-    sample = data[0] if data else {}
-    if 'queries' in sample:
-        first_query = sample.get('queries', [{}])[0]
-        GROUP_FIELD = 'acl' if 'acl' in first_query else 'ccomp'
-    else:
-        GROUP_FIELD = 'acl' if 'acl' in sample else 'ccomp'
+    # query_category 直接决定 GROUP_FIELD
+    GROUP_FIELD = query_category
 
     # 动态收集所有唯一的 group 值
     group_values = set()
@@ -470,13 +467,13 @@ def check4_oracle_random(group_groups):
         log("  结论: 各组oracle random hit无显著差异 (p >= 0.05)")
     return results
 
-def run_confound_analysis():
+def run_confound_analysis(query_category: str = 'acl'):
     """运行所有混淆因素分析"""
     log("\n" + "=" * 80)
-    log(f"{GROUP_FIELD.upper()} 混淆因素分析")
+    log(f"{query_category.upper()} 混淆因素分析")
     log("=" * 80)
 
-    group_groups, _, _ = load_raw_queries()
+    group_groups, _, _ = load_raw_queries(query_category)
     log(f"加载了 {sum(len(g) for g in group_groups.values())} 个查询")
 
     check1_query_length(group_groups)
@@ -1979,7 +1976,7 @@ def main():
             run_group_pure_effect_regression(all_results_by_type['correct'])
 
         # ========== 该类别的混淆因素分析 (Check 1-4 + Bootstrap CI) ==========
-        run_confound_analysis()
+        run_confound_analysis(query_category)
 
     # ========== 全局 CORRECT vs NOISY 配对比较 (所有类别) ==========
     # 打印一个综合的 CORRECT vs NOISY 对比表
