@@ -468,24 +468,6 @@ def check4_oracle_random(ccomp_groups):
         log("  结论: 各组oracle random hit无显著差异 (p >= 0.05)")
     return results
 
-def run_confound_analysis():
-    """运行所有混淆因素分析"""
-    log("\n" + "=" * 80)
-    log(f"{GROUP_FIELD.upper()} 混淆因素分析")
-    log("=" * 80)
-
-    ccomp_groups, _, _ = load_raw_queries()
-    log(f"加载了 {sum(len(g) for g in ccomp_groups.values())} 个查询")
-
-    check1_query_length(ccomp_groups)
-    check2_pos_ratio(ccomp_groups)
-    check3_mean_idf(ccomp_groups)
-    check4_oracle_random(ccomp_groups)
-
-    log("\n" + "=" * 80)
-    log("混淆因素分析完成")
-    log("=" * 80)
-
 # ============ 评估指标计算 ============
 def compute_metrics(relevant_asin: str, retrieved_asins: List[str], k_values: List[int]) -> Dict:
     metrics = {}
@@ -1991,9 +1973,6 @@ def main():
     # 6E. ACL/CCOMP 纯效应回归 (使用 CORRECT 版本)
     if all_results_by_type.get('correct'):
         run_ccomp_pure_effect_regression(all_results_by_type['correct'])
-
-    # 运行 CCOMP 混淆因素分析 (Check 1-4 + Bootstrap CI)
-    run_confound_analysis()
 
     # 保存结果（处理 tuple key 等不可 JSON 序列化的问题）
     def sanitize_for_json(obj):
