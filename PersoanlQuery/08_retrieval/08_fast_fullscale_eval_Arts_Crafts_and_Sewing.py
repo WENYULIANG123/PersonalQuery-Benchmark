@@ -804,12 +804,19 @@ class DenseSearcher:
     def __init__(self, embeddings: np.ndarray, doc_ids: List[str], retriever_name: str):
         self.doc_ids = doc_ids
         self.retriever_name = retriever_name
-        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        # 显式使用 cuda:0 避免设备不一致问题
+        if torch.cuda.is_available():
+            self.device = torch.device('cuda:0')
+            torch.cuda.set_device(0)
+        else:
+            self.device = torch.device('cpu')
         # 归一化 doc embeddings 以支持余弦相似度
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms = np.where(norms == 0, 1, norms)  # 避免除零
         normalized_embeddings = embeddings / norms
         self.embeddings_tensor = torch.from_numpy(normalized_embeddings).float().to(self.device)
+        # 确保数据传输完成
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
 
     def search_batch(self, query_embeddings: List[np.ndarray], top_k: int = 10) -> List[List[Tuple[str, float]]]:
         if not query_embeddings:
@@ -1947,22 +1954,9 @@ def main():
                     query_type_results.append(result)
                 except FileNotFoundError as e:
                     log(f"  跳过 {retriever_name}: {e}")
-                except RuntimeError as e:
-                    if "CUDA" in str(e) or "cublas" in str(e):
-                        log(f"  CUDA 错误 {retriever_name}: {e}，跳过此检索器")
-                        # 尝试重置 CUDA
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                            torch.cuda.synchronize()
-                            try:
-                                torch.cuda.reset_accumulated_memory_stats()
-                                torch.cuda.reset_peak_memory_stats()
-                            except:
-                                pass
-                    else:
-                        log(f"  错误 {retriever_name}: {e}")
                 except Exception as e:
                     log(f"  错误 {retriever_name}: {e}")
+                    raise  # 不允许跳过，必须确保每个检索器成功
                 finally:
                     # 清理 GPU 缓存
                     if torch.cuda.is_available():
