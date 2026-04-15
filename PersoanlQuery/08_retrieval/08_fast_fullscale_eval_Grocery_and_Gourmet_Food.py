@@ -31,7 +31,9 @@ sys.path.insert(0, '/fs04/ar57/wenyu/PersoanlQuery/12_retrieval')
 CACHE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/retriever_Grocery_and_Gourmet_Food_cache"
 QUERY_CACHE_BASE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/query_cache_Grocery_and_Gourmet_Food"
 QUERY_TYPES = ['correct', 'noisy']  # 两种查询类型
-QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Grocery_and_Gourmet_Food/ccomp_query.json"
+QUERY_CATEGORIES = ['acl', 'ccomp']  # 两种查询类别
+ACL_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Grocery_and_Gourmet_Food/acl_query.json"
+CCOMP_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Grocery_and_Gourmet_Food/ccomp_query.json"
 OUTPUT_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/Grocery_and_Gourmet_Food"
 META_FILE = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2023/raw/meta_categories/meta_Grocery_and_Gourmet_Food.jsonl.gz"
 CATEGORY_NAME = "_Grocery_and_Gourmet_Food"
@@ -177,20 +179,17 @@ def validate_cache() -> bool:
 UNIQUE_GROUPS = [0, 1, 2, 3]  # 默认值，会在 load_raw_queries 时更新
 GROUP_FIELD = 'ccomp'  # 默认值，会在 load_raw_queries 时更新
 
-def load_raw_queries() -> Tuple[Dict, List[int], str]:
+def load_raw_queries(query_category: str = 'acl') -> Tuple[Dict, List[int], str]:
     """加载原始查询数据用于分析，返回 (groups_dict, unique_groups, group_field_name)"""
     global UNIQUE_GROUPS, GROUP_FIELD
 
-    with open(QUERIES_FILE, 'r') as f:
+    # 根据 query_category 选择查询文件
+    queries_file = ACL_QUERIES_FILE if query_category == 'acl' else CCOMP_QUERIES_FILE
+    with open(queries_file, 'r') as f:
         data = json.load(f)
 
-    # 检测字段名：ccomp 或 acl
-    sample = data[0] if data else {}
-    if 'queries' in sample:
-        first_query = sample.get('queries', [{}])[0]
-        GROUP_FIELD = 'acl' if 'acl' in first_query else 'ccomp'
-    else:
-        GROUP_FIELD = 'acl' if 'acl' in sample else 'ccomp'
+    # query_category 直接决定 GROUP_FIELD
+    GROUP_FIELD = query_category
 
     # 动态收集所有唯一的 group 值
     group_values = set()
@@ -218,34 +217,34 @@ def load_raw_queries() -> Tuple[Dict, List[int], str]:
                         'query': query,
                         'asin': asin,
                         'word_count': word_count,
-                        'ccomp_ratio': 0.0
+                        f'{GROUP_FIELD}_ratio': 0.0
                     })
         else:
             gv = item.get(f'target_{GROUP_FIELD}', item.get(GROUP_FIELD, 0))
             query = item.get('filled_query', '') or item.get('generated_query', '') or item.get('query', '')
             asin = item.get('asin', '')
             word_count = item.get('word_count') or 0
-            ccomp_ratio = item.get('persona', {}).get(f'{GROUP_FIELD}_sentence_ratio', 0.0)
+            group_ratio = item.get('persona', {}).get(f'{GROUP_FIELD}_sentence_ratio', 0.0)
             if query and asin:
                 groups_dict[gv].append({
                     'query': query,
                     'asin': asin,
                     'word_count': word_count,
-                    'ccomp_ratio': ccomp_ratio
+                    f'{GROUP_FIELD}_ratio': group_ratio
                 })
 
     return groups_dict, UNIQUE_GROUPS, GROUP_FIELD
 
-def check1_query_length(ccomp_groups):
+def check1_query_length(group_groups):
     """Check 1: Query 长度分析"""
     log("\n" + "=" * 80)
     log("Check 1: Query 长度分析")
     log("=" * 80)
 
     results = {}
-    for ccomp in UNIQUE_GROUPS:
-        lengths = [q['word_count'] for q in ccomp_groups[ccomp]]
-        results[ccomp] = {
+    for group in UNIQUE_GROUPS:
+        lengths = [q['word_count'] for q in group_groups[group]]
+        results[group] = {
             'count': len(lengths),
             'mean': np.mean(lengths),
             'std': np.std(lengths),
@@ -257,12 +256,12 @@ def check1_query_length(ccomp_groups):
     header = f"{GROUP_FIELD.upper():<10} {'N':<8} {'Mean':<10} {'Std':<10} {'Min':<8} {'Max':<8} {'Median':<10}"
     log(header)
     log("-" * 80)
-    for ccomp in UNIQUE_GROUPS:
-        r = results[ccomp]
-        log(f"{GROUP_FIELD.upper()}{ccomp}      {r['count']:<8} {r['mean']:<10.2f} {r['std']:<10.2f} {r['min']:<8} {r['max']:<8} {r['median']:<10.2f}")
+    for group in UNIQUE_GROUPS:
+        r = results[group]
+        log(f"{GROUP_FIELD.upper()}{group}      {r['count']:<8} {r['mean']:<10.2f} {r['std']:<10.2f} {r['min']:<8} {r['max']:<8} {r['median']:<10.2f}")
 
     # Kruskal-Wallis 检验
-    groups = [[q['word_count'] for q in ccomp_groups[c]] for c in UNIQUE_GROUPS]
+    groups = [[q['word_count'] for q in group_groups[g]] for g in UNIQUE_GROUPS]
     stat, p_value = stats.kruskal(*groups)
     log(f"\n  Kruskal-Wallis 检验: H={stat:.4f}, p={p_value:.4f}")
     if p_value < 0.05:
@@ -271,7 +270,7 @@ def check1_query_length(ccomp_groups):
         log("  结论: 各组query长度无显著差异 (p >= 0.05)")
     return results
 
-def check2_pos_ratio(ccomp_groups):
+def check2_pos_ratio(group_groups):
     """Check 2: Content/Function Word Ratio"""
     log("\n" + "=" * 80)
     log("Check 2: Content/Function Word Ratio (POS Tagging)")
@@ -288,11 +287,11 @@ def check2_pos_ratio(ccomp_groups):
     FUNCTION_POS = {'DET', 'ADP', 'AUX', 'PART', 'SCONJ', 'CCONJ', 'PRON'}
 
     results = {}
-    all_ratios = {c: [] for c in UNIQUE_GROUPS}
+    all_ratios = {g: [] for g in UNIQUE_GROUPS}
 
-    for ccomp in UNIQUE_GROUPS:
+    for group in UNIQUE_GROUPS:
         content_list, function_list, ratios = [], [], []
-        for q in ccomp_groups[ccomp]:
+        for q in group_groups[group]:
             doc = nlp(q['query'])
             content = sum(1 for t in doc if t.pos_ in CONTENT_POS)
             function = sum(1 for t in doc if t.pos_ in FUNCTION_POS)
@@ -301,9 +300,9 @@ def check2_pos_ratio(ccomp_groups):
             content_list.append(content)
             function_list.append(function)
             ratios.append(ratio)
-            all_ratios[ccomp].append(ratio)
+            all_ratios[group].append(ratio)
 
-        results[ccomp] = {
+        results[group] = {
             'count': len(ratios),
             'mean_content': np.mean(content_list),
             'mean_function': np.mean(function_list),
@@ -314,12 +313,12 @@ def check2_pos_ratio(ccomp_groups):
     header = f"{GROUP_FIELD.upper():<10} {'N':<8} {'Content':<10} {'Function':<10} {'Ratio':<10} {'Std':<10}"
     log(header)
     log("-" * 80)
-    for ccomp in UNIQUE_GROUPS:
-        r = results[ccomp]
-        log(f"{GROUP_FIELD.upper()}{ccomp}      {r['count']:<8} {r['mean_content']:<10.2f} {r['mean_function']:<10.2f} {r['mean_ratio']:<10.4f} {r['std_ratio']:<10.4f}")
+    for group in UNIQUE_GROUPS:
+        r = results[group]
+        log(f"{GROUP_FIELD.upper()}{group}      {r['count']:<8} {r['mean_content']:<10.2f} {r['mean_function']:<10.2f} {r['mean_ratio']:<10.4f} {r['std_ratio']:<10.4f}")
 
     # Kruskal-Wallis 检验
-    stat, p_value = stats.kruskal(*[all_ratios[c] for c in UNIQUE_GROUPS])
+    stat, p_value = stats.kruskal(*[all_ratios[g] for g in UNIQUE_GROUPS])
     log(f"\n  Kruskal-Wallis 检验: H={stat:.4f}, p={p_value:.4f}")
     if p_value < 0.05:
         log("  结论: 各组ratio存在显著差异 (p < 0.05)")
@@ -327,7 +326,7 @@ def check2_pos_ratio(ccomp_groups):
         log("  结论: 各组ratio无显著差异 (p >= 0.05)")
     return results
 
-def check3_mean_idf(ccomp_groups):
+def check3_mean_idf(group_groups):
     """Check 3: Mean IDF"""
     log("\n" + "=" * 80)
     log("Check 3: Mean IDF")
@@ -366,12 +365,12 @@ def check3_mean_idf(ccomp_groups):
         return idf_sum / len(non_stop)
 
     results = {}
-    idf_groups = {c: [] for c in UNIQUE_GROUPS}
+    idf_groups = {g: [] for g in UNIQUE_GROUPS}
 
-    for ccomp in UNIQUE_GROUPS:
-        idfs = [compute_query_idf(q['query']) for q in ccomp_groups[ccomp]]
-        idf_groups[ccomp] = idfs
-        results[ccomp] = {
+    for group in UNIQUE_GROUPS:
+        idfs = [compute_query_idf(q['query']) for q in group_groups[group]]
+        idf_groups[group] = idfs
+        results[group] = {
             'count': len(idfs),
             'mean_idf': np.mean(idfs),
             'std_idf': np.std(idfs),
@@ -381,9 +380,9 @@ def check3_mean_idf(ccomp_groups):
     header = f"{GROUP_FIELD.upper():<10} {'N':<8} {'Mean IDF':<12} {'Std':<10} {'Median':<10}"
     log(header)
     log("-" * 80)
-    for ccomp in UNIQUE_GROUPS:
-        r = results[ccomp]
-        log(f"{GROUP_FIELD.upper()}{ccomp}      {r['count']:<8} {r['mean_idf']:<12.4f} {r['std_idf']:<10.4f} {r['median_idf']:<10.4f}")
+    for group in UNIQUE_GROUPS:
+        r = results[group]
+        log(f"{GROUP_FIELD.upper()}{group}      {r['count']:<8} {r['mean_idf']:<12.4f} {r['std_idf']:<10.4f} {r['median_idf']:<10.4f}")
 
     # Mann-Whitney U test
     for c1, c2 in [(0, 2), (0, 3), (1, 2), (1, 3)]:
@@ -397,7 +396,7 @@ def check3_mean_idf(ccomp_groups):
         log("  结论: 各组IDF无显著差异 (p >= 0.05)")
     return results
 
-def check4_oracle_random(ccomp_groups):
+def check4_oracle_random(group_groups):
     """Check 4: Oracle-aware Random Retriever"""
     log("\n" + "=" * 80)
     log("Check 4: Oracle-aware Random Retriever")
@@ -425,42 +424,42 @@ def check4_oracle_random(ccomp_groups):
     log(f"  共有 {len(cat_to_asins)} 个类目")
 
     results = {}
-    hit_groups = {c: [] for c in UNIQUE_GROUPS}
+    hit_groups = {g: [] for g in UNIQUE_GROUPS}
     n_trials = 10
 
-    for ccomp in UNIQUE_GROUPS:
-        for q in ccomp_groups[ccomp]:
+    for group in UNIQUE_GROUPS:
+        for q in group_groups[group]:
             asin = q['asin']
             if asin not in asin_to_cat:
                 continue
             cat = asin_to_cat[asin]
             same_cat = cat_to_asins.get(cat, [])
             if len(same_cat) < 2:
-                hit_groups[ccomp].append(0.0)
+                hit_groups[group].append(0.0)
                 continue
             hits = 0
             for _ in range(n_trials):
                 sampled = np.random.choice(same_cat, size=min(10, len(same_cat)), replace=False)
                 hits += 1 if asin in sampled else 0
-            hit_groups[ccomp].append(hits / n_trials)
+            hit_groups[group].append(hits / n_trials)
 
-        if hit_groups[ccomp]:
-            results[ccomp] = {
-                'count': len(hit_groups[ccomp]),
-                'mean_hit': np.mean(hit_groups[ccomp]),
-                'std_hit': np.std(hit_groups[ccomp])
+        if hit_groups[group]:
+            results[group] = {
+                'count': len(hit_groups[group]),
+                'mean_hit': np.mean(hit_groups[group]),
+                'std_hit': np.std(hit_groups[group])
             }
 
     header = f"{GROUP_FIELD.upper():<10} {'N':<8} {'Hit@10':<12} {'Std':<10}"
     log(header)
     log("-" * 80)
-    for ccomp in UNIQUE_GROUPS:
-        r = results.get(ccomp, {})
+    for group in UNIQUE_GROUPS:
+        r = results.get(group, {})
         if r:
-            log(f"{GROUP_FIELD.upper()}{ccomp}      {r['count']:<8} {r['mean_hit']:<12.4f} {r['std_hit']:<10.4f}")
+            log(f"{GROUP_FIELD.upper()}{group}      {r['count']:<8} {r['mean_hit']:<12.4f} {r['std_hit']:<10.4f}")
 
     # Kruskal-Wallis
-    stat, p_value = stats.kruskal(*[hit_groups[c] for c in UNIQUE_GROUPS])
+    stat, p_value = stats.kruskal(*[hit_groups[g] for g in UNIQUE_GROUPS])
     log(f"\n  Kruskal-Wallis 检验: H={stat:.4f}, p={p_value:.4f}")
     if p_value < 0.05:
         log("  结论: 各组oracle random hit存在显著差异 (p < 0.05) ⚠️ ground truth产品可能天生更容易被找到!")
@@ -535,10 +534,10 @@ def print_bootstrap_ci_table(all_results: List[Dict], k_values: List[int]):
 
     for r in all_results:
         retriever = r['retriever']
-        for ccomp in UNIQUE_GROUPS:
-            ci = r['bootstrap_ci'].get(ccomp, {}).get('P@10', {})
+        for group in UNIQUE_GROUPS:
+            ci = r['bootstrap_ci'].get(group, {}).get('P@10', {})
             if ci:
-                row = f"{retriever:<12} {GROUP_FIELD.upper()}{ccomp}   {ci['mean']:.4f}     {ci['std']:.4f}     {ci['ci_lower']:.4f}      {ci['ci_upper']:.4f}"
+                row = f"{retriever:<12} {GROUP_FIELD.upper()}{group}   {ci['mean']:.4f}     {ci['std']:.4f}     {ci['ci_lower']:.4f}      {ci['ci_upper']:.4f}"
                 log(row)
 
     log("-" * 100)
@@ -583,43 +582,42 @@ def load_bm25_retriever():
         bm25 = pickle.load(f)
     return bm25
 
-def load_query_cache(retriever_name: str, query_type: str = 'correct') -> Dict:
+def load_query_cache(retriever_name: str, query_type: str = 'correct', query_category: str = 'acl') -> Dict:
     """加载查询缓存
 
     Args:
         retriever_name: 检索器名称
         query_type: 查询类型 ('correct' 或 'noisy')
+        query_category: 查询类别 ('acl' 或 'ccomp')
     """
     cache_path = os.path.join(
         QUERY_CACHE_BASE_DIR,
-        f'persona_{query_type}_query',
-        f'{retriever_name}__persona_{query_type}_cache.pkl'
+        f'{query_category}_{query_type}_query',
+        f'{retriever_name}__{query_category}_{query_type}_cache.pkl'
     )
     with open(cache_path, 'rb') as f:
         return pickle.load(f)
 
-def load_user_queries(query_type: str = 'correct') -> Tuple[Dict[str, List[Dict]], Dict[str, int], List[Tuple[int, float, float]]]:
-    """加载用户查询，每个查询项包含word_count和ccomp_ratio（POS ratio代理）
+def load_user_queries(query_type: str = 'correct', query_category: str = 'acl') -> Tuple[Dict[str, List[Dict]], Dict[str, int], List[Tuple[int, float, float]]]:
+    """加载用户查询，每个查询项包含word_count和group_ratio（POS ratio代理）
 
     Args:
         query_type: 查询类型 ('correct' 使用 filled_query, 'noisy' 使用 noisy_query)
+        query_category: 查询类别 ('acl' 或 'ccomp')
     """
     global GROUP_FIELD, UNIQUE_GROUPS
 
-    with open(QUERIES_FILE, 'r') as f:
+    # 根据 query_category 选择查询文件
+    queries_file = ACL_QUERIES_FILE if query_category == 'acl' else CCOMP_QUERIES_FILE
+    with open(queries_file, 'r') as f:
         data = json.load(f)
     user_queries = {}
-    user_to_ccomp = {}
-    all_query_metadata = []  # (user_idx, word_count, ccomp_ratio)
+    user_to_group = {}
+    all_query_metadata = []  # (user_idx, word_count, group_ratio)
     idx = 0
 
-    # 检测字段名：ccomp 或 acl
-    sample = data[0] if data else {}
-    if 'queries' in sample:
-        first_query = sample.get('queries', [{}])[0]
-        GROUP_FIELD = 'acl' if 'acl' in first_query else 'ccomp'
-    else:
-        GROUP_FIELD = 'acl' if 'acl' in sample else 'ccomp'
+    # query_category 直接决定 GROUP_FIELD
+    GROUP_FIELD = query_category
 
     # 动态收集所有唯一的 group 值
     group_values = set()
@@ -647,8 +645,8 @@ def load_user_queries(query_type: str = 'correct') -> Tuple[Dict[str, List[Dict]
             return q.get('filled_query', '') or q.get('generated_query', '') or q.get('query', '')
 
     # 支持两种格式：
-    # 1. 新嵌套格式：[{"user_id": ..., "asin": ..., "queries": [{filled_query, ccomp/acl, word_count}, ...]}]
-    # 2. 旧平铺格式：[{"user_id": ..., "filled_query": ..., "target_ccomp/acl": ...}]
+    # 1. 新嵌套格式：[{"user_id": ..., "asin": ..., "queries": [{filled_query, acl/ccomp, word_count}, ...]}]
+    # 2. 旧平铺格式：[{"user_id": ..., "filled_query": ..., "target_acl/ccomp": ...}]
     items = data if isinstance(data, list) else []
 
     for item in items:
@@ -662,14 +660,14 @@ def load_user_queries(query_type: str = 'correct') -> Tuple[Dict[str, List[Dict]
                 word_count = q.get('word_count', 0)
                 if user_id not in user_queries:
                     user_queries[user_id] = []
-                    user_to_ccomp[user_id] = gv
+                    user_to_group[user_id] = gv
                 if query_text and asin:
                     user_queries[user_id].append({
                         'query': query_text,
                         'asin': asin,
                         'word_count': word_count,
-                        'ccomp_ratio': 0.0,
-                        'ccomp': gv
+                        f'{GROUP_FIELD}_ratio': 0.0,
+                        f'{GROUP_FIELD}': gv
                     })
                     all_query_metadata.append((idx, word_count, 0.0))
                     idx += 1
@@ -682,21 +680,21 @@ def load_user_queries(query_type: str = 'correct') -> Tuple[Dict[str, List[Dict]
             asin = item.get('asin', '')
             gv = item.get(f'target_{GROUP_FIELD}', item.get(GROUP_FIELD, 0))
             word_count = item.get('word_count') or 0
-            ccomp_ratio = item.get('persona', {}).get(f'{GROUP_FIELD}_sentence_ratio', 0.0)
+            group_ratio = item.get('persona', {}).get(f'{GROUP_FIELD}_sentence_ratio', 0.0)
             if user_id not in user_queries:
                 user_queries[user_id] = []
-                user_to_ccomp[user_id] = gv
+                user_to_group[user_id] = gv
             if query_text and asin:
                 user_queries[user_id].append({
                     'query': query_text,
                     'asin': asin,
                     'word_count': word_count,
-                    'ccomp_ratio': ccomp_ratio,
-                    'ccomp': gv
+                    f'{GROUP_FIELD}_ratio': group_ratio,
+                    f'{GROUP_FIELD}': gv
                 })
-                all_query_metadata.append((idx, word_count, ccomp_ratio))
+                all_query_metadata.append((idx, word_count, group_ratio))
                 idx += 1
-    return user_queries, user_to_ccomp, all_query_metadata
+    return user_queries, user_to_group, all_query_metadata
 
 def build_word_idf_dict(meta_file: str, sample_size: int = 50000) -> Dict[str, float]:
     """从商品元数据语料库构建词的IDF字典（采样版本加速）"""
@@ -825,64 +823,64 @@ class BM25Searcher:
         return results
 
 # ============ 评估 ============
-def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_ccomp: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = 'correct') -> Dict:
+def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = 'correct', query_category: str = 'acl') -> Dict:
     log(f"\n{'='*60}")
-    log(f"检索器: {retriever_name.upper()} (密集) - {query_type.upper()}")
+    log(f"检索器: {retriever_name.upper()} (密集) - {query_category.upper()}/{query_type.upper()}")
     log(f"{'='*60}")
 
     embeddings, doc_ids, dim = load_dense_retriever(retriever_name)
-    query_cache = load_query_cache(retriever_name, query_type)
+    query_cache = load_query_cache(retriever_name, query_type, query_category)
     searcher = DenseSearcher(embeddings, doc_ids, retriever_name)
 
     matched_users = [uid for uid in user_queries.keys() if uid in query_cache]
     log(f"  匹配用户: {len(matched_users)}")
 
-    ccomp_groups = {g: [] for g in UNIQUE_GROUPS}
+    group_groups = {g: [] for g in UNIQUE_GROUPS}
     all_metrics = []
     eval_start = time.time()
 
-    # 分组统计: word_count bins 和 ccomp_ratio bins
+    # 分组统计: word_count bins 和 group_ratio bins
     word_bins = [(0, 15), (15, 20), (20, 25), (25, 30), (30, float('inf'))]
     word_bin_labels = ['很短(1-15)', '短(15-20)', '中(20-25)', '长(25-30)', '很长(30+)']
     ratio_bins = [(0.0, 0.05), (0.05, 0.1), (0.1, 0.2), (0.2, 0.5), (0.5, 1.0)]
     ratio_bin_labels = ['很低(0-0.05)', '低(0.05-0.1)', '中(0.1-0.2)', '高(0.2-0.5)', '很高(0.5+)']
 
     word_count_groups = {label: [] for label in word_bin_labels}
-    ccomp_ratio_groups = {label: [] for label in ratio_bin_labels}
+    group_ratio_groups = {label: [] for label in ratio_bin_labels}
 
     # IDF 分层分组
     idf_bin_groups = {label: [] for label in IDF_BIN_LABELS}
-    # IDF × ccomp 交叉分组: {(idf_label, ccomp): [metrics]}
-    idf_ccomp_cross = defaultdict(list)
+    # IDF × group 交叉分组: {(idf_label, group): [metrics]}
+    idf_group_cross = defaultdict(list)
     # 收集所有 query 原始数据用于 OLS 回归
     all_query_records = []
 
     for user_idx, user_id in enumerate(matched_users):
         queries = user_queries[user_id]
         cached_queries = query_cache[user_id]
-        ccomp = user_to_ccomp.get(user_id, 0)
+        group = user_to_group.get(user_id, 0)
 
         query_embeddings = []
         query_asins = []
         query_texts = []
         query_word_counts = []
-        query_ccomp_ratios = []
+        query_group_ratios = []
         query_idf_values = []
-        query_ccomps = []  # 每条查询自己的ccomp值
+        query_groups = []  # 每条查询自己的group值
 
         for q in queries:
             query_text = q['query']
             relevant_asin = q['asin']
             word_count = q.get('word_count', 0)
-            ccomp_ratio = q.get('ccomp_ratio', 0.0)
-            q_ccomp = q.get('ccomp', 0)  # 每条查询自己的ccomp值
+            group_ratio = q.get(f'{GROUP_FIELD}_ratio', 0.0)
+            q_group = q.get(GROUP_FIELD, 0)  # 每条查询自己的group值
             if query_text in cached_queries:
                 query_embeddings.append(cached_queries[query_text])
                 query_asins.append(relevant_asin)
                 query_texts.append(query_text)
                 query_word_counts.append(word_count)
-                query_ccomp_ratios.append(ccomp_ratio)
-                query_ccomps.append(q_ccomp)
+                query_group_ratios.append(group_ratio)
+                query_groups.append(q_group)
                 # 计算 IDF
                 q_idf = compute_query_idf(query_text, word_idf) if word_idf else 0.0
                 query_idf_values.append(q_idf)
@@ -895,18 +893,18 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_cc
         for i, (retrieved, relevant_asin) in enumerate(zip(results, query_asins)):
             retrieved_asins = [r[0] for r in retrieved]
             metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
-            ccomp = query_ccomps[i]  # 使用该查询自己的ccomp值
+            group = query_groups[i]  # 使用该查询自己的group值
             all_metrics.append(metrics)
-            ccomp_groups[ccomp].append(metrics)
+            group_groups[group].append(metrics)
 
             # 记录每条 query 的原始数据（用于 OLS 回归和 Paired Difference 分析）
             all_query_records.append({
                 'user_id': user_id,
                 'asin': relevant_asin,
-                GROUP_FIELD: ccomp,
+                f'{GROUP_FIELD}': group,
                 'mean_idf': query_idf_values[i],
                 'query_length': query_word_counts[i],
-                f'{GROUP_FIELD}_ratio': query_ccomp_ratios[i],
+                f'{GROUP_FIELD}_ratio': query_group_ratios[i],
                 'p_at1': float(metrics.get('P@1', 0.0)),
                 'p_at3': float(metrics.get('P@3', 0.0)),
                 'p_at5': float(metrics.get('P@5', 0.0)),
@@ -923,11 +921,11 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_cc
                     word_count_groups[label].append(metrics)
                     break
 
-            # ccomp_ratio (POS proxy) 分组
-            cr = query_ccomp_ratios[i]
+            # group_ratio (POS proxy) 分组
+            cr = query_group_ratios[i]
             for (low, high), label in zip(ratio_bins, ratio_bin_labels):
                 if low <= cr < high:
-                    ccomp_ratio_groups[label].append(metrics)
+                    group_ratio_groups[label].append(metrics)
                     break
 
             # IDF 分组
@@ -935,7 +933,7 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_cc
             for (low, high), label in zip(IDF_BINS, IDF_BIN_LABELS):
                 if low <= q_idf < high:
                     idf_bin_groups[label].append(metrics)
-                    idf_ccomp_cross[(label, ccomp)].append(metrics)
+                    idf_group_cross[(label, group)].append(metrics)
                     break
 
         if (user_idx + 1) % 100 == 0:
@@ -945,15 +943,15 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_cc
     eval_time = time.time() - eval_start
     overall_metrics = compute_average_metrics(all_metrics, k_values)
 
-    ccomp_metrics = {}
-    ccomp_counts = {}
-    for ccomp in UNIQUE_GROUPS:
-        if ccomp_groups[ccomp]:
-            ccomp_metrics[ccomp] = compute_average_metrics(ccomp_groups[ccomp], k_values)
-            ccomp_counts[ccomp] = len(ccomp_groups[ccomp])
+    group_metrics = {}
+    group_counts = {}
+    for group in UNIQUE_GROUPS:
+        if group_groups[group]:
+            group_metrics[group] = compute_average_metrics(group_groups[group], k_values)
+            group_counts[group] = len(group_groups[group])
         else:
-            ccomp_metrics[ccomp] = {k: 0.0 for k in [f'P@{i}' for i in k_values] + [f'N@{i}' for i in k_values] + [f'MR@{i}' for i in k_values] + [f'H@{i}' for i in k_values]}
-            ccomp_counts[ccomp] = 0
+            group_metrics[group] = {k: 0.0 for k in [f'P@{i}' for i in k_values] + [f'N@{i}' for i in k_values] + [f'MR@{i}' for i in k_values] + [f'H@{i}' for i in k_values]}
+            group_counts[group] = 0
 
     # 计算 word_count 分组统计
     word_count_analysis = {}
@@ -964,13 +962,13 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_cc
                 'metrics': compute_average_metrics(word_count_groups[label], k_values)
             }
 
-    # 计算 ccomp_ratio 分组统计
-    ccomp_ratio_analysis = {}
+    # 计算 group_ratio 分组统计
+    group_ratio_analysis = {}
     for label in ratio_bin_labels:
-        if ccomp_ratio_groups[label]:
-            ccomp_ratio_analysis[label] = {
-                'count': len(ccomp_ratio_groups[label]),
-                'metrics': compute_average_metrics(ccomp_ratio_groups[label], k_values)
+        if group_ratio_groups[label]:
+            group_ratio_analysis[label] = {
+                'count': len(group_ratio_groups[label]),
+                'metrics': compute_average_metrics(group_ratio_groups[label], k_values)
             }
 
     # 计算 IDF 分组统计
@@ -982,11 +980,11 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_cc
                 'metrics': compute_average_metrics(idf_bin_groups[label], k_values)
             }
 
-    # 计算 IDF × ccomp 交叉分组统计
-    idf_ccomp_analysis = {}
-    for (idf_label, ccomp_val), metrics_list in idf_ccomp_cross.items():
+    # 计算 IDF × group 交叉分组统计
+    idf_group_analysis = {}
+    for (idf_label, group_val), metrics_list in idf_group_cross.items():
         if metrics_list:
-            idf_ccomp_analysis[(idf_label, ccomp_val)] = {
+            idf_group_analysis[(idf_label, group_val)] = {
                 'count': len(metrics_list),
                 'metrics': compute_average_metrics(metrics_list, k_values)
             }
@@ -994,18 +992,18 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_cc
     return {
         'retriever': retriever_name, 'dim': dim, 'type': 'dense', 'num_users': len(matched_users),
         'num_queries': len(all_metrics), 'eval_time_seconds': eval_time,
-        'metrics': overall_metrics, 'ccomp_metrics': ccomp_metrics, 'ccomp_counts': ccomp_counts,
-        'raw_metrics_per_ccomp': ccomp_groups, 'all_raw_metrics': all_metrics,
+        'metrics': overall_metrics, 'group_metrics': group_metrics, 'group_counts': group_counts,
+        'raw_metrics_per_group': group_groups, 'all_raw_metrics': all_metrics,
         'word_count_analysis': word_count_analysis,
-        'ccomp_ratio_analysis': ccomp_ratio_analysis,
+        'group_ratio_analysis': group_ratio_analysis,
         'idf_analysis': idf_analysis,
-        'idf_ccomp_cross': idf_ccomp_analysis,
+        'idf_group_cross': idf_group_analysis,
         'all_query_records': all_query_records
     }
 
-def evaluate_bm25_retriever(user_queries: Dict, user_to_ccomp: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = 'correct') -> Dict:
+def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = 'correct', query_category: str = 'acl') -> Dict:
     log(f"\n{'='*60}")
-    log(f"检索器: BM25 (稀疏) - {query_type.upper()}")
+    log(f"检索器: BM25 (稀疏) - {query_category.upper()}/{query_type.upper()}")
     log(f"{'='*60}")
 
     bm25 = load_bm25_retriever()
@@ -1016,7 +1014,7 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_ccomp: Dict, k_values: L
 
     eval_start = time.time()
 
-    ccomp_groups = {g: [] for g in UNIQUE_GROUPS}
+    group_groups = {g: [] for g in UNIQUE_GROUPS}
     all_metrics = []
 
     # 分组统计
@@ -1025,11 +1023,11 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_ccomp: Dict, k_values: L
     ratio_bins = [(0.0, 0.05), (0.05, 0.1), (0.1, 0.2), (0.2, 0.5), (0.5, 1.0)]
     ratio_bin_labels = ['很低(0-0.05)', '低(0.05-0.1)', '中(0.1-0.2)', '高(0.2-0.5)', '很高(0.5+)']
     word_count_groups = {label: [] for label in word_bin_labels}
-    ccomp_ratio_groups = {label: [] for label in ratio_bin_labels}
+    group_ratio_groups = {label: [] for label in ratio_bin_labels}
 
     # IDF 分层分组
     idf_bin_groups = {label: [] for label in IDF_BIN_LABELS}
-    idf_ccomp_cross = defaultdict(list)
+    idf_group_cross = defaultdict(list)
     # 收集所有 query 原始数据用于 OLS 回归
     all_query_records = []
 
@@ -1039,8 +1037,8 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_ccomp: Dict, k_values: L
         query_texts = [q['query'] for q in queries]
         query_asins = [q['asin'] for q in queries]
         query_word_counts = [q.get('word_count', 0) for q in queries]
-        query_ccomp_ratios = [q.get('ccomp_ratio', 0.0) for q in queries]
-        query_ccomps = [q.get('ccomp', 0) for q in queries]  # 每条查询自己的ccomp值
+        query_group_ratios = [q.get(f'{GROUP_FIELD}_ratio', 0.0) for q in queries]
+        query_groups = [q.get(GROUP_FIELD, 0) for q in queries]  # 每条查询自己的group值
         query_idf_values = [compute_query_idf(q['query'], word_idf) if word_idf else 0.0 for q in queries]
 
         if not query_texts:
@@ -1051,18 +1049,18 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_ccomp: Dict, k_values: L
         for i, (retrieved, relevant_asin) in enumerate(zip(results, query_asins)):
             retrieved_asins = [r[0] for r in retrieved]
             metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
-            ccomp = query_ccomps[i]  # 使用该查询自己的ccomp值
+            group = query_groups[i]  # 使用该查询自己的group值
             all_metrics.append(metrics)
-            ccomp_groups[ccomp].append(metrics)
+            group_groups[group].append(metrics)
 
             # 记录每条 query 的原始数据（用于 OLS 回归和 Paired Difference 分析）
             all_query_records.append({
                 'user_id': user_id,
                 'asin': relevant_asin,
-                GROUP_FIELD: ccomp,
+                f'{GROUP_FIELD}': group,
                 'mean_idf': query_idf_values[i],
                 'query_length': query_word_counts[i],
-                f'{GROUP_FIELD}_ratio': query_ccomp_ratios[i],
+                f'{GROUP_FIELD}_ratio': query_group_ratios[i],
                 'p_at1': float(metrics.get('P@1', 0.0)),
                 'p_at3': float(metrics.get('P@3', 0.0)),
                 'p_at5': float(metrics.get('P@5', 0.0)),
@@ -1079,11 +1077,11 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_ccomp: Dict, k_values: L
                     word_count_groups[label].append(metrics)
                     break
 
-            # ccomp_ratio 分组
-            cr = query_ccomp_ratios[i]
+            # group_ratio 分组
+            cr = query_group_ratios[i]
             for (low, high), label in zip(ratio_bins, ratio_bin_labels):
                 if low <= cr < high:
-                    ccomp_ratio_groups[label].append(metrics)
+                    group_ratio_groups[label].append(metrics)
                     break
 
             # IDF 分组
@@ -1091,7 +1089,7 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_ccomp: Dict, k_values: L
             for (low, high), label in zip(IDF_BINS, IDF_BIN_LABELS):
                 if low <= q_idf < high:
                     idf_bin_groups[label].append(metrics)
-                    idf_ccomp_cross[(label, ccomp)].append(metrics)
+                    idf_group_cross[(label, group)].append(metrics)
                     break
 
         if (user_idx + 1) % 100 == 0:
@@ -1101,15 +1099,15 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_ccomp: Dict, k_values: L
     eval_time = time.time() - eval_start
     overall_metrics = compute_average_metrics(all_metrics, k_values)
 
-    ccomp_metrics = {}
-    ccomp_counts = {}
-    for ccomp in UNIQUE_GROUPS:
-        if ccomp_groups[ccomp]:
-            ccomp_metrics[ccomp] = compute_average_metrics(ccomp_groups[ccomp], k_values)
-            ccomp_counts[ccomp] = len(ccomp_groups[ccomp])
+    group_metrics = {}
+    group_counts = {}
+    for group in UNIQUE_GROUPS:
+        if group_groups[group]:
+            group_metrics[group] = compute_average_metrics(group_groups[group], k_values)
+            group_counts[group] = len(group_groups[group])
         else:
-            ccomp_metrics[ccomp] = {k: 0.0 for k in [f'P@{i}' for i in k_values] + [f'N@{i}' for i in k_values] + [f'MR@{i}' for i in k_values] + [f'H@{i}' for i in k_values]}
-            ccomp_counts[ccomp] = 0
+            group_metrics[group] = {k: 0.0 for k in [f'P@{i}' for i in k_values] + [f'N@{i}' for i in k_values] + [f'MR@{i}' for i in k_values] + [f'H@{i}' for i in k_values]}
+            group_counts[group] = 0
 
     # 计算 word_count 分组统计
     word_count_analysis = {}
@@ -1120,13 +1118,13 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_ccomp: Dict, k_values: L
                 'metrics': compute_average_metrics(word_count_groups[label], k_values)
             }
 
-    # 计算 ccomp_ratio 分组统计
-    ccomp_ratio_analysis = {}
+    # 计算 group_ratio 分组统计
+    group_ratio_analysis = {}
     for label in ratio_bin_labels:
-        if ccomp_ratio_groups[label]:
-            ccomp_ratio_analysis[label] = {
-                'count': len(ccomp_ratio_groups[label]),
-                'metrics': compute_average_metrics(ccomp_ratio_groups[label], k_values)
+        if group_ratio_groups[label]:
+            group_ratio_analysis[label] = {
+                'count': len(group_ratio_groups[label]),
+                'metrics': compute_average_metrics(group_ratio_groups[label], k_values)
             }
 
     # 计算 IDF 分组统计
@@ -1138,11 +1136,11 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_ccomp: Dict, k_values: L
                 'metrics': compute_average_metrics(idf_bin_groups[label], k_values)
             }
 
-    # 计算 IDF × ccomp 交叉分组统计
-    idf_ccomp_analysis = {}
-    for (idf_label, ccomp_val), metrics_list in idf_ccomp_cross.items():
+    # 计算 IDF × group 交叉分组统计
+    idf_group_analysis = {}
+    for (idf_label, group_val), metrics_list in idf_group_cross.items():
         if metrics_list:
-            idf_ccomp_analysis[(idf_label, ccomp_val)] = {
+            idf_group_analysis[(idf_label, group_val)] = {
                 'count': len(metrics_list),
                 'metrics': compute_average_metrics(metrics_list, k_values)
             }
@@ -1150,12 +1148,12 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_ccomp: Dict, k_values: L
     return {
         'retriever': 'bm25', 'dim': 0, 'type': 'sparse', 'num_users': len(matched_users),
         'num_queries': len(all_metrics), 'eval_time_seconds': eval_time,
-        'metrics': overall_metrics, 'ccomp_metrics': ccomp_metrics, 'ccomp_counts': ccomp_counts,
-        'raw_metrics_per_ccomp': ccomp_groups, 'all_raw_metrics': all_metrics,
+        'metrics': overall_metrics, 'group_metrics': group_metrics, 'group_counts': group_counts,
+        'raw_metrics_per_group': group_groups, 'all_raw_metrics': all_metrics,
         'word_count_analysis': word_count_analysis,
-        'ccomp_ratio_analysis': ccomp_ratio_analysis,
+        'group_ratio_analysis': group_ratio_analysis,
         'idf_analysis': idf_analysis,
-        'idf_ccomp_cross': idf_ccomp_analysis,
+        'idf_group_cross': idf_group_analysis,
         'all_query_records': all_query_records
     }
 
@@ -1184,13 +1182,13 @@ def print_overall_table(all_results: List[Dict], k_values: List[int]):
         row += f" {r['eval_time_seconds']:.2f}"
         log(row)
 
-def print_ccomp_table(all_results: List[Dict], k_values: List[int]):
+def print_group_table(all_results: List[Dict], k_values: List[int]):
     log("\n" + "=" * 120)
     log(f"{GROUP_FIELD.upper()} 分组评估结果{CATEGORY_NAME}")
     log("=" * 120)
 
-    for ccomp in UNIQUE_GROUPS:
-        log(f"\n--- {GROUP_FIELD.upper()}={ccomp} ---")
+    for group in UNIQUE_GROUPS:
+        log(f"\n--- {GROUP_FIELD.upper()}{group} ---")
         header = f"{'检索器':<10} {'类型':<8}"
         for k in k_values:
             header += f" {'P@'+str(k):<12}"
@@ -1199,8 +1197,8 @@ def print_ccomp_table(all_results: List[Dict], k_values: List[int]):
         log("-" * 120)
 
         for r in all_results:
-            m = r['ccomp_metrics'].get(ccomp, {})
-            count = r['ccomp_counts'].get(ccomp, 0)
+            m = r['group_metrics'].get(group, {})
+            count = r['group_counts'].get(group, 0)
             row = f"{r['retriever']:<10} {r['type']:<8}"
             for k in k_values:
                 row += f" {m.get(f'P@{k}', 0.0):.4f}     "
@@ -1214,8 +1212,8 @@ def print_cross_tab(all_results: List[Dict], metric: str, query_type: str = ''):
     log(f"{'='*80}")
 
     header = f"{'检索器':<12}"
-    for ccomp in UNIQUE_GROUPS:
-        header += f" {GROUP_FIELD.upper()+str(ccomp):<12}"
+    for group in UNIQUE_GROUPS:
+        header += f" {GROUP_FIELD.upper()+str(group):<12}"
     header += f" {'平均':<10}"
     log(header)
     log("-" * 80)
@@ -1225,11 +1223,11 @@ def print_cross_tab(all_results: List[Dict], metric: str, query_type: str = ''):
         row = f"{r['retriever']:<12}"
         row_sum = 0
         row_count = 0
-        for ccomp in UNIQUE_GROUPS:
-            val = r['ccomp_metrics'].get(ccomp, {}).get(metric, 0.0)
+        for group in UNIQUE_GROUPS:
+            val = r['group_metrics'].get(group, {}).get(metric, 0.0)
             row += f" {val:.4f}     "
             row_sum += val
-            totals[ccomp] += val
+            totals[group] += val
             row_count += 1
         row_avg = row_sum / row_count if row_count > 0 else 0.0
         totals['count'] += 1
@@ -1238,8 +1236,8 @@ def print_cross_tab(all_results: List[Dict], metric: str, query_type: str = ''):
 
     if totals['count'] > 0:
         avg_row = f"{'平均':<12}"
-        for ccomp in UNIQUE_GROUPS:
-            avg_val = totals[ccomp] / totals['count']
+        for group in UNIQUE_GROUPS:
+            avg_val = totals[group] / totals['count']
             avg_row += f" {avg_val:.4f}     "
         log("-" * 80)
         log(avg_row)
@@ -1284,7 +1282,7 @@ def print_summary_table_wide(all_results: List[Dict], query_type: str = 'CORRECT
         for m in metrics:
             metric_vals = []
             for ccomp in UNIQUE_GROUPS:
-                val = r['ccomp_metrics'].get(ccomp, {}).get(m, 0.0)
+                val = r['group_metrics'].get(ccomp, {}).get(m, 0.0)
                 row += f" {val:>{COL_W}.4f}"
                 metric_vals.append(val)
                 all_vals.append(val)
@@ -1326,7 +1324,7 @@ def print_summary_table_long(all_results: List[Dict], query_type: str = 'CORRECT
         for ccomp in UNIQUE_GROUPS:
             group_vals = []
             for r in all_results:
-                val = r['ccomp_metrics'].get(ccomp, {}).get(metric, 0.0)
+                val = r['group_metrics'].get(ccomp, {}).get(metric, 0.0)
                 group_vals.append(val)
             group_avg = sum(group_vals) / len(group_vals) if group_vals else 0.0
             row += f" {group_avg:.4f}      "
@@ -1358,7 +1356,7 @@ def print_summary_table_long(all_results: List[Dict], query_type: str = 'CORRECT
             row = f"{metric:<10}"
             metric_vals = []
             for ccomp in UNIQUE_GROUPS:
-                val = r['ccomp_metrics'].get(ccomp, {}).get(metric, 0.0)
+                val = r['group_metrics'].get(ccomp, {}).get(metric, 0.0)
                 row += f" {val:.4f}      "
                 metric_vals.append(val)
             metric_avg = sum(metric_vals) / len(metric_vals) if metric_vals else 0.0
@@ -1367,12 +1365,12 @@ def print_summary_table_long(all_results: List[Dict], query_type: str = 'CORRECT
 
 
 # ============ 分层分析：IDF × CCOMP ============
-def run_ols_ccomp_analysis(all_results: List[Dict]):
+def run_ols_group_analysis(all_results: List[Dict]):
     """OLS回归分析: 控制IDF、查询长度、词汇复杂度后，检验acl/ccomp效应是否独立"""
     log("\n" + "=" * 80)
     log(f"6C. OLS回归分析: {GROUP_FIELD.upper()}效应是否独立于IDF等混淆因素")
     log("=" * 80)
-    log(f"目的: 在控制 mean_idf + query_length + {GROUP_FIELD}_ratio 后，检验 {GROUP_FIELD}_high 的净效应")
+    log("目的: 在控制 mean_idf + query_length + group_ratio 后，检验 group_high 的净效应")
     log("")
 
     # 合并所有检索器的 query records
@@ -1391,12 +1389,12 @@ def run_ols_ccomp_analysis(all_results: List[Dict]):
     df = pd.DataFrame(all_records)
     # 动态阈值：使用中位数分组
     threshold = UNIQUE_GROUPS[len(UNIQUE_GROUPS) // 2] if UNIQUE_GROUPS else 2
-    df[f'{GROUP_FIELD}_high'] = (df[GROUP_FIELD] >= threshold).astype(int)
+    df['group_high'] = (df[GROUP_FIELD] >= threshold).astype(int)
     log(f"  分组字段: {GROUP_FIELD}, 高低分界阈值: {threshold}")
     log(f"  有效分组: {UNIQUE_GROUPS}")
 
     log(f"  总样本数: {len(df)} queries")
-    log(f"  {GROUP_FIELD}_high=1: {df[f'{GROUP_FIELD}_high'].sum()}, {GROUP_FIELD}_high=0: {(df[f'{GROUP_FIELD}_high']==0).sum()}")
+    log(f"  group_high=1: {df['group_high'].sum()}, group_high=0: {(df['group_high']==0).sum()}")
     log(f"  检索器数: {df['retriever'].nunique()}")
     log("")
 
@@ -1404,19 +1402,19 @@ def run_ols_ccomp_analysis(all_results: List[Dict]):
     ols_table = []
     for retriever in sorted(df['retriever'].unique()):
         df_r = df[df['retriever'] == retriever].copy()
-        formula = f'p_at10 ~ {GROUP_FIELD}_high + mean_idf + query_length + {GROUP_FIELD}_ratio'
+        formula = f'p_at10 ~ group_high + mean_idf + query_length + {GROUP_FIELD}_ratio'
 
         try:
-            df_r_clean = df_r[['p_at10', f'{GROUP_FIELD}_high', 'mean_idf', 'query_length', f'{GROUP_FIELD}_ratio']].dropna()
+            df_r_clean = df_r[['p_at10', 'group_high', 'mean_idf', 'query_length', f'{GROUP_FIELD}_ratio']].dropna()
             if len(df_r_clean) < 10:
                 ols_table.append({'retriever': retriever, 'n': len(df_r_clean), 'r2': float('nan'),
                                  'coef': float('nan'), 't': float('nan'), 'p': float('nan'), 'sig': ''})
                 continue
 
             model = smf.ols(formula, data=df_r_clean).fit()
-            p_val = model.pvalues.get(f'{GROUP_FIELD}_high', float('nan'))
-            coef = model.params.get(f'{GROUP_FIELD}_high', float('nan'))
-            t_val = model.tvalues.get(f'{GROUP_FIELD}_high', float('nan'))
+            p_val = model.pvalues.get('group_high', float('nan'))
+            coef = model.params.get('group_high', float('nan'))
+            t_val = model.tvalues.get('group_high', float('nan'))
             sig = "***" if not np.isnan(p_val) and p_val < 0.001 else \
                   "**"  if not np.isnan(p_val) and p_val < 0.01  else \
                   "*"   if not np.isnan(p_val) and p_val < 0.05  else ""
@@ -1434,13 +1432,13 @@ def run_ols_ccomp_analysis(all_results: List[Dict]):
                              'coef': float('nan'), 't': float('nan'), 'p': float('nan'), 'sig': f'ERR:{e}'})
 
     # 汇总 OLS
-    formula_pooled = f'p_at10 ~ {GROUP_FIELD}_high + mean_idf + query_length + {GROUP_FIELD}_ratio + C(retriever)'
+    formula_pooled = f'p_at10 ~ group_high + mean_idf + query_length + {GROUP_FIELD}_ratio + C(retriever)'
     try:
-        df_clean = df[['p_at10', f'{GROUP_FIELD}_high', 'mean_idf', 'query_length', f'{GROUP_FIELD}_ratio', 'retriever']].dropna()
+        df_clean = df[['p_at10', 'group_high', 'mean_idf', 'query_length', f'{GROUP_FIELD}_ratio', 'retriever']].dropna()
         model_pooled = smf.ols(formula_pooled, data=df_clean).fit()
-        p_val = model_pooled.pvalues.get(f'{GROUP_FIELD}_high', float('nan'))
-        coef = model_pooled.params.get(f'{GROUP_FIELD}_high', float('nan'))
-        t_val = model_pooled.tvalues.get(f'{GROUP_FIELD}_high', float('nan'))
+        p_val = model_pooled.pvalues.get('group_high', float('nan'))
+        coef = model_pooled.params.get('group_high', float('nan'))
+        t_val = model_pooled.tvalues.get('group_high', float('nan'))
         sig = "***" if not np.isnan(p_val) and p_val < 0.001 else \
               "**"  if not np.isnan(p_val) and p_val < 0.01  else \
               "*"   if not np.isnan(p_val) and p_val < 0.05  else ""
@@ -1530,7 +1528,7 @@ def run_paired_difference_analysis(all_results: List[Dict]):
 
     n_ret = len(pivot['retriever'].unique())
     pairs_per_ret = len(pivot) // n_ret
-    log(f"  配对样本数: {len(pivot)} ({n_ret}检索器 × {pairs_per_ret}对/检索器，每对 = 同用户{group_high} vs {group_low})")
+    log(f"  配对样本数: {len(pivot)} ({n_ret}检索器 × {pairs_per_ret}对/检索器，每对 = 同用户group3 vs group0)")
 
     # Paired bootstrap per retriever
     np.random.seed(42)
@@ -1600,13 +1598,13 @@ def run_paired_difference_analysis(all_results: List[Dict]):
         log("")
 
 # ============ Paired OLS 回归：ACL/CCOMP 纯效应分析 ============
-def run_ccomp_pure_effect_regression(all_results: List[Dict]):
+def run_group_pure_effect_regression(all_results: List[Dict]):
     """Paired OLS 回归：控制长度差和 IDF 差后，分析 acl/ccomp 的纯效应
 
     对每个用户计算：
-    - diff_p10 = acl/ccomp=max 的 P@10 - acl/ccomp=0 的 P@10
-    - diff_length = acl/ccomp=max 的长度 - acl/ccomp=0 的长度
-    - diff_idf = acl/ccomp=max 的 IDF - acl/ccomp=0 的 IDF
+    - diff_p10 = acl=3 的 P@10 - acl/ccomp=0 的 P@10
+    - diff_length = acl=3 的长度 - acl/ccomp=0 的长度
+    - diff_idf = acl=3 的 IDF - acl/ccomp=0 的 IDF
 
     然后运行 OLS: diff_p10 ~ diff_length + diff_idf
     - 截距 = 控制长度和 IDF 差异后的 acl/ccomp 纯效应
@@ -1617,7 +1615,7 @@ def run_ccomp_pure_effect_regression(all_results: List[Dict]):
     log(f"{GROUP_FIELD.upper()} 纯效应回归分析 (控制 diff_length + diff_idf)")
     log("=" * 80)
     log("模型: diff_p10 ~ diff_length + diff_idf")
-    log(f"  • 截距 = 控制长度差和IDF差后的 {GROUP_FIELD} 纯效应")
+    log("  • 截距 = 控制长度差和IDF差后的 group 纯效应")
     log("  • diff_length 系数 = 长度每多1词，P@10 变化多少")
     log("  • diff_idf 系数 = IDF每多1，P@10 变化多少")
     log("")
@@ -1650,8 +1648,8 @@ def run_ccomp_pure_effect_regression(all_results: List[Dict]):
         log("  分组不足，跳过纯效应回归分析")
         return
 
-    group_low = all_groups[0]   # ccomp=0
-    group_high = all_groups[-1]  # ccomp=max
+    group_low = all_groups[0]   # acl=0
+    group_high = all_groups[-1]  # acl=max
     log(f"  极端版本: {GROUP_FIELD}={group_low} (低) vs {GROUP_FIELD}={group_high} (高)")
     log("")
 
@@ -1836,84 +1834,18 @@ def print_query_type_comparison(all_results_by_type: Dict[str, List[Dict]], k_va
 
 def main():
     log("=" * 60)
-    log(f"快速全量评估 - 多检索器 + {GROUP_FIELD.upper()}分组 + 交叉对比")
+    log(f"快速全量评估 - 多检索器 + ACL/CCOMP 双类别 + 交叉对比")
     log("=" * 60)
 
     if torch.cuda.is_available():
         log(f"GPU: {torch.cuda.get_device_name(0)}")
 
-    # 检查缓存完整性
-    # if not validate_cache():
-    #     log("缓存完整性检查失败，退出。")
-    #     return
-
-    log("\n加载用户数据...")
-    # 先加载 correct 版本获取统计信息
-    user_queries_correct, user_to_ccomp, _ = load_user_queries('correct')
-    log(f"  用户数: {len(user_queries_correct)}")
-
-    # 按每条查询的ccomp值计数，而非按用户
-    ccomp_dist = defaultdict(int)
-    for user_qs in user_queries_correct.values():
-        for q in user_qs:
-            ccomp_dist[q.get('ccomp', 0)] += 1
-    log(f"  {GROUP_FIELD.upper()}分布: {dict(sorted(ccomp_dist.items()))}")
-
-    # 计算查询长度分组统计
-    all_word_counts = [q.get('word_count') or 0 for user_qs in user_queries_correct.values() for q in user_qs]
-    q25, q50, q75 = np.percentile(all_word_counts, [25, 50, 75])
-    log(f"  Query长度分布: min={min(all_word_counts)}, Q25={q25:.0f}, Q50={q50:.0f}, Q75={q75:.0f}, max={max(all_word_counts)}")
-
-    # 构建词IDF字典（用于分层分析）
-    log("\n构建词IDF字典（用于分层分析）...")
-    word_idf = build_word_idf_dict(META_FILE, sample_size=50000)
-    # 检查IDF分布
-    sample_idfs = [compute_query_idf(q['query'], word_idf) for user_qs in user_queries_correct.values() for q in user_qs]
-    if sample_idfs:
-        log(f"  Query IDF分布: min={min(sample_idfs):.2f}, mean={np.mean(sample_idfs):.2f}, max={max(sample_idfs):.2f}")
-
     k_values = [1, 3, 5, 10]
 
-    # 分别对 correct 和 noisy 进行评估
-    all_results_by_type = {}
+    # 构建词IDF字典（用于分层分析）- 只需构建一次
+    log("\n构建词IDF字典（用于分层分析）...")
+    word_idf = build_word_idf_dict(META_FILE, sample_size=50000)
 
-    for query_type in QUERY_TYPES:
-        log("\n" + "#" * 80)
-        log(f"# 查询类型: {query_type.upper()}")
-        log("#" * 80)
-
-        # 根据 query_type 加载对应的查询
-        user_queries, user_to_ccomp, _ = load_user_queries(query_type)
-        log(f"  用户数: {len(user_queries)}")
-
-        query_type_results = []
-
-        # 评估密集检索器
-        for retriever_name in DENSE_RETRIEVERS:
-            try:
-                result = evaluate_dense_retriever(retriever_name, user_queries, user_to_ccomp, k_values, word_idf, query_type)
-                result['query_type'] = query_type
-                query_type_results.append(result)
-            except FileNotFoundError as e:
-                log(f"  跳过 {retriever_name}: {e}")
-            except Exception as e:
-                log(f"  错误 {retriever_name}: {e}")
-
-        # 评估 BM25
-        try:
-            result = evaluate_bm25_retriever(user_queries, user_to_ccomp, k_values, word_idf, query_type)
-            result['query_type'] = query_type
-            query_type_results.append(result)
-        except Exception as e:
-            log(f"  BM25 错误: {e}")
-
-        all_results_by_type[query_type] = query_type_results
-
-    # 合并所有结果用于后续分析
-    all_results = all_results_by_type.get('correct', []) + all_results_by_type.get('noisy', [])
-
-    # 计算 Oracle-Aware Random Baseline
-    log("\n计算 Oracle-Aware Random Baseline...")
     # 加载 doc_ids 用于随机基线
     embeddings_path = None
     for f in os.listdir(CACHE_DIR):
@@ -1925,54 +1857,142 @@ def main():
     n_docs = len(doc_ids)
     log(f"  总文档数: {n_docs}")
 
-    # ========== ACL 组间性能比较 (CORRECT 版本) ==========
-    if all_results_by_type.get('correct'):
-        # 打印宽格式汇总表
-        print_summary_table_wide(all_results_by_type['correct'], 'CORRECT')
+    # ========== 对每个查询类别分别进行评估 ==========
+    # all_results_by_category_and_type: {(category, query_type): [results]}
+    all_results_by_category_and_type = {}
+    # all_results_by_category: {category: [all results for that category]}
+    all_results_by_category = {}
 
-    # ========== ACL 组间性能比较 (NOISY 版本) ==========
-    if all_results_by_type.get('noisy'):
-        # 打印宽格式汇总表
-        print_summary_table_wide(all_results_by_type['noisy'], 'NOISY')
+    for query_category in QUERY_CATEGORIES:
+        log("\n" + "=" * 80)
+        log(f"========== 开始评估 {query_category.upper()} ==========")
+        log("=" * 80)
 
-    # ========== CORRECT vs NOISY 配对比较 ==========
-    # 基于 (user_id, asin) 匹配，对每个 noisy 查询找到对应的 correct 查询进行配对对比
-    if all_results_by_type.get('noisy') and all_results_by_type.get('correct'):
-        print_query_type_comparison(all_results_by_type, k_values)
+        # 先加载 correct 版本获取统计信息
+        user_queries_correct, user_to_group, _ = load_user_queries('correct', query_category)
+        log(f"  [{query_category.upper()}] 用户数: {len(user_queries_correct)}")
 
-    # 计算并打印 Bootstrap CI
-    log("\n计算 Bootstrap CI (n=1000, CI=95%)...")
-    for r in all_results:
-        r['bootstrap_ci'] = {}
-        for ccomp in UNIQUE_GROUPS:
-            if r['raw_metrics_per_ccomp'].get(ccomp):
-                r['bootstrap_ci'][ccomp] = compute_bootstrap_ci(
-                    r['raw_metrics_per_ccomp'][ccomp], k_values, n_bootstrap=1000, ci=0.95
+        # 按每条查询的group值计数
+        group_dist = defaultdict(int)
+        for user_qs in user_queries_correct.values():
+            for q in user_qs:
+                group_dist[q.get(GROUP_FIELD, 0)] += 1
+        log(f"  [{query_category.upper()}] {GROUP_FIELD.upper()}分布: {dict(sorted(group_dist.items()))}")
+
+        # 计算查询长度分组统计
+        all_word_counts = [q.get('word_count') or 0 for user_qs in user_queries_correct.values() for q in user_qs]
+        q25, q50, q75 = np.percentile(all_word_counts, [25, 50, 75])
+        log(f"  [{query_category.upper()}] Query长度分布: min={min(all_word_counts)}, Q25={q25:.0f}, Q50={q50:.0f}, Q75={q75:.0f}, max={max(all_word_counts)}")
+
+        # 检查IDF分布
+        sample_idfs = [compute_query_idf(q['query'], word_idf) for user_qs in user_queries_correct.values() for q in user_qs]
+        if sample_idfs:
+            log(f"  [{query_category.upper()}] Query IDF分布: min={min(sample_idfs):.2f}, mean={np.mean(sample_idfs):.2f}, max={max(sample_idfs):.2f}")
+
+        # 分别对 correct 和 noisy 进行评估
+        all_results_by_type = {}
+
+        for query_type in QUERY_TYPES:
+            log("\n" + "#" * 80)
+            log(f"# [{query_category.upper()}] 查询类型: {query_type.upper()}")
+            log("#" * 80)
+
+            # 根据 query_type 和 query_category 加载对应的查询
+            user_queries, user_to_group, _ = load_user_queries(query_type, query_category)
+            log(f"  用户数: {len(user_queries)}")
+
+            query_type_results = []
+
+            # 评估密集检索器
+            for retriever_name in DENSE_RETRIEVERS:
+                try:
+                    result = evaluate_dense_retriever(retriever_name, user_queries, user_to_group, k_values, word_idf, query_type, query_category)
+                    result['query_type'] = query_type
+                    result['query_category'] = query_category
+                    query_type_results.append(result)
+                except FileNotFoundError as e:
+                    log(f"  跳过 {retriever_name}: {e}")
+                except Exception as e:
+                    log(f"  错误 {retriever_name}: {e}")
+
+            # 评估 BM25
+            try:
+                result = evaluate_bm25_retriever(user_queries, user_to_group, k_values, word_idf, query_type, query_category)
+                result['query_type'] = query_type
+                result['query_category'] = query_category
+                query_type_results.append(result)
+            except Exception as e:
+                log(f"  BM25 错误: {e}")
+
+            all_results_by_type[query_type] = query_type_results
+
+        # 保存该类别的所有结果
+        all_results_by_category[query_category] = all_results_by_type.get('correct', []) + all_results_by_type.get('noisy', [])
+
+        # 存储到全局结构
+        for qt, results in all_results_by_type.items():
+            all_results_by_category_and_type[(query_category, qt)] = results
+
+        # ========== 该类别的 CORRECT 组间性能比较 ==========
+        if all_results_by_type.get('correct'):
+            print_summary_table_wide(all_results_by_type['correct'], f'{query_category.upper()}-CORRECT')
+
+        # ========== 该类别的 NOISY 组间性能比较 ==========
+        if all_results_by_type.get('noisy'):
+            print_summary_table_wide(all_results_by_type['noisy'], f'{query_category.upper()}-NOISY')
+
+        # ========== 该类别的 CORRECT vs NOISY 配对比较 ==========
+        if all_results_by_type.get('noisy') and all_results_by_type.get('correct'):
+            print_query_type_comparison(all_results_by_type, k_values)
+
+        # ========== 该类别的 OLS回归分析 (CORRECT 版本) ==========
+        if all_results_by_type.get('correct'):
+            run_ols_group_analysis(all_results_by_type['correct'])
+
+        # ========== 该类别的 Paired Difference 分析 (CORRECT 版本) ==========
+        if all_results_by_type.get('correct'):
+            run_paired_difference_analysis(all_results_by_type['correct'])
+
+        # ========== 该类别的纯效应回归 (CORRECT 版本) ==========
+        if all_results_by_type.get('correct'):
+            run_group_pure_effect_regression(all_results_by_type['correct'])
+
+    # ========== 全局 CORRECT vs NOISY 配对比较 (所有类别) ==========
+    # 打印一个综合的 CORRECT vs NOISY 对比表
+    log("\n" + "=" * 100)
+    log("GLOBAL CORRECT vs NOISY 配对比较（所有类别综合）")
+    log("=" * 100)
+
+    # 合并所有类别的结果
+    all_results_combined = []
+    for (category, qt), results in all_results_by_category_and_type.items():
+        for r in results:
+            r_copy = r.copy()
+            r_copy['query_category'] = category
+            all_results_combined.append(r_copy)
+
+    if all_results_combined:
+        # 计算并打印 Bootstrap CI
+        log("\n计算 Bootstrap CI (n=1000, CI=95%)...")
+        for r in all_results_combined:
+            r['bootstrap_ci'] = {}
+            for group in UNIQUE_GROUPS:
+                if r['raw_metrics_per_group'].get(group):
+                    r['bootstrap_ci'][group] = compute_bootstrap_ci(
+                        r['raw_metrics_per_group'][group], k_values, n_bootstrap=1000, ci=0.95
+                    )
+            if r.get('all_raw_metrics'):
+                r['bootstrap_ci']['overall'] = compute_bootstrap_ci(
+                    r['all_raw_metrics'], k_values, n_bootstrap=1000, ci=0.95
                 )
-        if r.get('all_raw_metrics'):
-            r['bootstrap_ci']['overall'] = compute_bootstrap_ci(
-                r['all_raw_metrics'], k_values, n_bootstrap=1000, ci=0.95
-            )
 
     # 打印 Oracle-Aware Random Baseline
     log("\n" + "=" * 80)
     log("Oracle-Aware Random Baseline")
     log("=" * 80)
-    if all_results and all_results[0].get('all_raw_metrics'):
+    if all_results_combined and all_results_combined[0].get('all_raw_metrics'):
         log(f"  理论随机P@10 = 10/{n_docs} = {10/n_docs:.6f}")
         log(f"  理论随机N@10 ≈ {np.mean([1/np.log2(r+2) if r < 10 else 0 for r in range(n_docs)])*10:.6f}")
-
-    # 6C. OLS回归分析：CCOMP效应是否独立于IDF等混淆因素 (使用 CORRECT 版本)
-    if all_results_by_type.get('correct'):
-        run_ols_ccomp_analysis(all_results_by_type['correct'])
-
-    # 6D. Paired Difference 分析 (使用 CORRECT 版本)
-    if all_results_by_type.get('correct'):
-        run_paired_difference_analysis(all_results_by_type['correct'])
-
-    # 6E. ACL/CCOMP 纯效应回归 (使用 CORRECT 版本)
-    if all_results_by_type.get('correct'):
-        run_ccomp_pure_effect_regression(all_results_by_type['correct'])
 
     # 保存结果（处理 tuple key 等不可 JSON 序列化的问题）
     def sanitize_for_json(obj):
@@ -1992,8 +2012,9 @@ def main():
         json.dump({
             'timestamp': datetime.now().isoformat(),
             'query_types': QUERY_TYPES,
-            'results_by_type': sanitize_for_json(all_results_by_type),
-            'retrievers': sanitize_for_json(all_results)
+            'query_categories': QUERY_CATEGORIES,
+            'results_by_category_and_type': sanitize_for_json(all_results_by_category_and_type),
+            'all_results_combined': sanitize_for_json(all_results_combined)
         }, f, indent=2, default=str)
     log(f"\n结果已保存到: {output_file}")
 
