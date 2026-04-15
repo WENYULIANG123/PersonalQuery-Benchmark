@@ -5,7 +5,11 @@
 包含 ACL/CCOMP 混淆因素分析 (Check 1-4 + Bootstrap CI)
 """
 
+# 完全离线模式 - 避免 HuggingFace 网络验证
 import os
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 import sys
 import time
 import pickle
@@ -921,10 +925,13 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_gr
                 'mean_idf': query_idf_values[i],
                 'query_length': query_word_counts[i],
                 f'{GROUP_FIELD}_ratio': query_group_ratios[i],
-                'hit10': float(metrics.get('H@10', 0.0)),
+                'p_at1': float(metrics.get('P@1', 0.0)),
+                'p_at3': float(metrics.get('P@3', 0.0)),
+                'p_at5': float(metrics.get('P@5', 0.0)),
                 'p_at10': float(metrics.get('P@10', 0.0)),
-                'ndcg_at10': float(metrics.get('N@10', 0.0)),
+                'n_at10': float(metrics.get('N@10', 0.0)),
                 'mrr_at10': float(metrics.get('MR@10', 0.0)),
+                'hit_at10': float(metrics.get('H@10', 0.0)),
             })
 
             # word_count 分组
@@ -1074,10 +1081,13 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: L
                 'mean_idf': query_idf_values[i],
                 'query_length': query_word_counts[i],
                 f'{GROUP_FIELD}_ratio': query_group_ratios[i],
-                'hit10': float(metrics.get('H@10', 0.0)),
+                'p_at1': float(metrics.get('P@1', 0.0)),
+                'p_at3': float(metrics.get('P@3', 0.0)),
+                'p_at5': float(metrics.get('P@5', 0.0)),
                 'p_at10': float(metrics.get('P@10', 0.0)),
-                'ndcg_at10': float(metrics.get('N@10', 0.0)),
+                'n_at10': float(metrics.get('N@10', 0.0)),
                 'mrr_at10': float(metrics.get('MR@10', 0.0)),
+                'hit_at10': float(metrics.get('H@10', 0.0)),
             })
 
             # word_count 分组
@@ -1252,6 +1262,128 @@ def print_cross_tab(all_results: List[Dict], metric: str, query_type: str = ''):
         log("-" * 80)
         log(avg_row)
 
+
+def print_summary_table_wide(all_results: List[Dict], query_type: str = 'CORRECT'):
+    """宽格式汇总表：每行一个检索器，列是 (指标 × 分组) 的所有组合
+
+    格式：
+    检索器 | P@1_ACL0 | P@1_ACL1 | ... | P@10_ACL3 | 平均
+    """
+    log(f"\n{'='*100}")
+    log(f"汇总表（宽格式）| {query_type} | 每行一个检索器，列为 (指标×分组)")
+    log(f"{'='*100}")
+
+    metrics = ['P@1', 'P@3', 'P@5', 'P@10', 'N@10', 'MR@10', 'H@10']
+    groups = [f"{GROUP_FIELD.upper()}{g}" for g in UNIQUE_GROUPS]
+
+    # 构建表头 - 使用固定宽度列（每列12字符，右对齐）
+    COL_W = 12
+    header = f"{'检索器':<10}"
+    for m in metrics:
+        for g in groups:
+            label = f"{m}_{g}"
+            header += f" {label:>{COL_W}}"
+        header += f" {m:>{COL_W}}"
+    header += f" {'总平均':>{COL_W}}"
+    log(header)
+    log("-" * 100)
+
+    # 构建数据
+    retrievers = sorted(set(r['retriever'] for r in all_results))
+
+    for retriever in retrievers:
+        r = next((x for x in all_results if x['retriever'] == retriever), None)
+        if not r:
+            continue
+
+        row = f"{retriever:<10}"
+        all_vals = []
+
+        for m in metrics:
+            metric_vals = []
+            for ccomp in UNIQUE_GROUPS:
+                val = r['group_metrics'].get(ccomp, {}).get(m, 0.0)
+                row += f" {val:>{COL_W}.4f}"
+                metric_vals.append(val)
+                all_vals.append(val)
+            metric_avg = sum(metric_vals) / len(metric_vals) if metric_vals else 0.0
+            row += f" {metric_avg:>{COL_W}.4f}"
+            all_vals.append(metric_avg)
+
+        total_avg = sum(all_vals) / len(all_vals) if all_vals else 0.0
+        row += f" {total_avg:>{COL_W}.4f}"
+        log(row)
+
+    log("-" * 100)
+
+
+def print_summary_table_long(all_results: List[Dict], query_type: str = 'CORRECT'):
+    """长格式汇总表：每行是 (检索器, 指标, 分组) 的一个单元格值
+
+    格式：
+    检索器 | 指标 | CCOMP0 | CCOMP1 | CCOMP2 | CCOMP3 | 平均
+    """
+    log(f"\n{'='*100}")
+    log(f"汇总表（长格式）| {query_type} | 每行一个指标，列为各分组")
+    log(f"{'='*100}")
+
+    header = f"{'指标':<10}"
+    for ccomp in UNIQUE_GROUPS:
+        header += f" {GROUP_FIELD.upper()+str(ccomp):<12}"
+    header += f" {'平均':<12}"
+    log(header)
+    log("-" * 80)
+
+    metrics = ['P@1', 'P@3', 'P@5', 'P@10', 'N@10', 'MR@10', 'H@10']
+    retrievers = sorted(set(r['retriever'] for r in all_results))
+
+    for metric in metrics:
+        row = f"{metric:<10}"
+        metric_group_vals = []
+
+        for ccomp in UNIQUE_GROUPS:
+            group_vals = []
+            for r in all_results:
+                val = r['group_metrics'].get(ccomp, {}).get(metric, 0.0)
+                group_vals.append(val)
+            group_avg = sum(group_vals) / len(group_vals) if group_vals else 0.0
+            row += f" {group_avg:.4f}      "
+            metric_group_vals.append(group_avg)
+
+        overall_avg = sum(metric_group_vals) / len(metric_group_vals) if metric_group_vals else 0.0
+        row += f" {overall_avg:.4f}      "
+        log(row)
+
+    # 添加每个检索器的详细数据
+    log(f"\n{'='*100}")
+    log(f"检索器详细数据 | {query_type}")
+    log(f"{'='*100}")
+
+    for retriever in retrievers:
+        r = next((x for x in all_results if x['retriever'] == retriever), None)
+        if not r:
+            continue
+
+        log(f"\n{retriever}:")
+        sub_header = f"{'指标':<10}"
+        for ccomp in UNIQUE_GROUPS:
+            sub_header += f" {GROUP_FIELD.upper()+str(ccomp):<12}"
+        sub_header += f" {'平均':<12}"
+        log(sub_header)
+        log("-" * 70)
+
+        for metric in metrics:
+            row = f"{metric:<10}"
+            metric_vals = []
+            for ccomp in UNIQUE_GROUPS:
+                val = r['group_metrics'].get(ccomp, {}).get(metric, 0.0)
+                row += f" {val:.4f}      "
+                metric_vals.append(val)
+            metric_avg = sum(metric_vals) / len(metric_vals) if metric_vals else 0.0
+            row += f" {metric_avg:.4f}      "
+            log(row)
+
+
 # ============ 分层分析：IDF × CCOMP ============
 def run_ols_group_analysis(all_results: List[Dict]):
     """OLS回归分析: 控制IDF、查询长度、词汇复杂度后，检验acl/ccomp效应是否独立"""
@@ -1372,7 +1504,7 @@ def run_paired_difference_analysis(all_results: List[Dict]):
                 'user_id': rec.get('user_id', ''),
                 'retriever': retriever,
                 'group': rec.get(GROUP_FIELD, 0),
-                'hit10': rec.get('hit10', 0.0),
+                'hit10': rec.get('hit_at10', 0.0),
             })
 
     if not records:
@@ -1637,14 +1769,15 @@ def run_group_pure_effect_regression(all_results: List[Dict]):
 
 # ============ 主流程 ============
 def print_query_type_comparison(all_results_by_type: Dict[str, List[Dict]], k_values: List[int]):
-    """打印 correct vs noisy 配对比较表（按 query pair 比较）
+    """打印 correct vs noisy 配对比较表（宽格式）
 
     对于每个 noisy 查询，找到其同 CCOMP 级别的 correct 查询进行配对
     配对 key: (user_id, asin, ccomp)
+    输出宽格式表格，包含所有指标
     """
-    log("\n" + "=" * 80)
-    log("CORRECT vs NOISY 配对比较（基于 (user_id, asin, CCOMP) 匹配）")
-    log("=" * 80)
+    log("\n" + "=" * 100)
+    log(f"CORRECT vs NOISY 配对比较（宽格式 | 基于 (user_id, asin, {GROUP_FIELD.upper()}) 匹配）")
+    log("=" * 100)
 
     # 获取所有检索器
     retrievers = set()
@@ -1653,11 +1786,29 @@ def print_query_type_comparison(all_results_by_type: Dict[str, List[Dict]], k_va
             retrievers.add(r['retriever'])
     retrievers = sorted(retrievers)
 
-    log("\n【P@10 配对比较】")
-    header = f"{'检索器':<12} {'CORRECT查询数':<14} {'NOISY查询数':<14} {'配对数':<10} {'CORRECT均值':<12} {'NOISY均值':<12} {'差异':<10}"
-    log(header)
-    log("-" * 90)
+    # 定义所有指标及其对应的字段
+    METRICS = [
+        ('P@1', 'p_at1'),
+        ('P@3', 'p_at3'),
+        ('P@5', 'p_at5'),
+        ('P@10', 'p_at10'),
+        ('N@10', 'n_at10'),
+        ('MR@10', 'mrr_at10'),
+        ('H@10', 'hit_at10'),
+    ]
 
+    group_field = GROUP_FIELD  # 'ccomp' or 'acl'
+
+    # 构建宽格式表头 - 每个指标3个子列，固定宽度
+    # 格式: 检索器 | CORR | NOISY | DIFF | CORR | NOISY | DIFF | ...
+    header = f"{'检索器':<10}"
+    sep = " " * 1
+    for metric_name, _ in METRICS:
+        header += sep + f"{metric_name:>7} {metric_name:>7} {metric_name:>7}"
+    log(header)
+    log("-" * 100)
+
+    # 对每个检索器计算所有指标的配对比较
     for retriever in retrievers:
         correct_results = next((x for x in all_results_by_type.get('correct', []) if x['retriever'] == retriever), None)
         noisy_results = next((x for x in all_results_by_type.get('noisy', []) if x['retriever'] == retriever), None)
@@ -1665,46 +1816,40 @@ def print_query_type_comparison(all_results_by_type: Dict[str, List[Dict]], k_va
         if not correct_results or not noisy_results:
             continue
 
-        # CORRECT: 使用所有 CCOMP 级别的记录
-        # NOISY: 使用所有记录
-        # 配对 key: (user_id, asin, ccomp)
-        correct_dict = {}
-        noisy_dict = {}
+        row = f"{retriever:<10}"
 
-        group_field = GROUP_FIELD  # 'ccomp' or 'acl'
+        for metric_name, metric_field in METRICS:
+            correct_dict = {}
+            noisy_dict = {}
 
-        for rec in correct_results.get('all_query_records', []):
-            key = (rec['user_id'], rec.get('asin', ''), rec.get(group_field, -1))
-            correct_dict[key] = rec['p_at10']
+            for rec in correct_results.get('all_query_records', []):
+                key = (rec['user_id'], rec.get('asin', ''), rec.get(group_field, -1))
+                correct_dict[key] = rec.get(metric_field, 0)
 
-        for rec in noisy_results.get('all_query_records', []):
-            key = (rec['user_id'], rec.get('asin', ''), rec.get(group_field, -1))
-            noisy_dict[key] = rec['p_at10']
+            for rec in noisy_results.get('all_query_records', []):
+                key = (rec['user_id'], rec.get('asin', ''), rec.get(group_field, -1))
+                noisy_dict[key] = rec.get(metric_field, 0)
 
-        # 找到共同的查询对
-        common_keys = set(correct_dict.keys()) & set(noisy_dict.keys())
+            # 找到共同的查询对
+            common_keys = set(correct_dict.keys()) & set(noisy_dict.keys())
 
-        if not common_keys:
-            log(f"{retriever:<12} {len(correct_dict):<14} {len(noisy_dict):<14} {'无匹配对':<10}")
-            continue
+            if not common_keys:
+                row += sep + f"{'N/A':>7} {'N/A':>7} {'N/A':>7}"
+                continue
 
-        # 计算配对差异
-        correct_p10s = [correct_dict[k] for k in common_keys]
-        noisy_p10s = [noisy_dict[k] for k in common_keys]
-        diffs = [noisy_p10s[i] - correct_p10s[i] for i in range(len(common_keys))]
+            # 计算配对差异
+            correct_vals = [correct_dict[k] for k in common_keys]
+            noisy_vals = [noisy_dict[k] for k in common_keys]
+            diffs = [noisy_vals[i] - correct_vals[i] for i in range(len(common_keys))]
 
-        mean_correct = sum(correct_p10s) / len(correct_p10s)
-        mean_noisy = sum(noisy_p10s) / len(noisy_p10s)
-        mean_diff = sum(diffs) / len(diffs)
+            mean_correct = sum(correct_vals) / len(correct_vals)
+            mean_noisy = sum(noisy_vals) / len(noisy_vals)
+            mean_diff = sum(diffs) / len(diffs)
 
-        row = f"{retriever:<12} {len(correct_dict):<14} {len(noisy_dict):<14} {len(common_keys):<10} {mean_correct:.4f}       {mean_noisy:.4f}       {mean_diff:+.4f}"
-        if abs(mean_diff) < 0.01:
-            row += " (≈)"
-        elif mean_diff > 0:
-            row += " (↑)"
-        else:
-            row += " (↓)"
+            row += sep + f"{mean_correct:7.4f} {mean_noisy:7.4f} {mean_diff:+7.4f}"
         log(row)
+
+    log("-" * 100)
 
 
 def main():
@@ -1800,8 +1945,13 @@ def main():
 
     # ========== ACL 组间性能比较 (CORRECT 版本) ==========
     if all_results_by_type.get('correct'):
-        for metric in ['P@1', 'P@3', 'P@5', 'P@10', 'N@10', 'MR@10', 'H@10']:
-            print_cross_tab(all_results_by_type['correct'], metric, 'CORRECT')
+        # 打印宽格式汇总表
+        print_summary_table_wide(all_results_by_type['correct'], 'CORRECT')
+
+    # ========== ACL 组间性能比较 (NOISY 版本) ==========
+    if all_results_by_type.get('noisy'):
+        # 打印宽格式汇总表
+        print_summary_table_wide(all_results_by_type['noisy'], 'NOISY')
 
     # ========== CORRECT vs NOISY 配对比较 ==========
     # 基于 (user_id, asin) 匹配，对每个 noisy 查询找到对应的 correct 查询进行配对对比
