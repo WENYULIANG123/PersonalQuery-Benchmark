@@ -800,20 +800,31 @@ def compute_oracle_random_baseline(relevant_asin: str, doc_ids: List[str], n_tri
 
 # ============ 搜索器 ============
 class DenseSearcher:
-    """密集检索器搜索器 (GPU 矩阵乘法 + 余弦相似度)"""
+    """密集检索器搜索器 (NumPy 余弦相似度)"""
     def __init__(self, embeddings: np.ndarray, doc_ids: List[str], retriever_name: str):
         self.doc_ids = doc_ids
         self.retriever_name = retriever_name
-        # 使用 GPU
-        self.device = torch.device('cuda:0')
-        torch.cuda.set_device(0)
         # 归一化 doc embeddings 以支持余弦相似度
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms = np.where(norms == 0, 1, norms)  # 避免除零
-        normalized_embeddings = embeddings / norms
-        self.embeddings_tensor = torch.from_numpy(normalized_embeddings).float().to(self.device)
-        # 创建独立流避免与其他操作的 CUDA 状态冲突
-        self.stream = torch.cuda.Stream(0)
+        self.embeddings = embeddings / norms  # 保持在 CPU
+
+    def search_batch(self, query_embeddings: List[np.ndarray], top_k: int = 10) -> List[List[Tuple[str, float]]]:
+        if not query_embeddings:
+            return []
+        # 归一化 query embeddings
+        q_arr = np.array(query_embeddings)
+        q_norms = np.linalg.norm(q_arr, axis=1, keepdims=True)
+        q_norms = np.where(q_norms == 0, 1, q_norms)
+        q_normalized = q_arr / q_norms
+        # 余弦相似度 = 归一化点积 (使用 numpy 避免 CUDA 问题)
+        scores = np.dot(q_normalized, self.embeddings.T)
+        results = []
+        for i in range(len(query_embeddings)):
+            top_indices = np.argpartition(scores[i], -top_k)[-top_k:]
+            top_indices = top_indices[np.argsort(scores[i][top_indices])[::-1]]
+            results.append([(self.doc_ids[idx], float(scores[i][idx])) for idx in top_indices])
+        return results
 
     def search_batch(self, query_embeddings: List[np.ndarray], top_k: int = 10) -> List[List[Tuple[str, float]]]:
         if not query_embeddings:
