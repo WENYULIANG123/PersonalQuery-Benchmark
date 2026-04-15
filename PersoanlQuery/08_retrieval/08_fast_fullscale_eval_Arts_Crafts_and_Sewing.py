@@ -1032,10 +1032,44 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: L
 
     eval_start = time.time()
 
+    # ========== 优化：批量搜索所有查询 ==========
+    # 先收集所有查询和元数据
+    all_query_texts = []
+    all_query_asins = []
+    all_query_users = []
+    all_query_word_counts = []
+    all_query_group_ratios = []
+    all_query_groups = []
+    all_query_idf_values = []
+    user_query_ranges = []  # (start_idx, end_idx) for each user
+
+    for user_id in matched_users:
+        queries = user_queries[user_id]
+        start_idx = len(all_query_texts)
+        for q in queries:
+            all_query_texts.append(q['query'])
+            all_query_asins.append(q['asin'])
+            all_query_users.append(user_id)
+            all_query_word_counts.append(q.get('word_count', 0))
+            all_query_group_ratios.append(q.get(f'{GROUP_FIELD}_ratio', 0.0))
+            all_query_groups.append(q.get(GROUP_FIELD, 0))
+            all_query_idf_values.append(compute_query_idf(q['query'], word_idf) if word_idf else 0.0)
+        end_idx = len(all_query_texts)
+        user_query_ranges.append((start_idx, end_idx))
+
+    log(f"  总查询数: {len(all_query_texts)}")
+
+    # 批量搜索
+    log(f"  开始批量搜索...")
+    batch_start = time.time()
+    all_results = searcher.search_batch(all_query_texts, top_k=max(k_values))
+    batch_time = time.time() - batch_start
+    log(f"  批量搜索完成，耗时: {batch_time:.1f}秒")
+
+    # 分组统计
     group_groups = {g: [] for g in UNIQUE_GROUPS}
     all_metrics = []
 
-    # 分组统计
     word_bins = [(0, 15), (15, 20), (20, 25), (25, 30), (30, float('inf'))]
     word_bin_labels = ['很短(1-15)', '短(15-20)', '中(20-25)', '长(25-30)', '很长(30+)']
     ratio_bins = [(0.0, 0.05), (0.05, 0.1), (0.1, 0.2), (0.2, 0.5), (0.5, 1.0)]
@@ -1049,72 +1083,55 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: L
     # 收集所有 query 原始数据用于 OLS 回归
     all_query_records = []
 
-    for user_idx, user_id in enumerate(matched_users):
-        queries = user_queries[user_id]
+    # 处理每个查询的结果
+    for i, (retrieved, relevant_asin) in enumerate(zip(all_results, all_query_asins)):
+        retrieved_asins = [r[0] for r in retrieved]
+        metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
+        group = all_query_groups[i]
+        all_metrics.append(metrics)
+        group_groups[group].append(metrics)
 
-        query_texts = [q['query'] for q in queries]
-        query_asins = [q['asin'] for q in queries]
-        query_word_counts = [q.get('word_count', 0) for q in queries]
-        query_group_ratios = [q.get(f'{GROUP_FIELD}_ratio', 0.0) for q in queries]
-        query_groups = [q.get(GROUP_FIELD, 0) for q in queries]  # 每条查询自己的group值
-        query_idf_values = [compute_query_idf(q['query'], word_idf) if word_idf else 0.0 for q in queries]
+        # 记录每条 query 的原始数据
+        all_query_records.append({
+            'user_id': all_query_users[i],
+            'asin': relevant_asin,
+            f'{GROUP_FIELD}': group,
+            'mean_idf': all_query_idf_values[i],
+            'query_length': all_query_word_counts[i],
+            f'{GROUP_FIELD}_ratio': all_query_group_ratios[i],
+            'p_at1': float(metrics.get('P@1', 0.0)),
+            'p_at3': float(metrics.get('P@3', 0.0)),
+            'p_at5': float(metrics.get('P@5', 0.0)),
+            'p_at10': float(metrics.get('P@10', 0.0)),
+            'n_at10': float(metrics.get('N@10', 0.0)),
+            'mrr_at10': float(metrics.get('MR@10', 0.0)),
+            'hit_at10': float(metrics.get('H@10', 0.0)),
+        })
 
-        if not query_texts:
-            continue
+        # word_count 分组
+        wc = all_query_word_counts[i]
+        for (low, high), label in zip(word_bins, word_bin_labels):
+            if low <= wc < high:
+                word_count_groups[label].append(metrics)
+                break
 
-        results = searcher.search_batch(query_texts, top_k=max(k_values))
+        # group_ratio 分组
+        cr = all_query_group_ratios[i]
+        for (low, high), label in zip(ratio_bins, ratio_bin_labels):
+            if low <= cr < high:
+                group_ratio_groups[label].append(metrics)
+                break
 
-        for i, (retrieved, relevant_asin) in enumerate(zip(results, query_asins)):
-            retrieved_asins = [r[0] for r in retrieved]
-            metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
-            group = query_groups[i]  # 使用该查询自己的group值
-            all_metrics.append(metrics)
-            group_groups[group].append(metrics)
-
-            # 记录每条 query 的原始数据（用于 OLS 回归和 Paired Difference 分析）
-            all_query_records.append({
-                'user_id': user_id,
-                'asin': relevant_asin,
-                f'{GROUP_FIELD}': group,
-                'mean_idf': query_idf_values[i],
-                'query_length': query_word_counts[i],
-                f'{GROUP_FIELD}_ratio': query_group_ratios[i],
-                'p_at1': float(metrics.get('P@1', 0.0)),
-                'p_at3': float(metrics.get('P@3', 0.0)),
-                'p_at5': float(metrics.get('P@5', 0.0)),
-                'p_at10': float(metrics.get('P@10', 0.0)),
-                'n_at10': float(metrics.get('N@10', 0.0)),
-                'mrr_at10': float(metrics.get('MR@10', 0.0)),
-                'hit_at10': float(metrics.get('H@10', 0.0)),
-            })
-
-            # word_count 分组
-            wc = query_word_counts[i]
-            for (low, high), label in zip(word_bins, word_bin_labels):
-                if low <= wc < high:
-                    word_count_groups[label].append(metrics)
-                    break
-
-            # group_ratio 分组
-            cr = query_group_ratios[i]
-            for (low, high), label in zip(ratio_bins, ratio_bin_labels):
-                if low <= cr < high:
-                    group_ratio_groups[label].append(metrics)
-                    break
-
-            # IDF 分组
-            q_idf = query_idf_values[i]
-            for (low, high), label in zip(IDF_BINS, IDF_BIN_LABELS):
-                if low <= q_idf < high:
-                    idf_bin_groups[label].append(metrics)
-                    idf_group_cross[(label, group)].append(metrics)
-                    break
-
-        if (user_idx + 1) % 100 == 0:
-            elapsed = time.time() - eval_start
-            log(f"    进度: {user_idx+1}/{len(matched_users)} ({100*(user_idx+1)/len(matched_users):.1f}%)")
+        # IDF 分组
+        q_idf = all_query_idf_values[i]
+        for (low, high), label in zip(IDF_BINS, IDF_BIN_LABELS):
+            if low <= q_idf < high:
+                idf_bin_groups[label].append(metrics)
+                idf_group_cross[(label, group)].append(metrics)
+                break
 
     eval_time = time.time() - eval_start
+    log(f"  评估完成，总耗时: {eval_time:.1f}秒")
     overall_metrics = compute_average_metrics(all_metrics, k_values)
 
     group_metrics = {}
