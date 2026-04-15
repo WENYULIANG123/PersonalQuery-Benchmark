@@ -17,7 +17,11 @@
     - 预期收益: 查询评估时间 14.6s → 11-12s (20-30% improvement)
 """
 
+# 完全离线模式 - 避免 HuggingFace 网络验证
 import os
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 import sys
 import json
 import pickle
@@ -43,7 +47,8 @@ from utils.retrievers import (
 STAGE9_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/09_targeted_noisy_query"
 STAGE7_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/07_iterative_refinement"
 STAGE6_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query"
-PERSONA_GENERATED_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Arts_Crafts_and_Sewing/ccomp_query.json"
+PERSONA_GENERATED_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Arts_Crafts_and_Sewing/acl_query.json"
+CCOMP_QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Arts_Crafts_and_Sewing/ccomp_query.json"
 CACHE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/query_cache_Arts_Crafts_and_Sewing"
 
 AVAILABLE_RETRIEVERS = {
@@ -83,7 +88,7 @@ def find_all_users() -> Set[str]:
     return users
 
 
-def load_persona_generated_queries() -> Tuple[List[Dict], List[Dict]]:
+def load_acl_queries() -> Tuple[List[Dict], List[Dict]]:
     """从 acl_query.json 加载所有查询，返回 (correct_queries, noisy_queries)
 
     每个查询结构：
@@ -135,14 +140,78 @@ def load_persona_generated_queries() -> Tuple[List[Dict], List[Dict]]:
                     'query': noisy_text,
                 })
 
-    log_with_timestamp(f"✓ 从 {PERSONA_GENERATED_QUERIES_FILE} 加载了 {len(correct_queries)} 条 correct 查询, {len(noisy_queries)} 条 noisy 查询")
+    log_with_timestamp(f"✓ 从 {PERSONA_GENERATED_QUERIES_FILE} 加载了 {len(correct_queries)} 条 correct 查询, {len(noisy_queries)} 条 noisy 查询 (ACL)")
+    return correct_queries, noisy_queries
+
+
+def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
+    """从 ccomp_query.json 加载所有查询，返回 (correct_queries, noisy_queries)
+
+    每个查询结构：
+    - correct_query / filled_query: 正确版本查询
+    - noisy_query: 含错误版本查询（仅 ground_truth 版本有）
+    """
+    if not os.path.exists(CCOMP_QUERY_FILE):
+        log_with_timestamp(f"⚠️  文件不存在: {CCOMP_QUERY_FILE}")
+        return [], []
+
+    with open(CCOMP_QUERY_FILE, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    if not isinstance(data, list):
+        log_with_timestamp(f"⚠️  ccomp_query.json 格式错误：期望 list，实际 {type(data)}")
+        return [], []
+
+    correct_queries = []
+    noisy_queries = []
+
+    for item in data:
+        user_id = item.get('user_id', '')
+        asin = item.get('asin', '')
+
+        if 'queries' not in item:
+            # 旧平铺格式，跳过
+            continue
+
+        for q in item['queries']:
+            # 正确版本查询：从 correct_query 或 filled_query 获取
+            correct_text = q.get('correct_query', '') or q.get('filled_query', '')
+            if correct_text:
+                correct_queries.append({
+                    'user_id': user_id,
+                    'asin': asin,
+                    'ccomp': q.get('ccomp', 0),
+                    'is_ground_truth': q.get('is_ground_truth', False),
+                    'query': correct_text,
+                })
+
+            # 含错误版本查询：仅 ground_truth 版本有
+            noisy_text = q.get('noisy_query', '')
+            if noisy_text:
+                noisy_queries.append({
+                    'user_id': user_id,
+                    'asin': asin,
+                    'ccomp': q.get('ccomp', 0),
+                    'is_ground_truth': q.get('is_ground_truth', True),
+                    'query': noisy_text,
+                })
+
+    log_with_timestamp(f"✓ 从 {CCOMP_QUERY_FILE} 加载了 {len(correct_queries)} 条 correct 查询, {len(noisy_queries)} 条 noisy 查询 (CCOMP)")
     return correct_queries, noisy_queries
 
 
 def get_users_from_persona_generated() -> Set[str]:
-    """从 persona_generated_queries.json 获取所有用户 ID"""
-    queries = load_persona_generated_queries()
-    return {q.get('user_id', '') for q in queries if q.get('user_id')}
+    """从 acl_query.json 和 ccomp_query.json 获取所有用户 ID"""
+    users = set()
+    # ACL 用户
+    acl_correct, acl_noisy = load_acl_queries()
+    users.update(q.get('user_id', '') for q in acl_correct if q.get('user_id'))
+    users.update(q.get('user_id', '') for q in acl_noisy if q.get('user_id'))
+    # CCOMP 用户
+    ccomp_correct, ccomp_noisy = load_ccomp_queries()
+    users.update(q.get('user_id', '') for q in ccomp_correct if q.get('user_id'))
+    users.update(q.get('user_id', '') for q in ccomp_noisy if q.get('user_id'))
+    return users
 
 def load_stage9_queries(user_id: str) -> Dict[str, List[Dict]]:
     query_file = os.path.join(STAGE9_DIR, f"noisy_queries_{user_id}.json")
@@ -394,6 +463,12 @@ def initialize_cache_dir():
     os.makedirs(os.path.join(CACHE_DIR, "persona_query"), exist_ok=True)
     os.makedirs(os.path.join(CACHE_DIR, "persona_correct_query"), exist_ok=True)
     os.makedirs(os.path.join(CACHE_DIR, "persona_noisy_query"), exist_ok=True)
+    # ACL 查询缓存
+    os.makedirs(os.path.join(CACHE_DIR, "acl_correct_query"), exist_ok=True)
+    os.makedirs(os.path.join(CACHE_DIR, "acl_noisy_query"), exist_ok=True)
+    # CCOMP 查询缓存
+    os.makedirs(os.path.join(CACHE_DIR, "ccomp_correct_query"), exist_ok=True)
+    os.makedirs(os.path.join(CACHE_DIR, "ccomp_noisy_query"), exist_ok=True)
     log_with_timestamp(f"✓ 缓存目录: {CACHE_DIR}")
 
 
@@ -414,6 +489,14 @@ def get_cache_subdir(mode: str) -> str:
         return os.path.join(CACHE_DIR, "persona_correct_query")
     if mode == 'persona_noisy':
         return os.path.join(CACHE_DIR, "persona_noisy_query")
+    if mode == 'acl_correct':
+        return os.path.join(CACHE_DIR, "acl_correct_query")
+    if mode == 'acl_noisy':
+        return os.path.join(CACHE_DIR, "acl_noisy_query")
+    if mode == 'ccomp_correct':
+        return os.path.join(CACHE_DIR, "ccomp_correct_query")
+    if mode == 'ccomp_noisy':
+        return os.path.join(CACHE_DIR, "ccomp_noisy_query")
     raise ValueError(f"Unsupported mode for cache subdir: {mode}")
 
 
@@ -430,6 +513,14 @@ def get_mode_suffix(mode: str) -> str:
         return 'persona_correct'
     if mode == 'persona_noisy':
         return 'persona_noisy'
+    if mode == 'acl_correct':
+        return 'acl_correct'
+    if mode == 'acl_noisy':
+        return 'acl_noisy'
+    if mode == 'ccomp_correct':
+        return 'ccomp_correct'
+    if mode == 'ccomp_noisy':
+        return 'ccomp_noisy'
     raise ValueError(f"Unsupported mode for filename suffix: {mode}")
 
 def get_cache_file_path(retriever_name: str, user_id: str, mode: str) -> str:
@@ -524,7 +615,7 @@ def _encode_and_save_cache(
 
 
 def generate_cache_from_persona_source(retriever_names: Optional[List[str]] = None, clear_cache_before: bool = False):
-    """从 acl_query.json 生成 correct 和 noisy 两套查询缓存
+    """从 acl_query.json 和 ccomp_query.json 生成 correct 和 noisy 查询缓存
 
     correct 缓存：来自 correct_query 或 filled_query
     noisy 缓存：来自 noisy_query（仅 ground_truth 版本有）
@@ -532,27 +623,38 @@ def generate_cache_from_persona_source(retriever_names: Optional[List[str]] = No
     if retriever_names is None:
         retriever_names = list(AVAILABLE_RETRIEVERS.keys())
 
-    correct_queries, noisy_queries = load_persona_generated_queries()
-    if not correct_queries and not noisy_queries:
-        log_with_timestamp("⚠️  没有从 acl_query.json 加载到任何查询")
+    # 加载 ACL 查询
+    acl_correct, acl_noisy = load_acl_queries()
+    # 加载 CCOMP 查询
+    ccomp_correct, ccomp_noisy = load_ccomp_queries()
+
+    if not acl_correct and not acl_noisy and not ccomp_correct and not ccomp_noisy:
+        log_with_timestamp("⚠️  没有从 acl_query.json 或 ccomp_query.json 加载到任何查询")
         return {'total_queries': 0, 'total_cached': 0, 'retrievers_processed': 0}
 
-    correct_by_user = _build_queries_by_user(correct_queries)
-    noisy_by_user = _build_queries_by_user(noisy_queries)
+    # 构建按用户分组的查询
+    acl_correct_by_user = _build_queries_by_user(acl_correct)
+    acl_noisy_by_user = _build_queries_by_user(acl_noisy)
+    ccomp_correct_by_user = _build_queries_by_user(ccomp_correct)
+    ccomp_noisy_by_user = _build_queries_by_user(ccomp_noisy)
 
-    all_correct = list(correct_by_user.values())
-    all_correct_count = sum(len(v) for v in all_correct)
-    all_noisy = list(noisy_by_user.values())
-    all_noisy_count = sum(len(v) for v in all_noisy)
+    # 统计 ACL
+    acl_correct_count = sum(len(v) for v in acl_correct_by_user.values())
+    acl_noisy_count = sum(len(v) for v in acl_noisy_by_user.values())
+    # 统计 CCOMP
+    ccomp_correct_count = sum(len(v) for v in ccomp_correct_by_user.values())
+    ccomp_noisy_count = sum(len(v) for v in ccomp_noisy_by_user.values())
 
     log_with_timestamp("=" * 80)
-    log_with_timestamp("🚀 开始生成查询缓存 (acl_query.json - correct + noisy)")
+    log_with_timestamp("🚀 开始生成查询缓存 (ACL + CCOMP - correct + noisy)")
     log_with_timestamp("=" * 80)
     log_with_timestamp(f"")
     log_with_timestamp(f"📋 任务配置:")
     log_with_timestamp(f"  • 检索器: {len(retriever_names)} 个 - {', '.join(retriever_names)}")
-    log_with_timestamp(f"  • correct 用户: {len(correct_by_user)} 个, 查询: {all_correct_count} 条")
-    log_with_timestamp(f"  • noisy 用户: {len(noisy_by_user)} 个, 查询: {all_noisy_count} 条")
+    log_with_timestamp(f"  • ACL correct 用户: {len(acl_correct_by_user)} 个, 查询: {acl_correct_count} 条")
+    log_with_timestamp(f"  • ACL noisy 用户: {len(acl_noisy_by_user)} 个, 查询: {acl_noisy_count} 条")
+    log_with_timestamp(f"  • CCOMP correct 用户: {len(ccomp_correct_by_user)} 个, 查询: {ccomp_correct_count} 条")
+    log_with_timestamp(f"  • CCOMP noisy 用户: {len(ccomp_noisy_by_user)} 个, 查询: {ccomp_noisy_count} 条")
     log_with_timestamp(f"  • 缓存目录: {CACHE_DIR}")
     log_with_timestamp(f"")
 
@@ -562,11 +664,19 @@ def generate_cache_from_persona_source(retriever_names: Optional[List[str]] = No
 
     start_time = time.time()
     stats = {
-        'total_correct_queries': all_correct_count,
-        'total_noisy_queries': all_noisy_count,
+        'total_correct_queries': acl_correct_count + ccomp_correct_count,
+        'total_noisy_queries': acl_noisy_count + ccomp_noisy_count,
         'total_cached': 0,
         'retrievers_processed': 0,
     }
+
+    # 定义所有查询类型和模式
+    query_types = [
+        ('ACL', acl_correct, acl_correct_by_user, 'acl_correct'),
+        ('ACL', acl_noisy, acl_noisy_by_user, 'acl_noisy'),
+        ('CCOMP', ccomp_correct, ccomp_correct_by_user, 'ccomp_correct'),
+        ('CCOMP', ccomp_noisy, ccomp_noisy_by_user, 'ccomp_noisy'),
+    ]
 
     for retriever_name in retriever_names:
         if retriever_name not in AVAILABLE_RETRIEVERS:
@@ -577,29 +687,18 @@ def generate_cache_from_persona_source(retriever_names: Optional[List[str]] = No
         log_with_timestamp(f"【{stats['retrievers_processed'] + 1}/{len(retriever_names)}】正在处理检索器: {retriever_name}")
         log_with_timestamp(f"{'='*80}")
 
-        # 处理 correct 缓存
-        if correct_queries:
-            total_correct = _encode_and_save_cache(
-                retriever_name,
-                correct_queries,
-                correct_by_user,
-                'persona_correct',
-            )
-            stats['total_cached'] += total_correct
-        else:
-            log_with_timestamp(f"  (无 correct 查询，跳过)")
-
-        # 处理 noisy 缓存
-        if noisy_queries:
-            total_noisy = _encode_and_save_cache(
-                retriever_name,
-                noisy_queries,
-                noisy_by_user,
-                'persona_noisy',
-            )
-            stats['total_cached'] += total_noisy
-        else:
-            log_with_timestamp(f"  (无 noisy 查询，跳过)")
+        for query_type, queries, by_user, mode in query_types:
+            if queries:
+                total = _encode_and_save_cache(
+                    retriever_name,
+                    queries,
+                    by_user,
+                    mode,
+                )
+                stats['total_cached'] += total
+                log_with_timestamp(f"  ✓ {query_type} {mode} 缓存: {total} 条")
+            else:
+                log_with_timestamp(f"  (无 {query_type} {mode} 查询，跳过)")
 
         log_with_timestamp(f"✓ 检索器 {retriever_name} 处理完成\n")
         stats['retrievers_processed'] += 1
@@ -609,7 +708,7 @@ def generate_cache_from_persona_source(retriever_names: Optional[List[str]] = No
     # 统计缓存目录
     cache_files = 0
     cache_dir_size = 0.0
-    for subdir_name in ["persona_correct_query", "persona_noisy_query"]:
+    for subdir_name in ["acl_correct_query", "acl_noisy_query", "ccomp_correct_query", "ccomp_noisy_query"]:
         subdir = os.path.join(CACHE_DIR, subdir_name)
         if os.path.exists(subdir):
             for name in os.listdir(subdir):
@@ -617,8 +716,6 @@ def generate_cache_from_persona_source(retriever_names: Optional[List[str]] = No
                     cache_files += 1
                     cache_dir_size += os.path.getsize(os.path.join(subdir, name))
     cache_dir_size /= (1024 * 1024)
-
-    total_queries = stats['total_correct_queries'] + stats['total_noisy_queries']
 
     log_with_timestamp("\n" + "=" * 80)
     log_with_timestamp("✅ 缓存生成完成!")
@@ -629,15 +726,19 @@ def generate_cache_from_persona_source(retriever_names: Optional[List[str]] = No
     log_with_timestamp(f"  • 检索器处理数: {stats['retrievers_processed']}/{len(retriever_names)}")
     log_with_timestamp(f"")
     log_with_timestamp(f"📊 数据统计:")
-    log_with_timestamp(f"  • correct 查询数: {stats['total_correct_queries']}")
-    log_with_timestamp(f"  • noisy 查询数: {stats['total_noisy_queries']}")
+    log_with_timestamp(f"  • ACL correct 查询数: {acl_correct_count}")
+    log_with_timestamp(f"  • ACL noisy 查询数: {acl_noisy_count}")
+    log_with_timestamp(f"  • CCOMP correct 查询数: {ccomp_correct_count}")
+    log_with_timestamp(f"  • CCOMP noisy 查询数: {ccomp_noisy_count}")
     log_with_timestamp(f"  • 检索器数量: {stats['retrievers_processed']}")
     log_with_timestamp(f"  • 编码查询总数: {stats['total_cached']} (= 查询数 × 检索器数)")
     log_with_timestamp(f"  • 缓存命中率: 0% (此函数每次都重新编码)")
     log_with_timestamp(f"")
     log_with_timestamp(f"💾 缓存存储:")
-    log_with_timestamp(f"  • correct 缓存目录: {os.path.join(CACHE_DIR, 'persona_correct_query')}")
-    log_with_timestamp(f"  • noisy 缓存目录: {os.path.join(CACHE_DIR, 'persona_noisy_query')}")
+    log_with_timestamp(f"  • ACL correct 缓存目录: {os.path.join(CACHE_DIR, 'acl_correct_query')}")
+    log_with_timestamp(f"  • ACL noisy 缓存目录: {os.path.join(CACHE_DIR, 'acl_noisy_query')}")
+    log_with_timestamp(f"  • CCOMP correct 缓存目录: {os.path.join(CACHE_DIR, 'ccomp_correct_query')}")
+    log_with_timestamp(f"  • CCOMP noisy 缓存目录: {os.path.join(CACHE_DIR, 'ccomp_noisy_query')}")
     log_with_timestamp(f"  • 缓存文件数: {cache_files}")
     log_with_timestamp(f"  • 总大小: {cache_dir_size:.2f} MB")
     log_with_timestamp(f"")
