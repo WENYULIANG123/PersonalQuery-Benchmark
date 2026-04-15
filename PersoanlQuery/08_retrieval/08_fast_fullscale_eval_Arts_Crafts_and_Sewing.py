@@ -477,7 +477,7 @@ def run_confound_analysis(query_category: str = 'acl'):
     log(f"加载了 {sum(len(g) for g in group_groups.values())} 个查询")
 
     check1_query_length(group_groups)
-    check2_pos_ratio(group_groups)
+    # check2_pos_ratio(group_groups)  # 跳过 POS 分析（需要 spaCy 且耗时较长）
     check3_mean_idf(group_groups)
     check4_oracle_random(group_groups)
 
