@@ -467,24 +467,6 @@ def check4_oracle_random(group_groups):
         log("  结论: 各组oracle random hit无显著差异 (p >= 0.05)")
     return results
 
-def run_confound_analysis(query_category: str = 'acl'):
-    """运行所有混淆因素分析"""
-    log("\n" + "=" * 80)
-    log(f"{query_category.upper()} 混淆因素分析")
-    log("=" * 80)
-
-    group_groups, _, _ = load_raw_queries(query_category)
-    log(f"加载了 {sum(len(g) for g in group_groups.values())} 个查询")
-
-    check1_query_length(group_groups)
-    # check2_pos_ratio(group_groups)  # 跳过 POS 分析（需要 spaCy 且耗时较长）
-    # check3_mean_idf(group_groups)  # 跳过 IDF 分析（需要加载大量数据）
-    check4_oracle_random(group_groups)
-
-    log("\n" + "=" * 80)
-    log("混淆因素分析完成")
-    log("=" * 80)
-
 # ============ 评估指标计算 ============
 def compute_metrics(relevant_asin: str, retrieved_asins: List[str], k_values: List[int]) -> Dict:
     metrics = {}
@@ -800,31 +782,16 @@ def compute_oracle_random_baseline(relevant_asin: str, doc_ids: List[str], n_tri
 
 # ============ 搜索器 ============
 class DenseSearcher:
-    """密集检索器搜索器 (NumPy 余弦相似度)"""
+    """密集检索器搜索器 (GPU 矩阵乘法 + 余弦相似度)"""
     def __init__(self, embeddings: np.ndarray, doc_ids: List[str], retriever_name: str):
         self.doc_ids = doc_ids
         self.retriever_name = retriever_name
+        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         # 归一化 doc embeddings 以支持余弦相似度
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms = np.where(norms == 0, 1, norms)  # 避免除零
-        self.embeddings = embeddings / norms  # 保持在 CPU
-
-    def search_batch(self, query_embeddings: List[np.ndarray], top_k: int = 10) -> List[List[Tuple[str, float]]]:
-        if not query_embeddings:
-            return []
-        # 归一化 query embeddings
-        q_arr = np.array(query_embeddings)
-        q_norms = np.linalg.norm(q_arr, axis=1, keepdims=True)
-        q_norms = np.where(q_norms == 0, 1, q_norms)
-        q_normalized = q_arr / q_norms
-        # 余弦相似度 = 归一化点积 (使用 numpy 避免 CUDA 问题)
-        scores = np.dot(q_normalized, self.embeddings.T)
-        results = []
-        for i in range(len(query_embeddings)):
-            top_indices = np.argpartition(scores[i], -top_k)[-top_k:]
-            top_indices = top_indices[np.argsort(scores[i][top_indices])[::-1]]
-            results.append([(self.doc_ids[idx], float(scores[i][idx])) for idx in top_indices])
-        return results
+        normalized_embeddings = embeddings / norms
+        self.embeddings_tensor = torch.from_numpy(normalized_embeddings).float().to(self.device)
 
     def search_batch(self, query_embeddings: List[np.ndarray], top_k: int = 10) -> List[List[Tuple[str, float]]]:
         if not query_embeddings:
@@ -1964,12 +1931,6 @@ def main():
                     log(f"  跳过 {retriever_name}: {e}")
                 except Exception as e:
                     log(f"  错误 {retriever_name}: {e}")
-                    raise  # 不允许跳过，必须确保每个检索器成功
-                finally:
-                    # 清理 GPU 缓存
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                        torch.cuda.synchronize()
 
             # 评估 BM25
             try:
@@ -2012,9 +1973,6 @@ def main():
         # ========== 该类别的纯效应回归 (CORRECT 版本) ==========
         if all_results_by_type.get('correct'):
             run_group_pure_effect_regression(all_results_by_type['correct'])
-
-        # ========== 该类别的混淆因素分析 (Check 1-4 + Bootstrap CI) ==========
-        run_confound_analysis(query_category)
 
     # ========== 全局 CORRECT vs NOISY 配对比较 (所有类别) ==========
     # 打印一个综合的 CORRECT vs NOISY 对比表
