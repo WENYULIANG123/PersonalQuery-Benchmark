@@ -1947,6 +1947,20 @@ def main():
                     query_type_results.append(result)
                 except FileNotFoundError as e:
                     log(f"  跳过 {retriever_name}: {e}")
+                except RuntimeError as e:
+                    if "CUDA" in str(e) or "cublas" in str(e):
+                        log(f"  CUDA 错误 {retriever_name}: {e}，跳过此检索器")
+                        # 尝试重置 CUDA
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
+                            try:
+                                torch.cuda.reset_accumulated_memory_stats()
+                                torch.cuda.reset_peak_memory_stats()
+                            except:
+                                pass
+                    else:
+                        log(f"  错误 {retriever_name}: {e}")
                 except Exception as e:
                     log(f"  错误 {retriever_name}: {e}")
                 finally:
