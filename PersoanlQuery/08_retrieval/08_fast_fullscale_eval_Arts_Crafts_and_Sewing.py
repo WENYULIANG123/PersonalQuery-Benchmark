@@ -1949,6 +1949,11 @@ def main():
                     log(f"  跳过 {retriever_name}: {e}")
                 except Exception as e:
                     log(f"  错误 {retriever_name}: {e}")
+                finally:
+                    # 清理 GPU 缓存
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
 
             # 评估 BM25
             try:
