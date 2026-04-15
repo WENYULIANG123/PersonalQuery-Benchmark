@@ -31,7 +31,9 @@ sys.path.insert(0, '/fs04/ar57/wenyu/PersoanlQuery/12_retrieval')
 CACHE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/retriever_Arts_Crafts_and_Sewing_cache"
 QUERY_CACHE_BASE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/query_cache_Arts_Crafts_and_Sewing"
 QUERY_TYPES = ['correct', 'noisy']  # 两种查询类型
-QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Arts_Crafts_and_Sewing/ccomp_query.json"
+QUERY_CATEGORIES = ['acl', 'ccomp']  # 两种查询类别
+ACL_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Arts_Crafts_and_Sewing/acl_query.json"
+CCOMP_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Arts_Crafts_and_Sewing/ccomp_query.json"
 OUTPUT_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/Arts_Crafts_and_Sewing"
 META_FILE = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2023/raw/meta_categories/meta_Arts_Crafts_and_Sewing.jsonl.gz"
 CATEGORY_NAME = "_Arts_Crafts_and_Sewing"
@@ -601,43 +603,42 @@ def load_bm25_retriever():
         bm25 = pickle.load(f)
     return bm25
 
-def load_query_cache(retriever_name: str, query_type: str = 'correct') -> Dict:
+def load_query_cache(retriever_name: str, query_type: str = 'correct', query_category: str = 'acl') -> Dict:
     """加载查询缓存
 
     Args:
         retriever_name: 检索器名称
         query_type: 查询类型 ('correct' 或 'noisy')
+        query_category: 查询类别 ('acl' 或 'ccomp')
     """
     cache_path = os.path.join(
         QUERY_CACHE_BASE_DIR,
-        f'persona_{query_type}_query',
-        f'{retriever_name}__persona_{query_type}_cache.pkl'
+        f'{query_category}_{query_type}_query',
+        f'{retriever_name}__{query_category}_{query_type}_cache.pkl'
     )
     with open(cache_path, 'rb') as f:
         return pickle.load(f)
 
-def load_user_queries(query_type: str = 'correct') -> Tuple[Dict[str, List[Dict]], Dict[str, int], List[Tuple[int, float, float]]]:
+def load_user_queries(query_type: str = 'correct', query_category: str = 'acl') -> Tuple[Dict[str, List[Dict]], Dict[str, int], List[Tuple[int, float, float]]]:
     """加载用户查询，每个查询项包含word_count和group_ratio（POS ratio代理）
 
     Args:
         query_type: 查询类型 ('correct' 使用 filled_query, 'noisy' 使用 noisy_query)
+        query_category: 查询类别 ('acl' 或 'ccomp')
     """
     global GROUP_FIELD, UNIQUE_GROUPS
 
-    with open(QUERIES_FILE, 'r') as f:
+    # 根据 query_category 选择查询文件
+    queries_file = ACL_QUERIES_FILE if query_category == 'acl' else CCOMP_QUERIES_FILE
+    with open(queries_file, 'r') as f:
         data = json.load(f)
     user_queries = {}
     user_to_group = {}
     all_query_metadata = []  # (user_idx, word_count, group_ratio)
     idx = 0
 
-    # 检测字段名：ccomp 或 acl
-    sample = data[0] if data else {}
-    if 'queries' in sample:
-        first_query = sample.get('queries', [{}])[0]
-        GROUP_FIELD = 'acl' if 'acl' in first_query else 'ccomp'
-    else:
-        GROUP_FIELD = 'acl' if 'acl' in sample else 'ccomp'
+    # query_category 直接决定 GROUP_FIELD
+    GROUP_FIELD = query_category
 
     # 动态收集所有唯一的 group 值
     group_values = set()
@@ -843,13 +844,13 @@ class BM25Searcher:
         return results
 
 # ============ 评估 ============
-def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = 'correct') -> Dict:
+def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = 'correct', query_category: str = 'acl') -> Dict:
     log(f"\n{'='*60}")
-    log(f"检索器: {retriever_name.upper()} (密集) - {query_type.upper()}")
+    log(f"检索器: {retriever_name.upper()} (密集) - {query_category.upper()}/{query_type.upper()}")
     log(f"{'='*60}")
 
     embeddings, doc_ids, dim = load_dense_retriever(retriever_name)
-    query_cache = load_query_cache(retriever_name, query_type)
+    query_cache = load_query_cache(retriever_name, query_type, query_category)
     searcher = DenseSearcher(embeddings, doc_ids, retriever_name)
 
     matched_users = [uid for uid in user_queries.keys() if uid in query_cache]
@@ -1021,9 +1022,9 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_gr
         'all_query_records': all_query_records
     }
 
-def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = 'correct') -> Dict:
+def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = 'correct', query_category: str = 'acl') -> Dict:
     log(f"\n{'='*60}")
-    log(f"检索器: BM25 (稀疏) - {query_type.upper()}")
+    log(f"检索器: BM25 (稀疏) - {query_category.upper()}/{query_type.upper()}")
     log(f"{'='*60}")
 
     bm25 = load_bm25_retriever()
@@ -1854,84 +1855,18 @@ def print_query_type_comparison(all_results_by_type: Dict[str, List[Dict]], k_va
 
 def main():
     log("=" * 60)
-    log(f"快速全量评估 - 多检索器 + {GROUP_FIELD.upper()}分组 + 交叉对比")
+    log(f"快速全量评估 - 多检索器 + ACL/CCOMP 双类别 + 交叉对比")
     log("=" * 60)
 
     if torch.cuda.is_available():
         log(f"GPU: {torch.cuda.get_device_name(0)}")
 
-    # 检查缓存完整性（已跳过）
-    # if not validate_cache():
-    #     log("缓存完整性检查失败，退出。")
-    #     return
-
-    log("\n加载用户数据...")
-    # 先加载 correct 版本获取统计信息
-    user_queries_correct, user_to_group, _ = load_user_queries('correct')
-    log(f"  用户数: {len(user_queries_correct)}")
-
-    # 按每条查询的group值计数，而非按用户
-    group_dist = defaultdict(int)
-    for user_qs in user_queries_correct.values():
-        for q in user_qs:
-            group_dist[q.get(GROUP_FIELD, 0)] += 1
-    log(f"  {GROUP_FIELD.upper()}分布: {dict(sorted(group_dist.items()))}")
-
-    # 计算查询长度分组统计
-    all_word_counts = [q.get('word_count') or 0 for user_qs in user_queries_correct.values() for q in user_qs]
-    q25, q50, q75 = np.percentile(all_word_counts, [25, 50, 75])
-    log(f"  Query长度分布: min={min(all_word_counts)}, Q25={q25:.0f}, Q50={q50:.0f}, Q75={q75:.0f}, max={max(all_word_counts)}")
-
-    # 构建词IDF字典（用于分层分析）
-    log("\n构建词IDF字典（用于分层分析）...")
-    word_idf = build_word_idf_dict(META_FILE, sample_size=50000)
-    # 检查IDF分布
-    sample_idfs = [compute_query_idf(q['query'], word_idf) for user_qs in user_queries_correct.values() for q in user_qs]
-    if sample_idfs:
-        log(f"  Query IDF分布: min={min(sample_idfs):.2f}, mean={np.mean(sample_idfs):.2f}, max={max(sample_idfs):.2f}")
-
     k_values = [1, 3, 5, 10]
 
-    # 分别对 correct 和 noisy 进行评估
-    all_results_by_type = {}
+    # 构建词IDF字典（用于分层分析）- 只需构建一次
+    log("\n构建词IDF字典（用于分层分析）...")
+    word_idf = build_word_idf_dict(META_FILE, sample_size=50000)
 
-    for query_type in QUERY_TYPES:
-        log("\n" + "#" * 80)
-        log(f"# 查询类型: {query_type.upper()}")
-        log("#" * 80)
-
-        # 根据 query_type 加载对应的查询
-        user_queries, user_to_group, _ = load_user_queries(query_type)
-        log(f"  用户数: {len(user_queries)}")
-
-        query_type_results = []
-
-        # 评估密集检索器
-        for retriever_name in DENSE_RETRIEVERS:
-            try:
-                result = evaluate_dense_retriever(retriever_name, user_queries, user_to_group, k_values, word_idf, query_type)
-                result['query_type'] = query_type
-                query_type_results.append(result)
-            except FileNotFoundError as e:
-                log(f"  跳过 {retriever_name}: {e}")
-            except Exception as e:
-                log(f"  错误 {retriever_name}: {e}")
-
-        # 评估 BM25
-        try:
-            result = evaluate_bm25_retriever(user_queries, user_to_group, k_values, word_idf, query_type)
-            result['query_type'] = query_type
-            query_type_results.append(result)
-        except Exception as e:
-            log(f"  BM25 错误: {e}")
-
-        all_results_by_type[query_type] = query_type_results
-
-    # 合并所有结果用于后续分析
-    all_results = all_results_by_type.get('correct', []) + all_results_by_type.get('noisy', [])
-
-    # 计算 Oracle-Aware Random Baseline
-    log("\n计算 Oracle-Aware Random Baseline...")
     # 加载 doc_ids 用于随机基线
     embeddings_path = None
     for f in os.listdir(CACHE_DIR):
@@ -1943,57 +1878,145 @@ def main():
     n_docs = len(doc_ids)
     log(f"  总文档数: {n_docs}")
 
-    # ========== ACL 组间性能比较 (CORRECT 版本) ==========
-    if all_results_by_type.get('correct'):
-        # 打印宽格式汇总表
-        print_summary_table_wide(all_results_by_type['correct'], 'CORRECT')
+    # ========== 对每个查询类别分别进行评估 ==========
+    # all_results_by_category_and_type: {(category, query_type): [results]}
+    all_results_by_category_and_type = {}
+    # all_results_by_category: {category: [all results for that category]}
+    all_results_by_category = {}
 
-    # ========== ACL 组间性能比较 (NOISY 版本) ==========
-    if all_results_by_type.get('noisy'):
-        # 打印宽格式汇总表
-        print_summary_table_wide(all_results_by_type['noisy'], 'NOISY')
+    for query_category in QUERY_CATEGORIES:
+        log("\n" + "=" * 80)
+        log(f"========== 开始评估 {query_category.upper()} ==========")
+        log("=" * 80)
 
-    # ========== CORRECT vs NOISY 配对比较 ==========
-    # 基于 (user_id, asin) 匹配，对每个 noisy 查询找到对应的 correct 查询进行配对对比
-    if all_results_by_type.get('noisy') and all_results_by_type.get('correct'):
-        print_query_type_comparison(all_results_by_type, k_values)
+        # 先加载 correct 版本获取统计信息
+        user_queries_correct, user_to_group, _ = load_user_queries('correct', query_category)
+        log(f"  [{query_category.upper()}] 用户数: {len(user_queries_correct)}")
 
-    # 计算并打印 Bootstrap CI
-    log("\n计算 Bootstrap CI (n=1000, CI=95%)...")
-    for r in all_results:
-        r['bootstrap_ci'] = {}
-        for group in UNIQUE_GROUPS:
-            if r['raw_metrics_per_group'].get(group):
-                r['bootstrap_ci'][group] = compute_bootstrap_ci(
-                    r['raw_metrics_per_group'][group], k_values, n_bootstrap=1000, ci=0.95
+        # 按每条查询的group值计数
+        group_dist = defaultdict(int)
+        for user_qs in user_queries_correct.values():
+            for q in user_qs:
+                group_dist[q.get(GROUP_FIELD, 0)] += 1
+        log(f"  [{query_category.upper()}] {GROUP_FIELD.upper()}分布: {dict(sorted(group_dist.items()))}")
+
+        # 计算查询长度分组统计
+        all_word_counts = [q.get('word_count') or 0 for user_qs in user_queries_correct.values() for q in user_qs]
+        q25, q50, q75 = np.percentile(all_word_counts, [25, 50, 75])
+        log(f"  [{query_category.upper()}] Query长度分布: min={min(all_word_counts)}, Q25={q25:.0f}, Q50={q50:.0f}, Q75={q75:.0f}, max={max(all_word_counts)}")
+
+        # 检查IDF分布
+        sample_idfs = [compute_query_idf(q['query'], word_idf) for user_qs in user_queries_correct.values() for q in user_qs]
+        if sample_idfs:
+            log(f"  [{query_category.upper()}] Query IDF分布: min={min(sample_idfs):.2f}, mean={np.mean(sample_idfs):.2f}, max={max(sample_idfs):.2f}")
+
+        # 分别对 correct 和 noisy 进行评估
+        all_results_by_type = {}
+
+        for query_type in QUERY_TYPES:
+            log("\n" + "#" * 80)
+            log(f"# [{query_category.upper()}] 查询类型: {query_type.upper()}")
+            log("#" * 80)
+
+            # 根据 query_type 和 query_category 加载对应的查询
+            user_queries, user_to_group, _ = load_user_queries(query_type, query_category)
+            log(f"  用户数: {len(user_queries)}")
+
+            query_type_results = []
+
+            # 评估密集检索器
+            for retriever_name in DENSE_RETRIEVERS:
+                try:
+                    result = evaluate_dense_retriever(retriever_name, user_queries, user_to_group, k_values, word_idf, query_type, query_category)
+                    result['query_type'] = query_type
+                    result['query_category'] = query_category
+                    query_type_results.append(result)
+                except FileNotFoundError as e:
+                    log(f"  跳过 {retriever_name}: {e}")
+                except Exception as e:
+                    log(f"  错误 {retriever_name}: {e}")
+
+            # 评估 BM25
+            try:
+                result = evaluate_bm25_retriever(user_queries, user_to_group, k_values, word_idf, query_type, query_category)
+                result['query_type'] = query_type
+                result['query_category'] = query_category
+                query_type_results.append(result)
+            except Exception as e:
+                log(f"  BM25 错误: {e}")
+
+            all_results_by_type[query_type] = query_type_results
+
+        # 保存该类别的所有结果
+        all_results_by_category[query_category] = all_results_by_type.get('correct', []) + all_results_by_type.get('noisy', [])
+
+        # 存储到全局结构
+        for qt, results in all_results_by_type.items():
+            all_results_by_category_and_type[(query_category, qt)] = results
+
+        # ========== 该类别的 CORRECT 组间性能比较 ==========
+        if all_results_by_type.get('correct'):
+            print_summary_table_wide(all_results_by_type['correct'], f'{query_category.upper()}-CORRECT')
+
+        # ========== 该类别的 NOISY 组间性能比较 ==========
+        if all_results_by_type.get('noisy'):
+            print_summary_table_wide(all_results_by_type['noisy'], f'{query_category.upper()}-NOISY')
+
+        # ========== 该类别的 CORRECT vs NOISY 配对比较 ==========
+        if all_results_by_type.get('noisy') and all_results_by_type.get('correct'):
+            print_query_type_comparison(all_results_by_type, k_values)
+
+        # ========== 该类别的 OLS回归分析 (CORRECT 版本) ==========
+        if all_results_by_type.get('correct'):
+            run_ols_group_analysis(all_results_by_type['correct'])
+
+        # ========== 该类别的 Paired Difference 分析 (CORRECT 版本) ==========
+        if all_results_by_type.get('correct'):
+            run_paired_difference_analysis(all_results_by_type['correct'])
+
+        # ========== 该类别的纯效应回归 (CORRECT 版本) ==========
+        if all_results_by_type.get('correct'):
+            run_group_pure_effect_regression(all_results_by_type['correct'])
+
+        # ========== 该类别的混淆因素分析 (Check 1-4 + Bootstrap CI) ==========
+        run_confound_analysis()
+
+    # ========== 全局 CORRECT vs NOISY 配对比较 (所有类别) ==========
+    # 打印一个综合的 CORRECT vs NOISY 对比表
+    log("\n" + "=" * 100)
+    log("GLOBAL CORRECT vs NOISY 配对比较（所有类别综合）")
+    log("=" * 100)
+
+    # 合并所有类别的结果
+    all_results_combined = []
+    for (category, qt), results in all_results_by_category_and_type.items():
+        for r in results:
+            r_copy = r.copy()
+            r_copy['query_category'] = category
+            all_results_combined.append(r_copy)
+
+    if all_results_combined:
+        # 计算并打印 Bootstrap CI
+        log("\n计算 Bootstrap CI (n=1000, CI=95%)...")
+        for r in all_results_combined:
+            r['bootstrap_ci'] = {}
+            for group in UNIQUE_GROUPS:
+                if r['raw_metrics_per_group'].get(group):
+                    r['bootstrap_ci'][group] = compute_bootstrap_ci(
+                        r['raw_metrics_per_group'][group], k_values, n_bootstrap=1000, ci=0.95
+                    )
+            if r.get('all_raw_metrics'):
+                r['bootstrap_ci']['overall'] = compute_bootstrap_ci(
+                    r['all_raw_metrics'], k_values, n_bootstrap=1000, ci=0.95
                 )
-        if r.get('all_raw_metrics'):
-            r['bootstrap_ci']['overall'] = compute_bootstrap_ci(
-                r['all_raw_metrics'], k_values, n_bootstrap=1000, ci=0.95
-            )
 
     # 打印 Oracle-Aware Random Baseline
     log("\n" + "=" * 80)
     log("Oracle-Aware Random Baseline")
     log("=" * 80)
-    if all_results and all_results[0].get('all_raw_metrics'):
+    if all_results_combined and all_results_combined[0].get('all_raw_metrics'):
         log(f"  理论随机P@10 = 10/{n_docs} = {10/n_docs:.6f}")
         log(f"  理论随机N@10 ≈ {np.mean([1/np.log2(r+2) if r < 10 else 0 for r in range(n_docs)])*10:.6f}")
-
-    # 6C. OLS回归分析：CCOMP效应是否独立于IDF等混淆因素 (使用 CORRECT 版本)
-    if all_results_by_type.get('correct'):
-        run_ols_group_analysis(all_results_by_type['correct'])
-
-    # 6D. Paired Difference 分析 (使用 CORRECT 版本)
-    if all_results_by_type.get('correct'):
-        run_paired_difference_analysis(all_results_by_type['correct'])
-
-    # 6E. ACL/CCOMP 纯效应回归 (使用 CORRECT 版本)
-    if all_results_by_type.get('correct'):
-        run_group_pure_effect_regression(all_results_by_type['correct'])
-
-    # 运行 CCOMP 混淆因素分析 (Check 1-4 + Bootstrap CI)
-    run_confound_analysis()
 
     # 保存结果（处理 tuple key 等不可 JSON 序列化的问题）
     def sanitize_for_json(obj):
@@ -2013,8 +2036,9 @@ def main():
         json.dump({
             'timestamp': datetime.now().isoformat(),
             'query_types': QUERY_TYPES,
-            'results_by_type': sanitize_for_json(all_results_by_type),
-            'retrievers': sanitize_for_json(all_results)
+            'query_categories': QUERY_CATEGORIES,
+            'results_by_category_and_type': sanitize_for_json(all_results_by_category_and_type),
+            'all_results_combined': sanitize_for_json(all_results_combined)
         }, f, indent=2, default=str)
     log(f"\n结果已保存到: {output_file}")
 
