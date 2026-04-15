@@ -800,23 +800,17 @@ def compute_oracle_random_baseline(relevant_asin: str, doc_ids: List[str], n_tri
 
 # ============ 搜索器 ============
 class DenseSearcher:
-    """密集检索器搜索器 (GPU 矩阵乘法 + 余弦相似度)"""
+    """密集检索器搜索器 (CPU 矩阵乘法 + 余弦相似度)"""
     def __init__(self, embeddings: np.ndarray, doc_ids: List[str], retriever_name: str):
         self.doc_ids = doc_ids
         self.retriever_name = retriever_name
-        # 显式使用 cuda:0 避免设备不一致问题
-        if torch.cuda.is_available():
-            self.device = torch.device('cuda:0')
-            torch.cuda.set_device(0)
-        else:
-            self.device = torch.device('cpu')
+        # 使用 CPU 避免 CUDA 上下文问题
+        self.device = torch.device('cpu')
         # 归一化 doc embeddings 以支持余弦相似度
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms = np.where(norms == 0, 1, norms)  # 避免除零
         normalized_embeddings = embeddings / norms
         self.embeddings_tensor = torch.from_numpy(normalized_embeddings).float().to(self.device)
-        # 确保数据传输完成
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
 
     def search_batch(self, query_embeddings: List[np.ndarray], top_k: int = 10) -> List[List[Tuple[str, float]]]:
         if not query_embeddings:
