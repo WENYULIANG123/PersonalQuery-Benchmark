@@ -62,9 +62,9 @@ def load_config():
     """从 JSON 文件加载配置"""
     with open(PROMPT_CONFIG_FILE, 'r', encoding='utf-8') as f:
         config = json.load(f)
-    return config['base_system'], config['user_content_template'], config['max_users'], config['max_reviews'], config['max_workers']
+    return config['base_system'], config['user_content_template'], config['max_users'], config['max_reviews'], config['max_workers'], config.get('use_minimaxio', False)
 
-BASE_SYSTEM, USER_CONTENT_TEMPLATE, MAX_USERS, MAX_REVIEWS, MAX_WORKERS = load_config()
+BASE_SYSTEM, USER_CONTENT_TEMPLATE, MAX_USERS, MAX_REVIEWS, MAX_WORKERS, USE_MINIMAXIO = load_config()
 
 # 全局变量
 _minimax_client = None
@@ -81,9 +81,13 @@ def load_minimax_client():
     """加载 MiniMax API 客户端"""
     global _minimax_client
     if _minimax_client is None:
-        from llm_client import MiniMaxAnthropicClient
-        _minimax_client = MiniMaxAnthropicClient()
-        _log("MiniMax API 客户端初始化完成")
+        from llm_client import MiniMaxAnthropicClient, MiniMaxIOAnthropicClient
+        if USE_MINIMAXIO:
+            _minimax_client = MiniMaxIOAnthropicClient()
+            _log("MiniMaxIO API 客户端初始化完成")
+        else:
+            _minimax_client = MiniMaxAnthropicClient()
+            _log("MiniMax API 客户端初始化完成")
 
 
 def call_merged_llm(reviews_text: List[str]) -> Dict:

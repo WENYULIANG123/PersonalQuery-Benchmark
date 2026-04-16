@@ -220,6 +220,188 @@ class MiniMaxAnthropicClient:
         return "", {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}
 
 
+class MiniMaxIOAnthropicClient:
+    """MiniMax IO LLM Client using Anthropic SDK.
+
+    Uses the Anthropic-compatible API endpoint at https://api.minimax.io/anthropic
+    Supports MiniMax-M2.7 and other models with thinking/text content blocks.
+    """
+    def __init__(self, model: str = "MiniMax-M2.7"):
+        self.model = model
+        import anthropic
+        self.client = anthropic.Anthropic(
+            base_url="https://api.minimax.io/anthropic",
+            api_key="sk-cp-GpGDO4bCprD-LScnuPL2JUzK0B3VNC6e6zFFkjRYP7OPTgY-sxuezrlwM-qLcri2zl0VmgGXmfv_FaNlOp-lVGDeiJnR6qVppp8fW4280iC4k4gSggDXWn8"
+        )
+
+    def call_with_thinking(
+        self,
+        prompt: str,
+        max_tokens: int = 8192,
+        temperature: Optional[float] = None,
+        max_retries: int = 100,
+    ) -> tuple:
+        """Call MiniMax IO API and return both thinking and text.
+
+        Returns:
+            tuple: (thinking_text, text_content)
+        """
+        import anthropic
+
+        safe_prompt = prompt.strip() if isinstance(prompt, str) else str(prompt)
+        if not safe_prompt:
+            return "", ""
+
+        safe_max_tokens = max(128, int(max_tokens))
+        safe_temp = temperature if temperature is not None else 0.7
+
+        retry_count = 0
+        for attempt in range(max_retries):
+            try:
+                message = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=safe_max_tokens,
+                    temperature=safe_temp,
+                    messages=[
+                        {"role": "user", "content": safe_prompt}
+                    ]
+                )
+
+                thinking_text = ""
+                text_content = ""
+
+                for block in message.content:
+                    if block.type == "thinking":
+                        thinking_text = block.thinking
+                    elif block.type == "text":
+                        text_content = block.text
+
+                text_content = text_content.strip()
+                if not text_content:
+                    if attempt < max_retries - 1:
+                        wait_time = min(60, (2 ** attempt) * 3)
+                        print(f"[MiniMaxIO-Anthropic] Empty response. Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
+                        time.sleep(wait_time)
+                        retry_count += 1
+                        continue
+                    else:
+                        return "", ""
+                if retry_count > 0:
+                    print(f"[MiniMaxIO-Anthropic] Empty response retry succeeded after {retry_count} retries.")
+                return thinking_text, text_content
+
+            except Exception as e:
+                error_str = str(e)
+                retryable = any(code in error_str for code in ["429", "529", "500", "502", "503", "504", "520", "522", "530"])
+                if retryable:
+                    wait_time = min(60, (2 ** attempt) * 3)
+                    print(f"[MiniMaxIO-Anthropic] Rate limited ({e}). Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                    retry_count += 1
+                    continue
+                print(f"[MiniMaxIO-Anthropic] Error calling API: {e}")
+                return "", ""
+
+        return "", ""
+
+    def call(
+        self,
+        prompt: str,
+        max_tokens: int = 4096,
+        temperature: Optional[float] = None,
+        max_retries: int = 100,
+    ) -> str:
+        """Call MiniMax IO API and return text content only."""
+        _, text_content = self.call_with_thinking(
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            max_retries=max_retries,
+        )
+        return text_content
+
+    def call_with_cache(
+        self,
+        system_base: str,
+        user_content: str,
+        max_tokens: int = 4096,
+        temperature: Optional[float] = None,
+        max_retries: int = 100,
+    ) -> tuple:
+        """Call MiniMax IO API with prompt caching."""
+        import anthropic
+
+        safe_system = system_base.strip() if isinstance(system_base, str) else str(system_base)
+        safe_user = user_content.strip() if isinstance(user_content, str) else str(user_content)
+        if not safe_system or not safe_user:
+            return "", 0
+
+        safe_max_tokens = max(128, int(max_tokens))
+        safe_temp = temperature if temperature is not None else 0.7
+
+        retry_count = 0
+        for attempt in range(max_retries):
+            try:
+                messages = [{"role": "user", "content": safe_user}]
+
+                message = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=safe_max_tokens,
+                    temperature=safe_temp,
+                    system=[
+                        {"type": "text", "text": safe_system, "cache_control": {"type": "ephemeral"}}
+                    ],
+                    messages=messages
+                )
+
+                text_content = ""
+                cache_read_input_tokens = 0
+                cache_creation_input_tokens = 0
+                input_tokens = 0
+                output_tokens = 0
+
+                for block in message.content:
+                    if block.type == "text":
+                        text_content = block.text
+                    elif block.type == "thinking":
+                        pass
+
+                if hasattr(message, 'usage') and message.usage:
+                    cache_read_input_tokens = getattr(message.usage, 'cache_read_input_tokens', 0)
+                    cache_creation_input_tokens = getattr(message.usage, 'cache_creation_input_tokens', 0)
+                    input_tokens = getattr(message.usage, 'input_tokens', 0)
+                    output_tokens = getattr(message.usage, 'output_tokens', 0)
+
+                text_content = text_content.strip()
+                if not text_content:
+                    if attempt < max_retries - 1:
+                        wait_time = min(60, (2 ** attempt) * 3)
+                        _log(f"[MiniMaxIO-Cache] Empty response. Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
+                        time.sleep(wait_time)
+                        retry_count += 1
+                        continue
+                    else:
+                        return "", {"cache_creation_input_tokens": cache_creation_input_tokens, "cache_read_input_tokens": cache_read_input_tokens, "input_tokens": input_tokens, "output_tokens": output_tokens}
+
+                if retry_count > 0:
+                    _log(f"[MiniMaxIO-Cache] Empty response retry succeeded after {retry_count} retries.")
+                return text_content, {"cache_creation_input_tokens": cache_creation_input_tokens, "cache_read_input_tokens": cache_read_input_tokens, "input_tokens": input_tokens, "output_tokens": output_tokens}
+
+            except Exception as e:
+                error_str = str(e)
+                retryable = any(code in error_str for code in ["429", "529", "500", "502", "503", "504", "520", "522", "530"])
+                if retryable:
+                    wait_time = min(60, (2 ** attempt) * 3)
+                    _log(f"[MiniMaxIO-Cache] Rate limited ({e}). Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                    retry_count += 1
+                    continue
+                _log(f"[MiniMaxIO-Cache] Error calling API: {e}")
+                return "", {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}
+
+        return "", {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}
+
+
 class ZAIAnthropicClient:
     """ZAI LLM Client using requests.
 
