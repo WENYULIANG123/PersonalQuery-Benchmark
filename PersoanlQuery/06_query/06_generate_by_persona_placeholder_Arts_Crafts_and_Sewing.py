@@ -850,23 +850,8 @@ def main():
                 correct_filled = selected['filled_query']
                 # 验证至少有一个正确词存在
                 if not validate_at_least_one_correct_word(correct_filled, errors.get('acl', [])):
-                    log(f"    [DEBUG] {acl_level} 没有正确词，跳过错误注入")
-                    # 仍然添加查询，但不注入错误
-                    acl_results.append({
-                        'user_id': uid,
-                        'asin': persona['asin'],
-                        'target_acl': target_acl,
-                        'acl_sentence_ratio': persona.get('acl_sentence_ratio', 0.0),
-                        'density_label': persona.get('density_label', 'simple'),
-                        'length_label': persona.get('length_label', 'medium'),
-                        'words_per_acl': persona.get('words_per_acl'),
-                        'ground_truth_acl': ground_truth_acl,
-                        'target_length': persona.get('target_length'),
-                        'has_errors': False,
-                        'filled_query': correct_filled,
-                        'word_count': selected['word_count'],
-                        'is_ground_truth': True,
-                    })
+                    log(f"    [DEBUG] {acl_level} 没有正确词，判定为失败")
+                    return None
                 else:
                     noisy_filled = inject_errors(correct_filled, errors.get('acl', []))
                     acl_results.append({
@@ -922,23 +907,8 @@ def main():
                 correct_filled = selected['filled_query']
                 # 验证至少有一个正确词存在
                 if not validate_at_least_one_correct_word(correct_filled, errors.get('ccomp', [])):
-                    log(f"    [DEBUG] {ccomp_level} 没有正确词，跳过错误注入")
-                    # 仍然添加查询，但不注入错误
-                    ccomp_results.append({
-                        'user_id': uid,
-                        'asin': persona['asin'],
-                        'target_ccomp': target_ccomp,
-                        'ccomp_sentence_ratio': persona.get('ccomp_sentence_ratio', 0.0),
-                        'density_label': persona.get('density_label', 'simple'),
-                        'length_label': persona.get('length_label', 'medium'),
-                        'words_per_ccomp': persona.get('words_per_ccomp'),
-                        'ground_truth_ccomp': ground_truth_ccomp,
-                        'target_length': persona.get('target_length'),
-                        'has_errors': False,
-                        'filled_query': correct_filled,
-                        'word_count': selected['word_count'],
-                        'is_ground_truth': True,
-                    })
+                    log(f"    [DEBUG] {ccomp_level} 没有正确词，判定为失败")
+                    return None
                 else:
                     noisy_filled = inject_errors(correct_filled, errors.get('ccomp', []))
                     ccomp_results.append({
