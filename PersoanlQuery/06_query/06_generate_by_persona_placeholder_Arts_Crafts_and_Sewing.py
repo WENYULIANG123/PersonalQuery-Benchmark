@@ -961,6 +961,7 @@ def main():
         return {'acl': acl_results, 'ccomp': ccomp_results}
 
     results = {'acl': [], 'ccomp': []}
+    failed_users = []
     total_start = time.time()
     total_users = len(user_tasks)
 
@@ -974,6 +975,8 @@ def main():
                 done_users = len(set(x['user_id'] for x in results['acl']))
                 err_tag = " [error user]" if r['acl'][0]['has_errors'] else ""
                 log(f"  [{done_users}/{total_users}] user={r['acl'][0]['user_id'][:20]}{err_tag}")
+            else:
+                failed_users.append(futures[future]['user_id'])
 
     total_elapsed = time.time() - total_start
 
@@ -1076,6 +1079,10 @@ def main():
     )]
 
     log(f"\n{'='*60}")
+    log(f"成功用户: {len(acl_user_map)}/{total_users}")
+    log(f"失败用户: {len(failed_users)}/{total_users}")
+    if failed_users:
+        log(f"  失败用户ID: {failed_users[:5]}...")
     log(f"ACL: {len(results['acl'])} queries, {len(acl_user_map)} users")
     log(f"  有错误用户: {len(acl_error_users)} (correct+noisy 双版本)")
     log(f"CCOMP: {len(results['ccomp'])} queries, {len(ccomp_user_map)} users")
