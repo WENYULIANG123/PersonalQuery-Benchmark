@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Stage 4 ACL: Attribute/Modifier Error Extraction
+Stage 4: Combined ACL + CCOMP Error Extraction
 
-专注于属性词/修饰词相关错误的提取，错误类型：
-1. attribute_typo: 属性词错误 (e.g., "convenient" -> "conveniently")
-2. modifier_typo: 修饰词错误 (e.g., "smoth" -> "smooth", "diffrent" -> "different")
-3. np_inflection: 名词短语词形错误
+同时识别 ACL (Attribute/Modifier) 和 CCOMP (Complement Clause) 错误：
+1. ACL: 属性词/修饰词错误 - convenient, smooth, different 等词的拼写错误
+2. CCOMP: 补语从句错误 - think/believe/would/that 等词的拼写错误
 
 Input:
-  - /home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction/Pet_Supplies/stage1_filtered_users_reviews.json
+  - /home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction/Arts_Crafts_and_Sewing/stage1_filtered_users_reviews.json
 
 Output:
-  - /home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/Pet_Supplies/acl_error.json
+  - /home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/Arts_Crafts_and_Sewing/merged_error.json
 
 Usage:
-  python 04_extract_acl_errors_Pet_Supplies.py
+  python 04_extract_merged_errors_Arts_Crafts_and_Sewing.py
 """
 
 import json
@@ -49,15 +48,15 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 # 硬编码参数
 # ============================================================================
 
-INPUT_FILE = "/fs04/ar57/wenyu/result/personal_query/01_preference_extraction/Pet_Supplies/stage1_filtered_users_reviews.json"
-OUTPUT_DIR = "/fs04/ar57/wenyu/result/personal_query/04_writing_analysis/Pet_Supplies"
+INPUT_FILE = "/fs04/ar57/wenyu/result/personal_query/01_preference_extraction/Arts_Crafts_and_Sewing/stage1_filtered_users_reviews.json"
+OUTPUT_DIR = "/fs04/ar57/wenyu/result/personal_query/04_writing_analysis/Arts_Crafts_and_Sewing"
 
 
 # ============================================================================
-# ACL 错误提取 Prompt (从 JSON 文件动态加载)
+# Merged 错误提取 Prompt (从 JSON 文件动态加载)
 # ============================================================================
 
-PROMPT_CONFIG_FILE = "/home/wlia0047/ar57/wenyu/PersoanlQuery/04_writing_analysis/acl_prompts.json"
+PROMPT_CONFIG_FILE = "/home/wlia0047/ar57/wenyu/PersoanlQuery/04_writing_analysis/acl_ccomp_prompts.json"
 
 def load_config():
     """从 JSON 文件加载配置"""
@@ -87,8 +86,8 @@ def load_minimax_client():
         _log("MiniMax API 客户端初始化完成")
 
 
-def call_acl_llm(reviews_text: List[str]) -> Dict:
-    """调用 MiniMax API 进行ACL错误提取，使用缓存机制"""
+def call_merged_llm(reviews_text: List[str]) -> Dict:
+    """调用 MiniMax API 进行 ACL+CCOMP 错误提取，使用缓存机制"""
     global _minimax_client, _first_request
 
     if _minimax_client is None:
@@ -137,11 +136,18 @@ def call_acl_llm(reviews_text: List[str]) -> Dict:
 
             result = json.loads(result_text)
 
+            has_errors = False
+            for idx_result in result.values():
+                if isinstance(idx_result, dict):
+                    if idx_result.get("acl_regions") or idx_result.get("ccomp_regions"):
+                        has_errors = True
+                        break
+
             return {
                 "status": "success",
                 "reviews": reviews_text,
                 "results": result,
-                "has_errors": any(v.get("regions") for v in result.values() if isinstance(v, dict))
+                "has_errors": has_errors
             }
 
         except json.JSONDecodeError:
@@ -204,7 +210,6 @@ class ACLErrorClassifier:
     @staticmethod
     def _is_attribute_error(s1: str, s2: str) -> bool:
         """判断是否为属性词错误"""
-        # 常见的属性词/副词对
         attribute_pairs = {
             ("convenient", "conveniently"),
             ("easy", "easily"),
@@ -235,16 +240,126 @@ class ACLErrorClassifier:
 
 
 # ============================================================================
+# CCOMP 错误类型分类器
+# ============================================================================
+
+class CCOMPErrorClassifier:
+    """CCOMP错误类型分类"""
+
+    ERROR_TYPE_MAPPING = {
+        "clause_shell_typo": "clause壳层词拼写错误",
+        "complement_linking_error": "从句连接错误",
+        "modal_distortion": "情态动词错误",
+        "clause_boundary_error": "从句边界结构错误"
+    }
+
+    # 常见的 clause-shell 词
+    CLAUSE_SHELL_WORDS = {
+        'think', 'believe', 'know', 'feel', 'want', 'hope', 'expect',
+        'suppose', 'noticed', 'said', 'saw', 'heard', 'found',
+        'because', 'whether', 'if', 'though', 'although', 'since',
+        'that', 'what', 'whatever', 'which'
+    }
+
+    # 常见的情态动词
+    MODAL_WORDS = {
+        'would', 'could', 'should', 'might', 'may', 'will', 'shall',
+        'must', 'ought', 'used'
+    }
+
+    @staticmethod
+    def classify_error_type(original: str, corrected: str, context: str = "") -> str:
+        """根据原始词和修正词判断CCOMP错误类型"""
+        orig_lower = original.lower().strip()
+        corr_lower = corrected.lower().strip()
+
+        # 1. 检查是否是 clause-shell 词 typo
+        if CCOMPErrorClassifier._is_clause_shell_typo(orig_lower, corr_lower):
+            return "clause_shell_typo"
+
+        # 2. 检查是否是情态动词错误
+        if CCOMPErrorClassifier._is_modal_distortion(orig_lower, corr_lower):
+            return "modal_distortion"
+
+        # 3. 检查是否是从句连接错误 (that, if, whether)
+        if CCOMPErrorClassifier._is_complement_linking_error(orig_lower, corr_lower):
+            return "complement_linking_error"
+
+        # 4. 检查是否是从句边界结构错误
+        if CCOMPErrorClassifier._is_clause_boundary_error(orig_lower, corr_lower):
+            return "clause_boundary_error"
+
+        # 如果原始词是 clause-shell 词但拼写错了
+        if orig_lower in CCOMPErrorClassifier.CLAUSE_SHELL_WORDS:
+            return "clause_shell_typo"
+
+        # 如果原始词是情态动词但拼写错了
+        if orig_lower in CCOMPErrorClassifier.MODAL_WORDS:
+            return "modal_distortion"
+
+        return "clause_shell_typo"
+
+    @staticmethod
+    def _is_clause_shell_typo(s1: str, s2: str) -> bool:
+        shell_typo_map = {
+            'thikn': 'think', 'thnk': 'think',
+            'belive': 'believe', 'beleive': 'believe',
+            'noticd': 'noticed', 'notcie': 'notice', 'notic': 'notice',
+            'saod': 'said', 'sadi': 'said', 'soid': 'said',
+            'becuase': 'because', 'becuse': 'because',
+            'wether': 'whether', 'weither': 'whether',
+            'woudl': 'would', 'woud': 'would',
+            'shoudl': 'should', 'shuold': 'should',
+            'taht': 'that', 'thta': 'that',
+            'coudl': 'could', 'cuold': 'could',
+        }
+        return s1 in shell_typo_map and shell_typo_map[s1] == s2
+
+    @staticmethod
+    def _is_modal_distortion(s1: str, s2: str) -> bool:
+        modal_typo_map = {
+            'woudl': 'would', 'woud': 'would', 'woul': 'would',
+            'coudl': 'could', 'cuold': 'could', 'coul': 'could',
+            'shoudl': 'should', 'shoud': 'should', 'shuold': 'should',
+            'migth': 'might', 'mitgh': 'might',
+            'mayd': 'may',
+        }
+        return s1 in modal_typo_map and modal_typo_map[s1] == s2
+
+    @staticmethod
+    def _is_complement_linking_error(s1: str, s2: str) -> bool:
+        linking_errors = {
+            'taht': 'that', 'thta': 'that',
+            'tif': 'if', 'fi': 'if',
+            'wether': 'whether', 'whetehr': 'whether', 'wherher': 'whether',
+        }
+        return s1 in linking_errors and linking_errors[s1] == s2
+
+    @staticmethod
+    def _is_clause_boundary_error(s1: str, s2: str) -> bool:
+        boundary_error_patterns = [
+            ('work', 'works'), ('think', 'thinks'), ('believe', 'believes'),
+            ('know', 'knows'), ('feel', 'feels'), ('want', 'wants'),
+            ('hope', 'hopes'), ('expect', 'expects'), ('suppose', 'supposes'),
+            ('break', 'broke'), ('think', 'thought'), ('know', 'knew'),
+            ('feel', 'felt'), ('want', 'wanted'), ('hope', 'hoped'),
+            ('work', 'working'), ('break', 'breaking'), ('leak', 'leaking'),
+        ]
+        return (s1, s2) in boundary_error_patterns or (s2, s1) in boundary_error_patterns
+
+
+# ============================================================================
 # 主分析 Pipeline
 # ============================================================================
 
-class ACLErrorAnalyzer:
-    """ACL错误分析"""
+class MergedErrorAnalyzer:
+    """ACL+CCOMP 错误分析"""
 
     def __init__(self, analysis_dir: Path = None, reviews_dir: Path = None):
         self.analysis_dir = analysis_dir or Path(OUTPUT_DIR)
         self.reviews_dir = reviews_dir or Path(os.path.dirname(INPUT_FILE))
-        self.classifier = ACLErrorClassifier()
+        self.acl_classifier = ACLErrorClassifier()
+        self.ccomp_classifier = CCOMPErrorClassifier()
 
         self._merged_data = None
         self._users_map = None
@@ -254,7 +369,6 @@ class ACLErrorAnalyzer:
         """线程安全的懒加载合并文件"""
         if self._users_map is None:
             with self._load_lock:
-                # 双重检查锁定
                 if self._users_map is None:
                     if os.path.exists(INPUT_FILE):
                         with open(INPUT_FILE, 'r', encoding='utf-8') as f:
@@ -270,8 +384,37 @@ class ACLErrorAnalyzer:
         self._load_merged_file()
         return self._users_map.get(user_id)
 
+    def _filter_errors(self, errors: List[Dict], error_category: str) -> List[Dict]:
+        """过滤错误列表，只保留单词级别的修正"""
+        valid_errors = []
+        for error in errors:
+            orig = error.get("original", "").strip()
+            corr = error.get("corrected", "").strip()
+
+            if not orig or not corr or orig == corr:
+                continue
+
+            # 跳过 corrected 是短语的情况（必须是单词）
+            if len(corr.split()) > 1:
+                continue
+
+            error_type = error.get("error_type", "")
+            if not error_type:
+                if error_category == "acl":
+                    error_type = self.acl_classifier.classify_error_type(orig, corr)
+                else:
+                    error_type = self.ccomp_classifier.classify_error_type(orig, corr, "")
+
+            valid_errors.append({
+                "original": orig,
+                "corrected": corr,
+                "error_type": error_type,
+                "confidence": error.get("confidence", 0.8)
+            })
+        return valid_errors
+
     def process_user(self, user_id: str, reviews_file: Optional[str] = None, max_reviews: Optional[int] = None) -> dict:
-        """处理单个用户：提取ACL错误"""
+        """处理单个用户：同时提取 ACL 和 CCOMP 错误"""
 
         reviews_data = self._get_user_data_from_merged(user_id)
 
@@ -300,15 +443,17 @@ class ACLErrorAnalyzer:
             if max_reviews:
                 flattened_reviews = flattened_reviews[:max_reviews]
 
-            reviews_with_errors = 0
-            total_errors = 0
-            error_type_counts = defaultdict(int)
-            region_type_counts = defaultdict(int)
+            acl_error_count = 0
+            ccomp_error_count = 0
+            acl_error_type_counts = defaultdict(int)
+            ccomp_error_type_counts = defaultdict(int)
+            acl_region_type_counts = defaultdict(int)
+            ccomp_region_type_counts = defaultdict(int)
             detailed_results = []
 
-            # 将所有评论文本提取出来，一次请求发送
+            # 一次请求同时提取 ACL 和 CCOMP 错误
             review_texts = [review_text for review_text, asin in flattened_reviews]
-            llm_result = call_acl_llm(review_texts)
+            llm_result = call_merged_llm(review_texts)
 
             if llm_result["status"] != "success":
                 logger.warning(f"[{user_id}] LLM call failed: {llm_result.get('error', 'Unknown error')}")
@@ -320,68 +465,63 @@ class ACLErrorAnalyzer:
             for review_idx, (review_text, asin) in enumerate(flattened_reviews):
                 idx_str = str(review_idx)
                 review_result = results_by_idx.get(idx_str, {})
-                regions = review_result.get("regions", []) if isinstance(review_result, dict) else []
 
-                # 过滤并标准化错误
-                for region in regions:
+                # 处理 ACL 错误
+                acl_regions = review_result.get("acl_regions", []) if isinstance(review_result, dict) else []
+                for region in acl_regions:
                     region_type = region.get("region_type", "unknown")
                     span_text = region.get("span_text", "")
                     errors = region.get("errors", [])
 
-                    if not errors:
-                        continue
-
-                    valid_errors = []
-                    for error in errors:
-                        orig = error.get("original", "").strip()
-                        corr = error.get("corrected", "").strip()
-
-                        # 跳过空或相同的情况
-                        if not orig or not corr or orig == corr:
-                            continue
-
-                        # 跳过 corrected 是短语的情况（必须是单词）
-                        if len(corr.split()) > 1:
-                            continue
-
-                        # 标准化错误类型
-                        error_type = error.get("error_type", "")
-                        if not error_type:
-                            error_type = self.classifier.classify_error_type(orig, corr)
-
-                        valid_errors.append({
-                            "original": orig,
-                            "corrected": corr,
-                            "error_type": error_type,
-                            "confidence": error.get("confidence", 0.8)
-                        })
-
-                        error_type_counts[error_type] += 1
-
+                    valid_errors = self._filter_errors(errors, "acl")
                     if valid_errors:
-                        region_type_counts[region_type] += 1
+                        acl_region_type_counts[region_type] += 1
+                        for err in valid_errors:
+                            acl_error_type_counts[err["error_type"]] += 1
                         detailed_results.append({
                             "asin": asin,
+                            "error_category": "acl",
                             "region_type": region_type,
                             "span_text": span_text,
                             "errors": valid_errors
                         })
 
-                if any(r.get("errors") for r in regions if r.get("errors")):
-                    reviews_with_errors += 1
+                # 处理 CCOMP 错误
+                ccomp_regions = review_result.get("ccomp_regions", []) if isinstance(review_result, dict) else []
+                for region in ccomp_regions:
+                    region_type = region.get("region_type", "unknown")
+                    span_text = region.get("span_text", "")
+                    errors = region.get("errors", [])
 
-                total_errors += sum(len(r.get("errors", [])) for r in regions if r.get("errors"))
+                    valid_errors = self._filter_errors(errors, "ccomp")
+                    if valid_errors:
+                        ccomp_region_type_counts[region_type] += 1
+                        for err in valid_errors:
+                            ccomp_error_type_counts[err["error_type"]] += 1
+                        detailed_results.append({
+                            "asin": asin,
+                            "error_category": "ccomp",
+                            "region_type": region_type,
+                            "span_text": span_text,
+                            "errors": valid_errors
+                        })
 
-            logger.info(f"[{user_id}] ACL error analysis completed: {len(flattened_reviews)} reviews, {total_errors} errors")
+            acl_total = sum(acl_error_type_counts.values())
+            ccomp_total = sum(ccomp_error_type_counts.values())
+
+            logger.info(f"[{user_id}] Merged error analysis completed: {len(flattened_reviews)} reviews, ACL={acl_total} errors, CCOMP={ccomp_total} errors")
 
             return {
                 "user_id": user_id,
                 "status": "success",
                 "reviews_processed": len(flattened_reviews),
-                "reviews_with_errors": reviews_with_errors,
-                "total_errors": total_errors,
-                "error_types": dict(error_type_counts),
-                "region_types": dict(region_type_counts),
+                "acl_error_count": acl_total,
+                "ccomp_error_count": ccomp_total,
+                "total_errors": acl_total + ccomp_total,
+                "acl_error_types": dict(acl_error_type_counts),
+                "ccomp_error_types": dict(ccomp_error_type_counts),
+                "acl_region_types": dict(acl_region_type_counts),
+                "ccomp_region_types": dict(ccomp_region_type_counts),
                 "detailed_results": detailed_results
             }
 
@@ -437,7 +577,7 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     log_with_timestamp("="*80)
-    log_with_timestamp("Stage 4 ACL: Attribute/Modifier Error Extraction")
+    log_with_timestamp("Stage 4: Combined ACL + CCOMP Error Extraction")
     log_with_timestamp("="*80)
     log_with_timestamp(f"Input file: {INPUT_FILE}")
     log_with_timestamp(f"Output directory: {OUTPUT_DIR}")
@@ -463,17 +603,16 @@ def main():
 
     user_ids_to_process = sorted(list(existing_users))
 
-    analyzer = ACLErrorAnalyzer(
+    analyzer = MergedErrorAnalyzer(
         analysis_dir=Path(OUTPUT_DIR),
         reviews_dir=Path(os.path.dirname(INPUT_FILE))
     )
-    # 预加载merged文件，避免多线程竞态条件
     analyzer._load_merged_file()
 
     results = []
 
     log_with_timestamp("="*80)
-    log_with_timestamp(f"Processing {len(user_ids_to_process)} users with ACL error extraction (concurrent={MAX_WORKERS})...")
+    log_with_timestamp(f"Processing {len(user_ids_to_process)} users with ACL+CCOMP error extraction (concurrent={MAX_WORKERS})...")
     log_with_timestamp("="*80)
 
     total_start = time.time()
@@ -496,7 +635,7 @@ def main():
                     log_with_timestamp(
                         f"  [{completed_count}/{len(user_ids_to_process)}] "
                         f"✓ {result['user_id']}: {result['reviews_processed']} reviews, "
-                        f"{result['total_errors']} errors"
+                        f"ACL={result['acl_error_count']}, CCOMP={result['ccomp_error_count']} errors"
                     )
                 else:
                     log_with_timestamp(
@@ -518,28 +657,37 @@ def main():
 
     if successful:
         total_reviews = sum(r["reviews_processed"] for r in successful)
+        total_acl_errors = sum(r["acl_error_count"] for r in successful)
+        total_ccomp_errors = sum(r["ccomp_error_count"] for r in successful)
         total_errors = sum(r["total_errors"] for r in successful)
-        log_with_timestamp(f"Total: {total_reviews} reviews, {total_errors} errors")
 
-        all_error_types = defaultdict(int)
-        all_region_types = defaultdict(int)
+        log_with_timestamp(f"Total: {total_reviews} reviews, ACL={total_acl_errors}, CCOMP={total_ccomp_errors} errors")
+
+        all_acl_error_types = defaultdict(int)
+        all_ccomp_error_types = defaultdict(int)
+        all_acl_region_types = defaultdict(int)
+        all_ccomp_region_types = defaultdict(int)
+
         for r in successful:
-            for etype, count in r["error_types"].items():
-                all_error_types[etype] += count
-            for rtype, count in r["region_types"].items():
-                all_region_types[rtype] += count
+            for etype, count in r["acl_error_types"].items():
+                all_acl_error_types[etype] += count
+            for etype, count in r["ccomp_error_types"].items():
+                all_ccomp_error_types[etype] += count
+            for rtype, count in r["acl_region_types"].items():
+                all_acl_region_types[rtype] += count
+            for rtype, count in r["ccomp_region_types"].items():
+                all_ccomp_region_types[rtype] += count
 
-        log_with_timestamp("Error type distribution:")
-        for etype, count in sorted(all_error_types.items(), key=lambda x: x[1], reverse=True):
+        log_with_timestamp("ACL Error type distribution:")
+        for etype, count in sorted(all_acl_error_types.items(), key=lambda x: x[1], reverse=True):
             log_with_timestamp(f"  {etype}: {count}")
 
-        log_with_timestamp("Region type distribution:")
-        for rtype, count in sorted(all_region_types.items(), key=lambda x: x[1], reverse=True):
-            log_with_timestamp(f"  {rtype}: {count}")
+        log_with_timestamp("CCOMP Error type distribution:")
+        for etype, count in sorted(all_ccomp_error_types.items(), key=lambda x: x[1], reverse=True):
+            log_with_timestamp(f"  {etype}: {count}")
 
         # 只保存有错误的用户
         users_with_errors = [r for r in successful if r["total_errors"] > 0]
-        users_with_errors_ids = [r["user_id"] for r in users_with_errors]
 
         summary_data = {
             "timestamp": datetime.now().isoformat(),
@@ -548,24 +696,29 @@ def main():
             "users_with_errors": len(users_with_errors),
             "failed_users": [r["user_id"] for r in failed],
             "total_reviews": total_reviews,
+            "total_acl_errors": total_acl_errors,
+            "total_ccomp_errors": total_ccomp_errors,
             "total_errors": total_errors,
-            "error_type_distribution": dict(all_error_types),
-            "region_type_distribution": dict(all_region_types),
+            "acl_error_type_distribution": dict(all_acl_error_types),
+            "ccomp_error_type_distribution": dict(all_ccomp_error_types),
+            "acl_region_type_distribution": dict(all_acl_region_types),
+            "ccomp_region_type_distribution": dict(all_ccomp_region_types),
             "user_results": [
                 {
                     "user_id": r["user_id"],
                     "reviews_processed": r["reviews_processed"],
-                    "reviews_with_errors": r["reviews_with_errors"],
+                    "acl_error_count": r["acl_error_count"],
+                    "ccomp_error_count": r["ccomp_error_count"],
                     "total_errors": r["total_errors"],
-                    "error_types": r["error_types"],
-                    "region_types": r["region_types"],
+                    "acl_error_types": r["acl_error_types"],
+                    "ccomp_error_types": r["ccomp_error_types"],
                     "detailed_results": r.get("detailed_results", [])
                 }
                 for r in users_with_errors
             ]
         }
 
-        summary_file = os.path.join(OUTPUT_DIR, "acl_error.json")
+        summary_file = os.path.join(OUTPUT_DIR, "acl_ccomp_error.json")
         with open(summary_file, 'w', encoding='utf-8') as f:
             json.dump(summary_data, f, ensure_ascii=False, indent=2)
         log_with_timestamp(f"Summary saved to {summary_file}")

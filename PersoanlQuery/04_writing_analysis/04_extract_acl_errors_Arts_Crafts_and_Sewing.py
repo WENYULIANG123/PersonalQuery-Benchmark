@@ -1,31 +1,20 @@
 #!/usr/bin/env python3
 """
-Stage 4 (V2): Detailed Syntactic Error Extraction
+Stage 4 ACL: Attribute/Modifier Error Extraction
 
-基于句法结构的精细错误提取，专注于"描述细节的零件"区域：
-1. acl/relcl/advcl 子树
-2. 名词短语修饰链
-3. 属性短语
-4. 产品 feature span
-
-在这些区域中优先提取：
-- OOV 或疑似拼错词
-- 复合词边界异常
-- 局部短语连接异常
-- 属性词 typo
-- 修饰词 typo
-- 复合词/连字符/空格变体
-- 修饰链内部局部连接错误
-- 名词短语内部的局部词形错误
+专注于属性词/修饰词相关错误的提取，错误类型：
+1. attribute_typo: 属性词错误 (e.g., "convenient" -> "conveniently")
+2. modifier_typo: 修饰词错误 (e.g., "smoth" -> "smooth", "diffrent" -> "different")
+3. np_inflection: 名词短语词形错误
 
 Input:
-  - /home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction/stage1_filtered_users_reviews.json
+  - /home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction/Arts_Crafts_and_Sewing/stage1_filtered_users_reviews.json
 
 Output:
-  - /home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/detailed_errors_{user_id}.json
+  - /home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/Arts_Crafts_and_Sewing/acl_error.json
 
 Usage:
-  python 04_extract_detailed_errors.py
+  python 04_extract_acl_errors_Arts_Crafts_and_Sewing.py
 """
 
 import json
@@ -38,6 +27,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Set
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 import logging
 import time
 
@@ -61,150 +51,124 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 
 INPUT_FILE = "/fs04/ar57/wenyu/result/personal_query/01_preference_extraction/Arts_Crafts_and_Sewing/stage1_filtered_users_reviews.json"
 OUTPUT_DIR = "/fs04/ar57/wenyu/result/personal_query/04_writing_analysis/Arts_Crafts_and_Sewing"
-MAX_USERS = 1
-MAX_REVIEWS = 5
-MAX_WORKERS = 50
-
-# ACL用户画像文件（从中获取用户ID）
-ACL_PROFILES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/acl_user_profiles.json"
 
 
 # ============================================================================
-# 区域感知错误提取 Prompt
+# ACL 错误提取 Prompt (从 JSON 文件动态加载)
 # ============================================================================
 
-DETAILED_ERROR_TEMPLATE = """You are an expert at identifying subtle errors in product reviews, focusing on "detail description parts" - the small words that describe product features.
+PROMPT_CONFIG_FILE = "/home/wlia0047/ar57/wenyu/PersoanlQuery/04_writing_analysis/acl_prompts.json"
 
-Target error regions (优先级从高到低):
-1. acl/relcl/advcl subtrees - adverbial clauses, relative clauses
-2. Noun phrase modifier chains - sequences like "high quality durable plastic case"
-3. Attribute phrases - "X's Y", "the Y of X"
-4. Product feature spans - specific product aspects being described
+def load_config():
+    """从 JSON 文件加载配置"""
+    with open(PROMPT_CONFIG_FILE, 'r', encoding='utf-8') as f:
+        config = json.load(f)
+    return config['base_system'], config['user_content_template'], config['max_users'], config['max_reviews'], config['max_workers']
 
-Priority error types to extract:
-1. Attribute word typos - wrong modifier words (e.g., "convenient" -> "conveniently" when modifying verb)
-2. Modifier word typos - errors in descriptive words (e.g., "smoth" -> "smooth", "diffrent" -> "different")
-3. Local inflection errors inside noun phrases - (e.g., "types" when should be "type", "making" when should be "make")
+BASE_SYSTEM, USER_CONTENT_TEMPLATE, MAX_USERS, MAX_REVIEWS, MAX_WORKERS = load_config()
 
-IMPORTANT: Only extract errors that are:
-- Single words OR small multi-word spans (max 3 words)
-- Located in the detail-description parts (NOT main subject/predicate)
-- Related to: typos, spelling, local inflection errors
-
-IGNORE:
-- Compound word/hyphen/space variants - (e.g., "lifelike" vs "life-like" vs "life like", "works" vs "work's")
-- Local connection errors in modifier chains - missing hyphens, extra spaces, wrong boundaries
-- Subject-verb agreement errors
-- Whole-sentence rewrites
-- Punctuation issues
-- Capitalization (unless clearly a typo)
-- Plural forms for multiple instances: "ratings", "settings", "options", "types", "modes", "features" when describing multiple aspects/dimensions (e.g., "endurance ratings" is valid)
-
-Return JSON format:
-{
-  "regions": [
-    {
-      "region_type": "acl|relcl|advcl|np_modifier|attribute|feature_span",
-      "span_text": "the original text span",
-      "errors": [
-        {
-          "original": "original word(s)",
-          "corrected": "corrected word(s)",
-          "error_type": "attribute_typo|modifier_typo|np_inflection",
-          "confidence": 0.0-1.0
-        }
-      ]
-    }
-  ]
-}
-
-If no detail-description errors found, return {"regions": []}.
-
-Analyze this product review and identify errors in detail-description parts:
-
-{review_text}
-"""
+# 全局变量
+_minimax_client = None
+_first_request = True  # 首次请求时打印 system_base（用于创建缓存）
 
 
-def call_detailed_llm(review_text: str) -> Dict:
-    """调用LLM进行区域感知错误提取，支持速率限制重试"""
-    import time
-    from llm_client import MiniMaxAnthropicClient
+def _log(msg: str):
+    """带时间戳的日志打印"""
+    from datetime import datetime
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-    prompt = f"""<s>[INST] {DETAILED_ERROR_TEMPLATE}
-[/INST]"""
 
-    wait_seconds = 5
-    max_retries = 20
+def load_minimax_client():
+    """加载 MiniMax API 客户端"""
+    global _minimax_client
+    if _minimax_client is None:
+        from llm_client import MiniMaxAnthropicClient
+        _minimax_client = MiniMaxAnthropicClient()
+        _log("MiniMax API 客户端初始化完成")
 
-    for attempt in range(max_retries):
+
+def call_acl_llm(reviews_text: List[str]) -> Dict:
+    """调用 MiniMax API 进行ACL错误提取，使用缓存机制"""
+    global _minimax_client, _first_request
+
+    if _minimax_client is None:
+        load_minimax_client()
+
+    cache_info = {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}
+
+    # 第一次请求时打印 system_base（创建缓存）
+    if _first_request:
+        _log(f"[Request] system_base (FIRST REQUEST - cache creation):\n{BASE_SYSTEM}")
+        _first_request = False
+
+    # 构建多评论内容
+    reviews_content = "\n".join([f"[Review {i}]: {review}" for i, review in enumerate(reviews_text)])
+    user_content = USER_CONTENT_TEMPLATE.replace("{reviews_text}", reviews_content)
+
+    try:
+        response, cache_info = _minimax_client.call_with_cache(
+            system_base=BASE_SYSTEM,
+            user_content=user_content,
+            max_tokens=8192,
+            temperature=0.3
+        )
+
+        # 打印缓存信息
+        _log(f"[Cache] {cache_info}")
+
+        result_text = response.strip()
+        if not result_text:
+            return {
+                "status": "success",
+                "reviews": reviews_text,
+                "results": {},
+                "has_errors": False
+            }
+
         try:
-            client = MiniMaxAnthropicClient(model='MiniMax-M2.7-highspeed')
-            thinking, text = client.call_with_thinking(prompt, max_tokens=8192, temperature=0.3)
-            result_text = text.strip()
+            if "```json" in result_text:
+                start = result_text.find("```json") + 7
+                end = result_text.find("```", start)
+                result_text = result_text[start:end].strip()
+            elif "```" in result_text:
+                start = result_text.find("```") + 3
+                end = result_text.find("```", start)
+                result_text = result_text[start:end].strip()
 
-            if not result_text:
-                result_text = '{"regions": []}'
+            result = json.loads(result_text)
 
-            try:
-                if "```json" in result_text:
-                    start = result_text.find("```json") + 7
-                    end = result_text.find("```", start)
-                    result_text = result_text[start:end].strip()
-                elif "```" in result_text:
-                    start = result_text.find("```") + 3
-                    end = result_text.find("```", start)
-                    result_text = result_text[start:end].strip()
+            return {
+                "status": "success",
+                "reviews": reviews_text,
+                "results": result,
+                "has_errors": any(v.get("regions") for v in result.values() if isinstance(v, dict))
+            }
 
-                result = json.loads(result_text)
-                regions = result.get("regions", [])
+        except json.JSONDecodeError:
+            return {
+                "status": "success",
+                "reviews": reviews_text,
+                "results": {},
+                "has_errors": False
+            }
 
-                return {
-                    "status": "success",
-                    "original": review_text,
-                    "regions": regions,
-                    "has_errors": len(regions) > 0 and any(r.get("errors") for r in regions)
-                }
-
-            except json.JSONDecodeError:
-                return {
-                    "status": "success",
-                    "original": review_text,
-                    "regions": [],
-                    "has_errors": False
-                }
-
-        except Exception as e:
-            error_str = str(e).lower()
-            is_rate_limit = 'rate' in error_str or 'limit' in error_str or '429' in error_str or 'too many request' in error_str
-            if not is_rate_limit:
-                return {
-                    "status": "error",
-                    "original": review_text,
-                    "regions": [],
-                    "has_errors": False,
-                    "error": str(e)
-                }
-            if attempt < max_retries - 1:
-                logger.warning(f"Rate limit, retrying in {wait_seconds}s (attempt {attempt + 1}/{max_retries})")
-                time.sleep(wait_seconds)
-                wait_seconds += 5
-            else:
-                return {
-                    "status": "error",
-                    "original": review_text,
-                    "regions": [],
-                    "has_errors": False,
-                    "error": str(e)
-                }
+    except Exception as e:
+        _log(f"Error calling API: {e}")
+        return {
+            "status": "error",
+            "reviews": reviews_text,
+            "results": {},
+            "has_errors": False,
+            "error": str(e)
+        }
 
 
 # ============================================================================
-# 错误类型分类器
+# ACL 错误类型分类器
 # ============================================================================
 
-class DetailedErrorClassifier:
-    """区域感知错误类型分类"""
+class ACLErrorClassifier:
+    """ACL错误类型分类"""
 
     ERROR_TYPE_MAPPING = {
         "attribute_typo": "属性词错误",
@@ -219,11 +183,11 @@ class DetailedErrorClassifier:
         corr_lower = corrected.lower().strip()
 
         # 属性词 vs 副词混淆
-        if DetailedErrorClassifier._is_attribute_error(orig_lower, corr_lower):
+        if ACLErrorClassifier._is_attribute_error(orig_lower, corr_lower):
             return "attribute_typo"
 
         # 拼写错误模式（编辑距离小）
-        if DetailedErrorClassifier._is_spelling_error(orig_lower, corr_lower):
+        if ACLErrorClassifier._is_spelling_error(orig_lower, corr_lower):
             return "modifier_typo"
 
         # 默认归类为修饰词错误
@@ -234,7 +198,7 @@ class DetailedErrorClassifier:
         """判断是否为拼写错误（编辑距离 <= 2）"""
         if len(s1) < 2 or len(s2) < 2:
             return False
-        edit_dist = DetailedErrorClassifier._edit_distance(s1, s2)
+        edit_dist = ACLErrorClassifier._edit_distance(s1, s2)
         return edit_dist <= 2 and edit_dist > 0
 
     @staticmethod
@@ -255,7 +219,7 @@ class DetailedErrorClassifier:
     def _edit_distance(s1: str, s2: str) -> int:
         """计算编辑距离"""
         if len(s1) < len(s2):
-            return DetailedErrorClassifier._edit_distance(s2, s1)
+            return ACLErrorClassifier._edit_distance(s2, s1)
         if len(s2) == 0:
             return len(s1)
         previous_row = range(len(s2) + 1)
@@ -274,28 +238,32 @@ class DetailedErrorClassifier:
 # 主分析 Pipeline
 # ============================================================================
 
-class DetailedErrorAnalyzer:
-    """基于区域感知的精细错误分析"""
+class ACLErrorAnalyzer:
+    """ACL错误分析"""
 
     def __init__(self, analysis_dir: Path = None, reviews_dir: Path = None):
         self.analysis_dir = analysis_dir or Path(OUTPUT_DIR)
         self.reviews_dir = reviews_dir or Path(os.path.dirname(INPUT_FILE))
-        self.classifier = DetailedErrorClassifier()
+        self.classifier = ACLErrorClassifier()
 
         self._merged_data = None
         self._users_map = None
+        self._load_lock = threading.Lock()
 
     def _load_merged_file(self):
-        """懒加载合并文件"""
+        """线程安全的懒加载合并文件"""
         if self._users_map is None:
-            if os.path.exists(INPUT_FILE):
-                with open(INPUT_FILE, 'r', encoding='utf-8') as f:
-                    self._merged_data = json.load(f)
-                self._users_map = {u.get('user_id'): u for u in self._merged_data.get('users', []) if u.get('user_id')}
-                logger.info(f"Loaded {len(self._users_map)} users from merged file")
-            else:
-                self._users_map = {}
-                logger.warning(f"Merged file not found: {INPUT_FILE}")
+            with self._load_lock:
+                # 双重检查锁定
+                if self._users_map is None:
+                    if os.path.exists(INPUT_FILE):
+                        with open(INPUT_FILE, 'r', encoding='utf-8') as f:
+                            self._merged_data = json.load(f)
+                        self._users_map = {u.get('user_id'): u for u in self._merged_data.get('users', []) if u.get('user_id')}
+                        logger.info(f"Loaded {len(self._users_map)} users from merged file")
+                    else:
+                        self._users_map = {}
+                        logger.warning(f"Merged file not found: {INPUT_FILE}")
 
     def _get_user_data_from_merged(self, user_id: str) -> Optional[dict]:
         """从合并文件获取单个用户数据"""
@@ -303,7 +271,7 @@ class DetailedErrorAnalyzer:
         return self._users_map.get(user_id)
 
     def process_user(self, user_id: str, reviews_file: Optional[str] = None, max_reviews: Optional[int] = None) -> dict:
-        """处理单个用户：提取区域感知错误"""
+        """处理单个用户：提取ACL错误"""
 
         reviews_data = self._get_user_data_from_merged(user_id)
 
@@ -338,16 +306,21 @@ class DetailedErrorAnalyzer:
             region_type_counts = defaultdict(int)
             detailed_results = []
 
+            # 将所有评论文本提取出来，一次请求发送
+            review_texts = [review_text for review_text, asin in flattened_reviews]
+            llm_result = call_acl_llm(review_texts)
+
+            if llm_result["status"] != "success":
+                logger.warning(f"[{user_id}] LLM call failed: {llm_result.get('error', 'Unknown error')}")
+                return {"user_id": user_id, "status": "failed", "reason": "llm_call_failed"}
+
+            results_by_idx = llm_result.get("results", {})
+
+            # 遍历每条评论的处理结果
             for review_idx, (review_text, asin) in enumerate(flattened_reviews):
-                original = review_text
-
-                llm_result = call_detailed_llm(original)
-
-                if llm_result["status"] != "success":
-                    logger.warning(f"[{user_id}] Review {review_idx}: {llm_result.get('error', 'Unknown error')}")
-                    continue
-
-                regions = llm_result.get("regions", [])
+                idx_str = str(review_idx)
+                review_result = results_by_idx.get(idx_str, {})
+                regions = review_result.get("regions", []) if isinstance(review_result, dict) else []
 
                 # 过滤并标准化错误
                 for region in regions:
@@ -365,6 +338,10 @@ class DetailedErrorAnalyzer:
 
                         # 跳过空或相同的情况
                         if not orig or not corr or orig == corr:
+                            continue
+
+                        # 跳过 corrected 是短语的情况（必须是单词）
+                        if len(corr.split()) > 1:
                             continue
 
                         # 标准化错误类型
@@ -395,10 +372,7 @@ class DetailedErrorAnalyzer:
 
                 total_errors += sum(len(r.get("errors", [])) for r in regions if r.get("errors"))
 
-                if (review_idx + 1) % 10 == 0:
-                    logger.info(f"[{user_id}] Progress: {review_idx + 1}/{len(flattened_reviews)} reviews, {total_errors} errors found")
-
-            logger.info(f"[{user_id}] Detailed error analysis completed: {len(flattened_reviews)} reviews, {total_errors} errors")
+            logger.info(f"[{user_id}] ACL error analysis completed: {len(flattened_reviews)} reviews, {total_errors} errors")
 
             return {
                 "user_id": user_id,
@@ -428,7 +402,6 @@ def log_with_timestamp(message: str):
 
 def load_users_from_merged_file(input_file: str) -> List[str]:
     """从合并的用户评论文件加载用户列表"""
-    # 直接从merged file获取用户，不再依赖ACL profiles
     log_with_timestamp(f"Loading users from merged file: {input_file}...")
     with open(input_file, 'r', encoding='utf-8') as f:
         data = json.load(f)
@@ -464,7 +437,7 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     log_with_timestamp("="*80)
-    log_with_timestamp("Stage 4 V2: Detailed Syntactic Error Extraction")
+    log_with_timestamp("Stage 4 ACL: Attribute/Modifier Error Extraction")
     log_with_timestamp("="*80)
     log_with_timestamp(f"Input file: {INPUT_FILE}")
     log_with_timestamp(f"Output directory: {OUTPUT_DIR}")
@@ -490,15 +463,17 @@ def main():
 
     user_ids_to_process = sorted(list(existing_users))
 
-    analyzer = DetailedErrorAnalyzer(
+    analyzer = ACLErrorAnalyzer(
         analysis_dir=Path(OUTPUT_DIR),
         reviews_dir=Path(os.path.dirname(INPUT_FILE))
     )
+    # 预加载merged文件，避免多线程竞态条件
+    analyzer._load_merged_file()
 
     results = []
 
     log_with_timestamp("="*80)
-    log_with_timestamp(f"Processing {len(user_ids_to_process)} users with detailed error extraction (concurrent={MAX_WORKERS})...")
+    log_with_timestamp(f"Processing {len(user_ids_to_process)} users with ACL error extraction (concurrent={MAX_WORKERS})...")
     log_with_timestamp("="*80)
 
     total_start = time.time()
@@ -562,10 +537,15 @@ def main():
         for rtype, count in sorted(all_region_types.items(), key=lambda x: x[1], reverse=True):
             log_with_timestamp(f"  {rtype}: {count}")
 
+        # 只保存有错误的用户
+        users_with_errors = [r for r in successful if r["total_errors"] > 0]
+        users_with_errors_ids = [r["user_id"] for r in users_with_errors]
+
         summary_data = {
             "timestamp": datetime.now().isoformat(),
             "total_users": len(user_ids_to_process),
             "processed_users": len(successful),
+            "users_with_errors": len(users_with_errors),
             "failed_users": [r["user_id"] for r in failed],
             "total_reviews": total_reviews,
             "total_errors": total_errors,
@@ -581,8 +561,7 @@ def main():
                     "region_types": r["region_types"],
                     "detailed_results": r.get("detailed_results", [])
                 }
-                for r in successful
-                if r["total_errors"] > 0
+                for r in users_with_errors
             ]
         }
 
