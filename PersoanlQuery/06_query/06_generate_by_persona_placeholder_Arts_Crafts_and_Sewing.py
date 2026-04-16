@@ -382,8 +382,10 @@ def select_best_variant(variants: list, attrs: dict, clause_type: str, expected_
     """从多个变体中选择第一个符合要求的变体
 
     返回第一个符合以下条件的变体：
-    1. 占位符完整
+    1. 占位符完整（A1-A5都存在）
     2. 从句数量符合要求
+
+    如果找不到符合条件的变体，返回 None
     """
     for variant in variants:
         query = variant['query']
@@ -407,22 +409,7 @@ def select_best_variant(variants: list, attrs: dict, clause_type: str, expected_
             'word_count': variant['word_count'],
         }
 
-    # 如果没有找到符合要求的，返回第一个有效变体（即使从句数量不匹配）
-    for variant in variants:
-        query = variant['query']
-        validation = validate_placeholders(query)
-        missing = [ph for ph, present in validation.items() if not present]
-        if missing:
-            continue
-
-        filled_query = fill_placeholders(query, attrs)
-        return {
-            'query': query,
-            'filled_query': filled_query,
-            'word_count': variant['word_count'],
-            'clause_mismatch': True,  # 标记从句数量不匹配
-        }
-
+    # 没有找到符合要求的变体
     return None
 
 
