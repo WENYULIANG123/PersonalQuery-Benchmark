@@ -28,6 +28,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Set
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 import logging
 import time
 
@@ -51,155 +52,122 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 
 INPUT_FILE = "/fs04/ar57/wenyu/result/personal_query/01_preference_extraction/Grocery_and_Gourmet_Food/stage1_filtered_users_reviews.json"
 OUTPUT_DIR = "/fs04/ar57/wenyu/result/personal_query/04_writing_analysis/Grocery_and_Gourmet_Food"
-MAX_USERS = 1
-MAX_REVIEWS = None
-MAX_WORKERS = 10
+MAX_USERS = 500
+MAX_REVIEWS = 10
+MAX_WORKERS = 1
 
 # CCOMP用户画像文件（从中获取用户ID）
 CCOMP_PROFILES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/Grocery_and_Gourmet_Food/ccomp_user_profiles.json"
 
 
 # ============================================================================
-# CCOMP 错误提取 Prompt
+# CCOMP 错误提取 Prompt (从 JSON 文件动态加载)
 # ============================================================================
 
-CCOMP_ERROR_TEMPLATE = """You are an expert at identifying errors in product reviews, focusing on COMPLEMENT CLAUSE (CCOMP) related errors.
+PROMPT_CONFIG_FILE = "/home/wlia0047/ar57/wenyu/PersoanlQuery/04_writing_analysis/ccomp_prompts.json"
 
-Complement clauses are clauses introduced by:
-- "that" (e.g., "I think that it works")
-- "whether/if" (e.g., "I wonder whether it fits")
-- clause-embedding verbs: think, believe, know, feel, want, hope, expect, suppose, noticed, said, etc.
+def load_prompts():
+    """从 JSON 文件加载 prompt 配置"""
+    with open(PROMPT_CONFIG_FILE, 'r', encoding='utf-8') as f:
+        config = json.load(f)
+    return config['base_system'], config['user_content_template']
 
-Target error regions and types (优先级从高到低):
+BASE_SYSTEM, USER_CONTENT_TEMPLATE = load_prompts()
 
-1. CLAUSE-SHELL TYPO (clause壳层词拼写错误):
-   - think→thikn, believe→belive, noticed→noticd, said→saod
-   - because→becuase, whether→wether, would→woudl, should→shoudl
-   - These are proposition-shell words that appear frequently in CCOMP style
-
-2. COMPLEMENT-LINKING ERROR (从句连接错误):
-   - that漏写、重复、错拼
-   - if/whether附近边界混乱
-   - 例: "I think taht it will work", "I believe wether it fits"
-
-3. MODAL/AUXILIARY DISTORTION (情态动词错误):
-   - would→woudl, could→cuold, should→shoudl, might→migth
-   - These modal verbs are part of clause shells in complement clauses
-
-4. CLAUSE-BOUNDARY STRUCTURAL WRITING ERROR (从句结构错误):
-   - 补语从句边界模糊
-   - 外层动词和内层命题连接不清
-   - 从句内部轻度主谓/时态壳层不稳
-   - 例: "I think that it work well", "She said that the zipper break"
-
-Priority:
-1. Extract clause-shell word typos (think, believe, noticed, said, because, whether, etc.)
-2. Extract modal/auxiliary distortions (would, could, should, might, may, will)
-3. Extract complement-linking errors (that, if, whether)
-4. Extract clause-boundary structural errors (subject-verb mismatch in complement clauses)
-
-IMPORTANT:
-- Focus on single words OR small spans (max 2 words)
-- Only extract errors related to the 4 types above
-- Ignore: attribute typos, modifier errors (those belong to ACL)
-
-Return JSON format:
-{
-  "regions": [
-    {
-      "region_type": "ccomp|modal|complement_link|clause_boundary",
-      "span_text": "the original text span",
-      "errors": [
-        {
-          "original": "original word(s)",
-          "corrected": "corrected word(s)",
-          "error_type": "clause_shell_typo|complement_linking_error|modal_distortion|clause_boundary_error",
-          "confidence": 0.0-1.0
-        }
-      ]
-    }
-  ]
-}
-
-If no CCOMP-related errors found, return {"regions": []}.
-
-Analyze this product review and identify CCOMP-related errors:
-
-{review_text}
-"""
+# 全局变量
+_minimax_client = None
+_first_request = True  # 首次请求时打印 system_base（用于创建缓存）
 
 
-def call_ccomp_llm(review_text: str) -> Dict:
-    """调用LLM进行CCOMP错误提取，支持速率限制重试"""
-    import time
-    from llm_client import MiniMaxAnthropicClient
+def _log(msg: str):
+    """带时间戳的日志打印"""
+    from datetime import datetime
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-    prompt = f"""<s>[INST] {CCOMP_ERROR_TEMPLATE}
-[/INST]"""
 
-    wait_seconds = 5
-    max_retries = 20
+def load_minimax_client():
+    """加载 MiniMax API 客户端"""
+    global _minimax_client
+    if _minimax_client is None:
+        from llm_client import MiniMaxAnthropicClient
+        _minimax_client = MiniMaxAnthropicClient()
+        _log("MiniMax API 客户端初始化完成")
 
-    for attempt in range(max_retries):
+
+def call_ccomp_llm(reviews_text: List[str]) -> Dict:
+    """调用 MiniMax API 进行CCOMP错误提取，使用缓存机制"""
+    global _minimax_client, _first_request
+
+    if _minimax_client is None:
+        load_minimax_client()
+
+    cache_info = {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}
+
+    # 第一次请求时打印 system_base（创建缓存）
+    if _first_request:
+        _log(f"[Request] system_base (FIRST REQUEST - cache creation):\n{BASE_SYSTEM}")
+        _first_request = False
+
+    # 构建多评论内容
+    reviews_content = "\n".join([f"[Review {i}]: {review}" for i, review in enumerate(reviews_text)])
+    user_content = USER_CONTENT_TEMPLATE.replace("{reviews_text}", reviews_content)
+
+    try:
+        response, cache_info = _minimax_client.call_with_cache(
+            system_base=BASE_SYSTEM,
+            user_content=user_content,
+            max_tokens=8192,
+            temperature=0.3
+        )
+
+        # 打印缓存信息
+        _log(f"[Cache] {cache_info}")
+
+        result_text = response.strip()
+        if not result_text:
+            return {
+                "status": "success",
+                "reviews": reviews_text,
+                "results": {},
+                "has_errors": False
+            }
+
         try:
-            client = MiniMaxAnthropicClient(model='MiniMax-M2.7-highspeed')
-            thinking, text = client.call_with_thinking(prompt, max_tokens=8192, temperature=0.3)
-            result_text = text.strip()
+            if "```json" in result_text:
+                start = result_text.find("```json") + 7
+                end = result_text.find("```", start)
+                result_text = result_text[start:end].strip()
+            elif "```" in result_text:
+                start = result_text.find("```") + 3
+                end = result_text.find("```", start)
+                result_text = result_text[start:end].strip()
 
-            if not result_text:
-                result_text = '{"regions": []}'
+            result = json.loads(result_text)
 
-            try:
-                if "```json" in result_text:
-                    start = result_text.find("```json") + 7
-                    end = result_text.find("```", start)
-                    result_text = result_text[start:end].strip()
-                elif "```" in result_text:
-                    start = result_text.find("```") + 3
-                    end = result_text.find("```", start)
-                    result_text = result_text[start:end].strip()
+            return {
+                "status": "success",
+                "reviews": reviews_text,
+                "results": result,
+                "has_errors": any(v.get("regions") for v in result.values() if isinstance(v, dict))
+            }
 
-                result = json.loads(result_text)
-                regions = result.get("regions", [])
+        except json.JSONDecodeError:
+            return {
+                "status": "success",
+                "reviews": reviews_text,
+                "results": {},
+                "has_errors": False
+            }
 
-                return {
-                    "status": "success",
-                    "original": review_text,
-                    "regions": regions,
-                    "has_errors": len(regions) > 0 and any(r.get("errors") for r in regions)
-                }
-
-            except json.JSONDecodeError:
-                return {
-                    "status": "success",
-                    "original": review_text,
-                    "regions": [],
-                    "has_errors": False
-                }
-
-        except Exception as e:
-            error_str = str(e).lower()
-            is_rate_limit = 'rate' in error_str or 'limit' in error_str or '429' in error_str or 'too many request' in error_str
-            if not is_rate_limit:
-                return {
-                    "status": "error",
-                    "original": review_text,
-                    "regions": [],
-                    "has_errors": False,
-                    "error": str(e)
-                }
-            if attempt < max_retries - 1:
-                logger.warning(f"Rate limit, retrying in {wait_seconds}s (attempt {attempt + 1}/{max_retries})")
-                time.sleep(wait_seconds)
-                wait_seconds += 5
-            else:
-                return {
-                    "status": "error",
-                    "original": review_text,
-                    "regions": [],
-                    "has_errors": False,
-                    "error": str(e)
-                }
+    except Exception as e:
+        _log(f"Error calling API: {e}")
+        return {
+            "status": "error",
+            "reviews": reviews_text,
+            "results": {},
+            "has_errors": False,
+            "error": str(e)
+        }
 
 
 # ============================================================================
@@ -337,18 +305,22 @@ class CCOMPErrorAnalyzer:
 
         self._merged_data = None
         self._users_map = None
+        self._load_lock = threading.Lock()
 
     def _load_merged_file(self):
-        """懒加载合并文件"""
+        """线程安全的懒加载合并文件"""
         if self._users_map is None:
-            if os.path.exists(INPUT_FILE):
-                with open(INPUT_FILE, 'r', encoding='utf-8') as f:
-                    self._merged_data = json.load(f)
-                self._users_map = {u.get('user_id'): u for u in self._merged_data.get('users', []) if u.get('user_id')}
-                logger.info(f"Loaded {len(self._users_map)} users from merged file")
-            else:
-                self._users_map = {}
-                logger.warning(f"Merged file not found: {INPUT_FILE}")
+            with self._load_lock:
+                # 双重检查锁定
+                if self._users_map is None:
+                    if os.path.exists(INPUT_FILE):
+                        with open(INPUT_FILE, 'r', encoding='utf-8') as f:
+                            self._merged_data = json.load(f)
+                        self._users_map = {u.get('user_id'): u for u in self._merged_data.get('users', []) if u.get('user_id')}
+                        logger.info(f"Loaded {len(self._users_map)} users from merged file")
+                    else:
+                        self._users_map = {}
+                        logger.warning(f"Merged file not found: {INPUT_FILE}")
 
     def _get_user_data_from_merged(self, user_id: str) -> Optional[dict]:
         """从合并文件获取单个用户数据"""
@@ -391,16 +363,21 @@ class CCOMPErrorAnalyzer:
             region_type_counts = defaultdict(int)
             detailed_results = []
 
+            # 将所有评论文本提取出来，一次请求发送
+            review_texts = [review_text for review_text, asin in flattened_reviews]
+            llm_result = call_ccomp_llm(review_texts)
+
+            if llm_result["status"] != "success":
+                logger.warning(f"[{user_id}] LLM call failed: {llm_result.get('error', 'Unknown error')}")
+                return {"user_id": user_id, "status": "failed", "reason": "llm_call_failed"}
+
+            results_by_idx = llm_result.get("results", {})
+
+            # 遍历每条评论的处理结果
             for review_idx, (review_text, asin) in enumerate(flattened_reviews):
-                original = review_text
-
-                llm_result = call_ccomp_llm(original)
-
-                if llm_result["status"] != "success":
-                    logger.warning(f"[{user_id}] Review {review_idx}: {llm_result.get('error', 'Unknown error')}")
-                    continue
-
-                regions = llm_result.get("regions", [])
+                idx_str = str(review_idx)
+                review_result = results_by_idx.get(idx_str, {})
+                regions = review_result.get("regions", []) if isinstance(review_result, dict) else []
 
                 # 过滤并标准化错误
                 for region in regions:
@@ -418,6 +395,10 @@ class CCOMPErrorAnalyzer:
 
                         # 跳过空或相同的情况
                         if not orig or not corr or orig == corr:
+                            continue
+
+                        # 跳过 corrected 是短语的情况（必须是单词）
+                        if len(corr.split()) > 1:
                             continue
 
                         # 标准化错误类型
@@ -447,9 +428,6 @@ class CCOMPErrorAnalyzer:
                     reviews_with_errors += 1
 
                 total_errors += sum(len(r.get("errors", [])) for r in regions if r.get("errors"))
-
-                if (review_idx + 1) % 10 == 0:
-                    logger.info(f"[{user_id}] Progress: {review_idx + 1}/{len(flattened_reviews)} reviews, {total_errors} errors found")
 
             logger.info(f"[{user_id}] CCOMP error analysis completed: {len(flattened_reviews)} reviews, {total_errors} errors")
 
@@ -553,6 +531,8 @@ def main():
         analysis_dir=Path(OUTPUT_DIR),
         reviews_dir=Path(os.path.dirname(INPUT_FILE))
     )
+    # 预加载merged文件，避免多线程竞态条件
+    analyzer._load_merged_file()
 
     results = []
 
