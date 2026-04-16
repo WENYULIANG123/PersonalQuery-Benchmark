@@ -41,6 +41,7 @@ with open(PROMPT_TEMPLATE_FILE, 'r', encoding='utf-8') as f:
 
 NUM_USERS_TO_TEST = _TEMPLATE['num_users_to_test']
 MAX_WORKERS = _TEMPLATE['max_workers']
+USE_MINIMAXIO = _TEMPLATE.get('use_minimaxio', False)
 _BASE_SYSTEM_TEMPLATE = _TEMPLATE['system_base_template']
 USER_CONTENT_WITH_ERRORS = _TEMPLATE['user_content_with_errors']
 USER_CONTENT_NO_ERRORS = _TEMPLATE['user_content_no_errors']
@@ -160,24 +161,20 @@ def build_user_prompt(persona: dict, error_patterns: dict = None) -> tuple:
     target_length = persona.get('target_length', 20)
 
     if has_errors:
-        # ACL 正确词
-        acl_correct_words = ""
+        # 有错误用户：构建正确词列表（合并ACL和CCOMP的正确词）
+        correct_words_str = ""
         if has_acl_errors:
             for ep in error_patterns['acl'][:10]:
                 corr = ep.get("corrected", "")
-                acl_correct_words += f"- \"{corr}\"\n"
-
-        # CCOMP 正确词
-        ccomp_correct_words = ""
+                correct_words_str += f"- \"{corr}\" (acl error)\n"
         if has_ccomp_errors:
             for ep in error_patterns['ccomp'][:10]:
                 corr = ep.get("corrected", "")
-                ccomp_correct_words += f"- \"{corr}\"\n"
+                correct_words_str += f"- \"{corr}\" (ccomp error)\n"
 
         user_content = USER_CONTENT_WITH_ERRORS.format(
             target_length=target_length,
-            acl_correct_words=acl_correct_words if acl_correct_words else "(none)",
-            ccomp_correct_words=ccomp_correct_words if ccomp_correct_words else "(none)"
+            correct_words=correct_words_str if correct_words_str else "(none)"
         )
     else:
         # 无错误用户：8版本
@@ -197,9 +194,13 @@ def load_minimax_client():
     """加载 MiniMax API 客户端"""
     global _minimax_client
     if _minimax_client is None:
-        from llm_client import MiniMaxAnthropicClient
-        _minimax_client = MiniMaxAnthropicClient()
-        print(" MiniMax API 客户端初始化完成")
+        from llm_client import MiniMaxAnthropicClient, MiniMaxIOAnthropicClient
+        if USE_MINIMAXIO:
+            _minimax_client = MiniMaxIOAnthropicClient()
+            log("MiniMaxIO API 客户端初始化完成")
+        else:
+            _minimax_client = MiniMaxAnthropicClient()
+            log("MiniMax API 客户端初始化完成")
 
 
 def call_llm(prompt: str, system_base: str = None) -> str:
@@ -269,13 +270,12 @@ def fix_incomplete_json(text: str) -> str:
 # 解析8版本查询结果
 # ========================================
 def parse_8_versions_query(text_content: str, ground_truth_acl: int = 0, ground_truth_ccomp: int = 0) -> dict:
-    """解析包含8个版本的JSON（acl_0~3 + ccomp_0~3）
+    """解析包含8个版本的JSON（acl_0~3 + ccomp_0~3），每个版本有3个变体
 
     ground_truth_acl: 用户的真实acl级别
     ground_truth_ccomp: 用户的真实ccomp级别
 
-    Returns:
-        dict: 包含8个版本的查询，如果解析失败或缺少占位符返回None
+    每个版本返回3个变体，后处理时会选择符合要求的一个
     """
     try:
         json_match = re.search(r'\{[\s\S]*\}', text_content)
@@ -285,62 +285,144 @@ def parse_8_versions_query(text_content: str, ground_truth_acl: int = 0, ground_
             data = json.loads(text_content)
 
         result = {}
-        all_placeholders_valid = True
-        missing_placeholders = []
 
-        # 解析 ACL 版本
+        # 解析 ACL 版本（每个版本有3个变体）
         for acl_level in ['acl_0', 'acl_1', 'acl_2', 'acl_3']:
             if acl_level not in data:
                 return None
-            item = data[acl_level]
+            items = data[acl_level]
             acl_num = int(acl_level.split('_')[1])
             is_ground_truth = (acl_num == ground_truth_acl)
-            query = item.strip() if isinstance(item, str) else ''
-            if query:
-                # 验证占位符
-                validation = validate_placeholders(query)
-                for ph, present in validation.items():
-                    if not present:
-                        all_placeholders_valid = False
-                        missing_placeholders.append(f"{acl_level}: {ph}")
-                result[acl_level] = {
-                    'query': query,
-                    'word_count': count_words(query),
-                    'is_ground_truth': is_ground_truth,
-                }
-            else:
+
+            # 支持字符串或数组格式
+            if isinstance(items, str):
+                items = [items]
+            elif not isinstance(items, list):
                 return None
 
-        # 解析 CCOMP 版本
+            variants = []
+            for item in items:
+                query = item.strip() if isinstance(item, str) else ''
+                if query:
+                    variants.append({
+                        'query': query,
+                        'word_count': count_words(query),
+                    })
+
+            if not variants:
+                return None
+
+            result[acl_level] = {
+                'variants': variants,
+                'is_ground_truth': is_ground_truth,
+            }
+
+        # 解析 CCOMP 版本（每个版本有3个变体）
         for ccomp_level in ['ccomp_0', 'ccomp_1', 'ccomp_2', 'ccomp_3']:
             if ccomp_level not in data:
                 return None
-            item = data[ccomp_level]
+            items = data[ccomp_level]
             ccomp_num = int(ccomp_level.split('_')[1])
             is_ground_truth = (ccomp_num == ground_truth_ccomp)
-            query = item.strip() if isinstance(item, str) else ''
-            if query:
-                # 验证占位符
-                validation = validate_placeholders(query)
-                for ph, present in validation.items():
-                    if not present:
-                        all_placeholders_valid = False
-                        missing_placeholders.append(f"{ccomp_level}: {ph}")
-                result[ccomp_level] = {
-                    'query': query,
-                    'word_count': count_words(query),
-                    'is_ground_truth': is_ground_truth,
-                }
-            else:
+
+            # 支持字符串或数组格式
+            if isinstance(items, str):
+                items = [items]
+            elif not isinstance(items, list):
                 return None
 
-        if not all_placeholders_valid:
-            log(f"    [DEBUG] 占位符验证失败: {missing_placeholders}")
-            return None
+            variants = []
+            for item in items:
+                query = item.strip() if isinstance(item, str) else ''
+                if query:
+                    variants.append({
+                        'query': query,
+                        'word_count': count_words(query),
+                    })
+
+            if not variants:
+                return None
+
+            result[ccomp_level] = {
+                'variants': variants,
+                'is_ground_truth': is_ground_truth,
+            }
 
         return result
     except Exception as e:
         log(f"    [DEBUG] 8版本JSON解析失败: {e}, text_content={repr(text_content[:500])}")
+    return None
+
+
+def count_which_in_query(query: str) -> int:
+    """计算查询中 'which' 的数量"""
+    return len(re.findall(r'\bwhich\b', query, re.IGNORECASE))
+
+
+def count_that_in_query(query: str) -> int:
+    """计算查询中 'that' 的数量"""
+    return len(re.findall(r'\bthat\b', query, re.IGNORECASE))
+
+
+def validate_clause_count(query: str, clause_type: str, expected_count: int) -> bool:
+    """验证查询中的从词数量是否符合要求
+
+    clause_type: 'acl' (检查which) 或 'ccomp' (检查that)
+    expected_count: 期望的从词数量 (0-3)
+    """
+    if clause_type == 'acl':
+        actual_count = count_which_in_query(query)
+    else:  # ccomp
+        actual_count = count_that_in_query(query)
+
+    return actual_count == expected_count
+
+
+def select_best_variant(variants: list, attrs: dict, clause_type: str, expected_count: int) -> dict:
+    """从多个变体中选择第一个符合要求的变体
+
+    返回第一个符合以下条件的变体：
+    1. 占位符完整
+    2. 从句数量符合要求
+    """
+    for variant in variants:
+        query = variant['query']
+
+        # 验证占位符
+        validation = validate_placeholders(query)
+        missing = [ph for ph, present in validation.items() if not present]
+        if missing:
+            continue
+
+        # 验证从句数量
+        if not validate_clause_count(query, clause_type, expected_count):
+            continue
+
+        # 填充占位符
+        filled_query = fill_placeholders(query, attrs)
+
+        return {
+            'query': query,
+            'filled_query': filled_query,
+            'word_count': variant['word_count'],
+        }
+
+    # 如果没有找到符合要求的，返回第一个有效变体（即使从句数量不匹配）
+    for variant in variants:
+        query = variant['query']
+        validation = validate_placeholders(query)
+        missing = [ph for ph, present in validation.items() if not present]
+        if missing:
+            continue
+
+        filled_query = fill_placeholders(query, attrs)
+        return {
+            'query': query,
+            'filled_query': filled_query,
+            'word_count': variant['word_count'],
+            'clause_mismatch': True,  # 标记从句数量不匹配
+        }
+
     return None
 
 
@@ -359,18 +441,6 @@ def validate_placeholders(query: str) -> dict:
     return placeholders
 
 
-def validate_correct_words(query: str, error_patterns: list) -> list:
-    """检查查询中是否包含所有正确词，返回缺失的正确词列表"""
-    if not error_patterns:
-        return []
-    missing = []
-    for ep in error_patterns[:10]:
-        corr = ep.get("corrected", "")
-        if corr and corr.lower() not in query.lower():
-            missing.append(corr)
-    return missing
-
-
 def fill_placeholders(query: str, attrs: dict) -> str:
     """将占位符替换为实际属性值"""
     result = query
@@ -382,17 +452,159 @@ def fill_placeholders(query: str, attrs: dict) -> str:
     return result
 
 
+def is_pure_suffix_change(orig: str, corr: str) -> bool:
+    """检查是否只是后缀变化（需要过滤）
+
+    例如：
+    - "have" -> "having" (只加了ing后缀)
+    - "fitted" -> "fitting" (只改了后缀)
+    - "play" -> "playing" (只加了ing后缀)
+    - "cat" -> "cats" (只加了s后缀)
+    - "interesting" -> "interest" (只删了ing后缀)
+
+    不算纯后缀变化（应该保留）：
+    - "unhappy" -> "happy" (删除了前缀un-)
+    - "rewrite" -> "write" (删除了前缀re-)
+    - "fit" -> "fitted" (加了t+ed，不是纯后缀)
+    - "big" -> "bigger" (加了g+er，不是纯后缀)
+    """
+    # 计算公共前缀
+    common_prefix_len = 0
+    min_len = min(len(orig), len(corr))
+    for i in range(min_len):
+        if orig[i].lower() == corr[i].lower():
+            common_prefix_len += 1
+        else:
+            break
+
+    if common_prefix_len == 0:
+        return False
+
+    orig_suffix = orig[common_prefix_len:] if common_prefix_len < len(orig) else ''
+    corr_suffix = corr[common_prefix_len:] if common_prefix_len < len(corr) else ''
+
+    # 核心后缀列表
+    core_suffixes = {'ing', 'ed', 's', 'er', 'est', 'ly', 'd', 'en', 'ment', 'tion', 'ness'}
+
+    if len(corr_suffix) == 0 and len(orig_suffix) > 0:
+        return orig_suffix.lower() in core_suffixes
+
+    if len(orig_suffix) == 0 and len(corr_suffix) > 0:
+        return corr_suffix.lower() in core_suffixes
+
+    if len(corr_suffix) > 0 and corr_suffix.lower() in core_suffixes:
+        return True
+
+    if orig_suffix.lower() in core_suffixes and corr_suffix.lower() in core_suffixes:
+        return True
+
+    return False
+
+
+def is_pure_punctuation_change(orig: str, corr: str) -> bool:
+    """检查是否只是标点符号变化（需要过滤）
+
+    例如：
+    - "." -> ","
+    - "!" -> "."
+    - ":" -> ";"
+
+    不是纯标点变化（应该保留）：
+    - "don't" -> "dont" (撇号被删除，但词干相同)
+    """
+    import string
+    # 判断两个字符串是否只包含标点符号
+    # 如果 original 和 corrected 都只包含标点符号（无字母数字），则是纯标点变化
+    orig_chars = set(c for c in orig if c not in string.ascii_letters + string.digits + string.whitespace)
+    corr_chars = set(c for c in corr if c not in string.ascii_letters + string.digits + string.whitespace)
+
+    # 两个字符串都只包含标点符号
+    orig_only_punct = all(c not in string.ascii_letters + string.digits + string.whitespace for c in orig)
+    corr_only_punct = all(c not in string.ascii_letters + string.digits + string.whitespace for c in corr)
+
+    if orig_only_punct and corr_only_punct:
+        return True
+
+    return False
+
+
+def filter_error_patterns(error_patterns: list) -> list:
+    """过滤掉不需要的错误类型：
+    - 连字符错误
+    - 空格错误
+    - 纯后缀变化错误
+    - 纯标点变化错误
+    """
+    if not error_patterns:
+        return []
+
+    filtered = []
+    for ep in error_patterns:
+        orig = ep.get("original", "")
+        corr = ep.get("corrected", "")
+
+        # 跳过空值
+        if not orig or not corr:
+            continue
+
+        # 跳过连字符错误
+        if '-' in orig or '-' in corr:
+            continue
+
+        # 跳过空格错误（多余空格、少空格等）
+        if ' ' in orig or ' ' in corr:
+            if orig.strip() != corr.strip():
+                continue
+
+        # 跳过纯后缀变化
+        if is_pure_suffix_change(orig, corr):
+            continue
+
+        # 跳过纯标点变化
+        if is_pure_punctuation_change(orig, corr):
+            continue
+
+        filtered.append(ep)
+
+    return filtered
+
+
+def validate_at_least_one_correct_word(query: str, error_patterns: list) -> bool:
+    """验证查询中是否至少包含一个正确词"""
+    if not error_patterns:
+        return True
+
+    for ep in error_patterns:
+        corr = ep.get("corrected", "")
+        if corr and corr.lower() in query.lower():
+            return True
+
+    return False
+
+
 def inject_errors(query: str, error_patterns: list) -> str:
-    """将查询中的正确词替换为错误词（忽略大小写）"""
+    """将查询中的正确词替换为错误词（仅处理过滤后的错误）"""
     if not error_patterns:
         return query
+
+    # 先过滤错误
+    filtered_patterns = filter_error_patterns(error_patterns)
+    if not filtered_patterns:
+        return query
+
+    result = query
+    for ep in filtered_patterns[:10]:
+        orig = ep.get("original", "")
+        corr = ep.get("corrected", "")
+        if orig and corr:
+            result = re.sub(re.escape(corr), orig, result, flags=re.IGNORECASE)
+    return result
     result = query
     for ep in error_patterns[:10]:
         orig = ep.get("original", "")
         corr = ep.get("corrected", "")
         if orig and corr:
-            # 使用正则表达式进行大小写不敏感的替换
-            result = re.sub(re.escape(corr), orig, result, flags=re.IGNORECASE)
+            result = result.replace(corr, orig)
     return result
 
 
@@ -428,8 +640,19 @@ def main():
     log(f"加载用户错误画像 from {USER_ERROR_FILE}...")
     user_errors = {}
     if os.path.exists(USER_ERROR_FILE):
-        user_errors = load_user_errors(USER_ERROR_FILE)
-        log(f"加载了 {len(user_errors)} 个有错误的用户")
+        raw_errors = load_user_errors(USER_ERROR_FILE)
+        log(f"加载了 {len(raw_errors)} 个有错误的用户")
+
+        # 过滤错误：去掉连字符错误、空格错误、纯后缀变化、纯标点变化
+        for uid, err_data in raw_errors.items():
+            filtered_acl = filter_error_patterns(err_data.get('acl', []))
+            filtered_ccomp = filter_error_patterns(err_data.get('ccomp', []))
+            if filtered_acl or filtered_ccomp:
+                user_errors[uid] = {
+                    'acl': filtered_acl,
+                    'ccomp': filtered_ccomp,
+                }
+        log(f"过滤后有错误的用户数: {len(user_errors)}")
     else:
         log(f"错误文件不存在，跳过错误处理（所有用户按无错误处理）")
 
@@ -512,17 +735,45 @@ def main():
 
     log(f"过滤后（ACL≤3 且 CCOMP≤3）的用户数: {len(all_user_data)}")
 
-    # 第二步：优先选有错误的用户，再选无错误用户
-    error_users = [u for u in all_user_data if u['has_acl_errors'] or u['has_ccomp_errors']]
-    normal_users = [u for u in all_user_data if not (u['has_acl_errors'] or u['has_ccomp_errors'])]
+    # 第二步：按优先级选用户
+    # 优先级：ACL+CCOMP错误 > 只有CCOMP > 只有ACL > 无错误
+    both_errors = [u for u in all_user_data if u['has_acl_errors'] and u['has_ccomp_errors']]
+    only_ccomp = [u for u in all_user_data if u['has_ccomp_errors'] and not u['has_acl_errors']]
+    only_acl = [u for u in all_user_data if u['has_acl_errors'] and not u['has_ccomp_errors']]
+    no_errors = [u for u in all_user_data if not (u['has_acl_errors'] or u['has_ccomp_errors'])]
 
-    target_users = error_users[:NUM_USERS_TO_TEST]
-    remaining = NUM_USERS_TO_TEST - len(target_users)
+    target_users = []
+    remaining = NUM_USERS_TO_TEST
+
+    # 优先级1: ACL+CCOMP错误用户
     if remaining > 0:
-        target_users += normal_users[:remaining]
+        take = min(remaining, len(both_errors))
+        target_users.extend(both_errors[:take])
+        remaining -= take
+
+    # 优先级2: 只有CCOMP错误用户
+    if remaining > 0:
+        take = min(remaining, len(only_ccomp))
+        target_users.extend(only_ccomp[:take])
+        remaining -= take
+
+    # 优先级3: 只有ACL错误用户
+    if remaining > 0:
+        take = min(remaining, len(only_acl))
+        target_users.extend(only_acl[:take])
+        remaining -= take
+
+    # 优先级4: 无错误用户
+    if remaining > 0:
+        take = min(remaining, len(no_errors))
+        target_users.extend(no_errors[:take])
+        remaining -= take
 
     has_error_count = sum(1 for u in target_users if u['has_acl_errors'] or u['has_ccomp_errors'])
-    log(f"目标用户: {len(target_users)} 个（其中 {has_error_count} 个有错误）")
+    both_count = sum(1 for u in target_users if u['has_acl_errors'] and u['has_ccomp_errors'])
+    ccomp_only = sum(1 for u in target_users if u['has_ccomp_errors'] and not u['has_acl_errors'])
+    acl_only = sum(1 for u in target_users if u['has_acl_errors'] and not u['has_ccomp_errors'])
+    log(f"目标用户: {len(target_users)} 个（ACL+CCOMP错误: {both_count}, 仅CCOMP: {ccomp_only}, 仅ACL: {acl_only}, 无错误: {len(target_users)-has_error_count}）")
 
     # 构建用户任务列表（每个用户一个任务，一次性返回8个版本）
     user_tasks = []
@@ -574,57 +825,68 @@ def main():
         # 解析8个版本
         query_data = parse_8_versions_query(text, ground_truth_acl, ground_truth_ccomp)
         if not query_data:
-            # 标记为失败用户
-            return {'acl': [], 'ccomp': [], 'failed': True, 'user_id': uid, 'asin': persona['asin']}
-
-        # 在 fill_placeholders 之前检查占位符
-        for level in ['acl_0', 'acl_1', 'acl_2', 'acl_3', 'ccomp_0', 'ccomp_1', 'ccomp_2', 'ccomp_3']:
-            raw_query = query_data[level]['query']
-            validation = validate_placeholders(raw_query)
-            missing = [ph for ph, present in validation.items() if not present]
-            if missing:
-                log(f"    [DEBUG] {level} 缺少占位符: {missing}, query={raw_query[:80]}")
-                return {'acl': [], 'ccomp': [], 'failed': True, 'user_id': uid, 'asin': persona['asin']}
+            return None
 
         # 构建结果
         acl_results = []
         ccomp_results = []
 
-        # 处理 ACL 版本
+        # 处理 ACL 版本（从3个变体中选择符合要求的）
         for acl_level in ['acl_0', 'acl_1', 'acl_2', 'acl_3']:
             target_acl = int(acl_level.split('_')[1])
             qdata = query_data[acl_level]
             has_acl_err = persona['has_acl_errors']
 
+            # 从变体中选择最佳结果
+            selected = select_best_variant(
+                qdata['variants'], attrs, 'acl', target_acl
+            )
+
+            if not selected:
+                log(f"    [DEBUG] {acl_level} 所有变体都失败")
+                return None
+
             if qdata.get('is_ground_truth') and has_acl_err and errors:
-                # ground_truth 级别：使用后处理注入错误
-                correct_filled = fill_placeholders(qdata['query'], attrs)
-                # 检查正确词是否存在
-                missing_correct = validate_correct_words(correct_filled, errors.get('acl', []))
-                if missing_correct:
-                    log(f"    [DEBUG] {acl_level} 缺少正确词: {missing_correct}, query={correct_filled[:80]}")
-                    return {'acl': [], 'ccomp': [], 'failed': True, 'user_id': uid, 'asin': persona['asin']}
-                noisy_filled = inject_errors(correct_filled, errors.get('acl', []))
-                acl_results.append({
-                    'user_id': uid,
-                    'asin': persona['asin'],
-                    'target_acl': target_acl,
-                    'acl_sentence_ratio': persona.get('acl_sentence_ratio', 0.0),
-                    'density_label': persona.get('density_label', 'simple'),
-                    'length_label': persona.get('length_label', 'medium'),
-                    'words_per_acl': persona.get('words_per_acl'),
-                    'ground_truth_acl': ground_truth_acl,
-                    'target_length': persona.get('target_length'),
-                    'has_errors': True,
-                    'correct_query': correct_filled,
-                    'noisy_query': noisy_filled,
-                    'error_words': [{'correct': ep['corrected'], 'error': ep['original'], 'error_type': ep.get('error_type', 'unknown')} for ep in (errors.get('acl', []) or [])[:10]],
-                    'word_count': qdata['word_count'],
-                    'is_ground_truth': True,
-                })
+                correct_filled = selected['filled_query']
+                # 验证至少有一个正确词存在
+                if not validate_at_least_one_correct_word(correct_filled, errors.get('acl', [])):
+                    log(f"    [DEBUG] {acl_level} 没有正确词，跳过错误注入")
+                    # 仍然添加查询，但不注入错误
+                    acl_results.append({
+                        'user_id': uid,
+                        'asin': persona['asin'],
+                        'target_acl': target_acl,
+                        'acl_sentence_ratio': persona.get('acl_sentence_ratio', 0.0),
+                        'density_label': persona.get('density_label', 'simple'),
+                        'length_label': persona.get('length_label', 'medium'),
+                        'words_per_acl': persona.get('words_per_acl'),
+                        'ground_truth_acl': ground_truth_acl,
+                        'target_length': persona.get('target_length'),
+                        'has_errors': False,
+                        'filled_query': correct_filled,
+                        'word_count': selected['word_count'],
+                        'is_ground_truth': True,
+                    })
+                else:
+                    noisy_filled = inject_errors(correct_filled, errors.get('acl', []))
+                    acl_results.append({
+                        'user_id': uid,
+                        'asin': persona['asin'],
+                        'target_acl': target_acl,
+                        'acl_sentence_ratio': persona.get('acl_sentence_ratio', 0.0),
+                        'density_label': persona.get('density_label', 'simple'),
+                        'length_label': persona.get('length_label', 'medium'),
+                        'words_per_acl': persona.get('words_per_acl'),
+                        'ground_truth_acl': ground_truth_acl,
+                        'target_length': persona.get('target_length'),
+                        'has_errors': True,
+                        'correct_query': correct_filled,
+                        'noisy_query': noisy_filled,
+                        'error_words': [{'correct': ep['corrected'], 'error': ep['original'], 'error_type': ep.get('error_type', 'unknown')} for ep in (errors.get('acl', []) or [])[:10]],
+                        'word_count': selected['word_count'],
+                        'is_ground_truth': True,
+                    })
             else:
-                # 其他级别：单版本
-                filled_query = fill_placeholders(qdata['query'], attrs)
                 acl_results.append({
                     'user_id': uid,
                     'asin': persona['asin'],
@@ -636,46 +898,67 @@ def main():
                     'ground_truth_acl': ground_truth_acl,
                     'target_length': persona.get('target_length'),
                     'has_errors': has_acl_err,
-                    'filled_query': filled_query,
-                    'word_count': qdata['word_count'],
+                    'filled_query': selected['filled_query'],
+                    'word_count': selected['word_count'],
                     'is_ground_truth': qdata.get('is_ground_truth', False),
                 })
 
-        # 处理 CCOMP 版本
+        # 处理 CCOMP 版本（从3个变体中选择符合要求的）
         for ccomp_level in ['ccomp_0', 'ccomp_1', 'ccomp_2', 'ccomp_3']:
             target_ccomp = int(ccomp_level.split('_')[1])
             qdata = query_data[ccomp_level]
             has_ccomp_err = persona['has_ccomp_errors']
 
+            # 从变体中选择最佳结果
+            selected = select_best_variant(
+                qdata['variants'], attrs, 'ccomp', target_ccomp
+            )
+
+            if not selected:
+                log(f"    [DEBUG] {ccomp_level} 所有变体都失败")
+                return None
+
             if qdata.get('is_ground_truth') and has_ccomp_err and errors:
-                # ground_truth 级别：使用后处理注入错误
-                correct_filled = fill_placeholders(qdata['query'], attrs)
-                # 检查正确词是否存在
-                missing_correct = validate_correct_words(correct_filled, errors.get('ccomp', []))
-                if missing_correct:
-                    log(f"    [DEBUG] {ccomp_level} 缺少正确词: {missing_correct}, query={correct_filled[:80]}")
-                    return {'acl': [], 'ccomp': [], 'failed': True, 'user_id': uid, 'asin': persona['asin']}
-                noisy_filled = inject_errors(correct_filled, errors.get('ccomp', []))
-                ccomp_results.append({
-                    'user_id': uid,
-                    'asin': persona['asin'],
-                    'target_ccomp': target_ccomp,
-                    'ccomp_sentence_ratio': persona.get('ccomp_sentence_ratio', 0.0),
-                    'density_label': persona.get('density_label', 'simple'),
-                    'length_label': persona.get('length_label', 'medium'),
-                    'words_per_ccomp': persona.get('words_per_ccomp'),
-                    'ground_truth_ccomp': ground_truth_ccomp,
-                    'target_length': persona.get('target_length'),
-                    'has_errors': True,
-                    'correct_query': correct_filled,
-                    'noisy_query': noisy_filled,
-                    'error_words': [{'correct': ep['corrected'], 'error': ep['original'], 'error_type': ep.get('error_type', 'unknown')} for ep in (errors.get('ccomp', []) or [])[:10]],
-                    'word_count': qdata['word_count'],
-                    'is_ground_truth': True,
-                })
+                correct_filled = selected['filled_query']
+                # 验证至少有一个正确词存在
+                if not validate_at_least_one_correct_word(correct_filled, errors.get('ccomp', [])):
+                    log(f"    [DEBUG] {ccomp_level} 没有正确词，跳过错误注入")
+                    # 仍然添加查询，但不注入错误
+                    ccomp_results.append({
+                        'user_id': uid,
+                        'asin': persona['asin'],
+                        'target_ccomp': target_ccomp,
+                        'ccomp_sentence_ratio': persona.get('ccomp_sentence_ratio', 0.0),
+                        'density_label': persona.get('density_label', 'simple'),
+                        'length_label': persona.get('length_label', 'medium'),
+                        'words_per_ccomp': persona.get('words_per_ccomp'),
+                        'ground_truth_ccomp': ground_truth_ccomp,
+                        'target_length': persona.get('target_length'),
+                        'has_errors': False,
+                        'filled_query': correct_filled,
+                        'word_count': selected['word_count'],
+                        'is_ground_truth': True,
+                    })
+                else:
+                    noisy_filled = inject_errors(correct_filled, errors.get('ccomp', []))
+                    ccomp_results.append({
+                        'user_id': uid,
+                        'asin': persona['asin'],
+                        'target_ccomp': target_ccomp,
+                        'ccomp_sentence_ratio': persona.get('ccomp_sentence_ratio', 0.0),
+                        'density_label': persona.get('density_label', 'simple'),
+                        'length_label': persona.get('length_label', 'medium'),
+                        'words_per_ccomp': persona.get('words_per_ccomp'),
+                        'ground_truth_ccomp': ground_truth_ccomp,
+                        'target_length': persona.get('target_length'),
+                        'has_errors': True,
+                        'correct_query': correct_filled,
+                        'noisy_query': noisy_filled,
+                        'error_words': [{'correct': ep['corrected'], 'error': ep['original'], 'error_type': ep.get('error_type', 'unknown')} for ep in (errors.get('ccomp', []) or [])[:10]],
+                        'word_count': selected['word_count'],
+                        'is_ground_truth': True,
+                    })
             else:
-                # 其他级别：单版本
-                filled_query = fill_placeholders(qdata['query'], attrs)
                 ccomp_results.append({
                     'user_id': uid,
                     'asin': persona['asin'],
@@ -687,15 +970,14 @@ def main():
                     'ground_truth_ccomp': ground_truth_ccomp,
                     'target_length': persona.get('target_length'),
                     'has_errors': has_ccomp_err,
-                    'filled_query': filled_query,
-                    'word_count': qdata['word_count'],
+                    'filled_query': selected['filled_query'],
+                    'word_count': selected['word_count'],
                     'is_ground_truth': qdata.get('is_ground_truth', False),
                 })
 
         return {'acl': acl_results, 'ccomp': ccomp_results}
 
     results = {'acl': [], 'ccomp': []}
-    failed_users = []
     total_start = time.time()
     total_users = len(user_tasks)
 
@@ -704,15 +986,11 @@ def main():
         for future in as_completed(futures):
             r = future.result()
             if r:
-                if r.get('failed'):
-                    failed_users.append({'user_id': r['user_id'], 'asin': r['asin']})
-                    log(f"  [FAILED] user={r['user_id'][:20]} - 占位符验证失败")
-                else:
-                    results['acl'].extend(r['acl'])
-                    results['ccomp'].extend(r['ccomp'])
-                    done_users = len(set(x['user_id'] for x in results['acl']))
-                    err_tag = " [error user]" if r['acl'][0]['has_errors'] else ""
-                    log(f"  [{done_users}/{total_users}] user={r['acl'][0]['user_id'][:20]}{err_tag}")
+                results['acl'].extend(r['acl'])
+                results['ccomp'].extend(r['ccomp'])
+                done_users = len(set(x['user_id'] for x in results['acl']))
+                err_tag = " [error user]" if r['acl'][0]['has_errors'] else ""
+                log(f"  [{done_users}/{total_users}] user={r['acl'][0]['user_id'][:20]}{err_tag}")
 
     total_elapsed = time.time() - total_start
 
@@ -819,10 +1097,6 @@ def main():
     log(f"  有错误用户: {len(acl_error_users)} (correct+noisy 双版本)")
     log(f"CCOMP: {len(results['ccomp'])} queries, {len(ccomp_user_map)} users")
     log(f"  有错误用户: {len(ccomp_error_users)} (correct+noisy 双版本)")
-    if failed_users:
-        log(f"生成失败用户: {len(failed_users)}")
-        for fu in failed_users:
-            log(f"  - user_id={fu['user_id']}, asin={fu['asin']}")
     log(f"总计耗时: {total_elapsed:.1f}s")
     log(f"ACL saved to {ACL_OUTPUT_FILE}")
     log(f"CCOMP saved to {CCOMP_OUTPUT_FILE}")
