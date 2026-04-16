@@ -5,6 +5,12 @@
 将属性词替换为 A1-A5 占位符，用于测试语言结构
 有错误的用户生成 correct + noisy 双版本
 参数硬编码，勿改动
+
+ACL 错误类型（4类）：
+1. clause-shell typo: think→thikn, believe→belive 等壳层词拼写错误
+2. complement-linking error: that/if/whether 连接处错误
+3. modal/auxiliary distortion: would→woudl, could→cuold 等情态动词错误
+4. clause-boundary structural writing error: 从句边界结构错误（如主谓不一致）
 """
 
 import sys
@@ -17,19 +23,59 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, '/home/wlia0047/ar57/wenyu/PersoanlQuery')
-from llm_client import MiniMaxAnthropicClient
-
 
 # ========================================
 # 硬编码参数
 # ========================================
-NUM_USERS_TO_TEST = 500       # 测试用：只处理前N个用户
-MAX_WORKERS = 10
+CATEGORY = "Pet_Supplies"
 BATCH_SIZE = 100
 USER_PROFILES_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/Pet_Supplies/acl_user_profiles.json'
 ATTR_DENSITY_PROFILES_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/Pet_Supplies/attr_density_user_profiles.json'
 USER_ERROR_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/Pet_Supplies/acl_error.json'
 OUTPUT_FILE = '/fs04/ar57/wenyu/result/personal_query/06_query/Pet_Supplies/acl_query.json'
+PROMPT_TEMPLATE_FILE = '/home/wlia0047/ar57/wenyu/PersoanlQuery/06_query/acl_prompt_template.json'
+
+# ========================================
+# 加载 prompt 模板
+# ========================================
+with open(PROMPT_TEMPLATE_FILE, 'r', encoding='utf-8') as f:
+    _PROMPT_TEMPLATE = json.load(f)
+
+NUM_USERS_TO_TEST = _PROMPT_TEMPLATE['num_users_to_test']
+MAX_WORKERS = _PROMPT_TEMPLATE['max_workers']
+_BASE_SYSTEM_TEMPLATE = _PROMPT_TEMPLATE['system_base_template']
+USER_CONTENT_WITH_ERRORS = _PROMPT_TEMPLATE['user_content_with_errors']
+USER_CONTENT_NO_ERRORS = _PROMPT_TEMPLATE['user_content_no_errors']
+
+# ========================================
+# 类别示例映射
+# ========================================
+CATEGORY_EXAMPLES = {
+    "Pet_Supplies": {
+        "a1_examples": "dog food, cat toy, aquarium",
+        "a2_examples": "Purina, Kong, Fluval",
+        "a4_examples": "waterproof, large size, colorful",
+        "a5_examples": "for puppies, for training, for outdoor use",
+    },
+    "Grocery_and_Gourmet_Food": {
+        "a1_examples": "coffee, tea, spices",
+        "a2_examples": "Starbucks, Lipton",
+        "a4_examples": "organic, dark roast, green color",
+        "a5_examples": "for baking, for cooking, for gifting",
+    },
+    "Arts_Crafts_and_Sewing": {
+        "a1_examples": "markers, fabric, ribbon",
+        "a2_examples": "Darice, Fiskars",
+        "a4_examples": "red color, smooth finish, vibrant hues",
+        "a5_examples": "for calligraphy, for painting, for crafting",
+    },
+}
+
+
+def get_system_base(category: str) -> str:
+    """根据类别返回填充后的 system_base"""
+    examples = CATEGORY_EXAMPLES.get(category, CATEGORY_EXAMPLES["Pet_Supplies"])
+    return _BASE_SYSTEM_TEMPLATE.format(**examples)
 
 
 # ========================================
@@ -60,14 +106,21 @@ def load_user_errors(error_file: str) -> dict:
         uid = user['user_id']
         if user['total_errors'] == 0 or not user.get('detailed_results'):
             continue
+        # 使用 set 去重 (original, corrected) 组合
+        seen = set()
         patterns = []
         for detail in user['detailed_results']:
             for err in detail.get('errors', []):
-                patterns.append({
-                    'original': err.get('original', ''),
-                    'corrected': err.get('corrected', ''),
-                    'error_type': err.get('error_type', 'unknown'),
-                })
+                orig = err.get('original', '')
+                corr = err.get('corrected', '')
+                key = (orig, corr)
+                if key not in seen:
+                    seen.add(key)
+                    patterns.append({
+                        'original': orig,
+                        'corrected': corr,
+                        'error_type': err.get('error_type', 'unknown'),
+                    })
         if patterns:
             user_errors[uid] = patterns
 
@@ -75,321 +128,117 @@ def load_user_errors(error_file: str) -> dict:
 
 
 # ========================================
-# 根据画像构建Prompt（无错误用户 - 旧逻辑）
+# 构建一次性返回4个acl版本的Prompt
 # ========================================
-def build_persona_prompt(persona: dict) -> str:
-    """根据用户画像构建查询生成prompt，使用A1-A5占位符"""
+def build_user_prompt(persona: dict, error_patterns: list = None) -> tuple:
+    """为用户构建请求4个acl版本的prompt
+    Returns: (system_base, user_content)
 
-    acl_ratio = persona.get('acl_sentence_ratio', 0.0)
-    density_label = persona.get('density_label', 'simple')
-    length_label = persona.get('length_label', 'medium')
-    acl_type_dist = persona.get('acl_type_distribution', None)
+    逻辑：
+    - 如果用户有错误：所有级别返回单版本（含正确词），错误注入在后处理完成
+    - 如果用户无错误：所有级别返回普通单版本
+    """
+    # System base - 根据类别填充
+    system_base = get_system_base(CATEGORY)
 
-    # target_length 已在main中计算好，直接使用
-    target_length = persona.get('target_length')
-    if target_length is not None:
-        length_instruction = f"- Target sentence length: approximately {target_length} words (tolerance: ±5 words)"
+    has_errors = error_patterns is not None
+    target_length = persona.get('target_length', 20)
+
+    if has_errors:
+        # 有错误用户：构建正确词列表
+        correct_words_str = ""
+        for ep in error_patterns[:10]:
+            corr = ep.get("corrected", "")
+            correct_words_str += f"- \"{corr}\"\n"
+
+        user_content = USER_CONTENT_WITH_ERRORS.format(
+            target_length=target_length,
+            correct_words=correct_words_str if correct_words_str else "(none)"
+        )
     else:
-        length_instruction = ""
+        # 无错误用户：简单4版本
+        user_content = USER_CONTENT_NO_ERRORS.format(target_length=target_length)
 
-    if 'target_acl_override' in persona:
-        target_acl_count = persona['target_acl_override']
-    else:
-        words_per_acl = persona.get('words_per_acl', 20.0)
-        if words_per_acl > 35:
-            target_acl_count = 0
-        elif words_per_acl >= 18:
-            target_acl_count = 1
-        elif words_per_acl >= 12:
-            target_acl_count = 2
-        else:
-            target_acl_count = 3
-
-    if acl_type_dist and target_acl_count > 0:
-        clauses = [("which", "complete clause") for _ in range(target_acl_count)]
-
-        def format_acl_clause(i, word, clause_type):
-            return f"- Clause {i+1}: use '{word}' followed by a {clause_type}, describing a feature of the main noun. Example: 'A1 {word} cost A3'"
-
-        clauses_str = "\n".join([format_acl_clause(i, w, c) for i, (w, c) in enumerate(clauses)])
-
-        acl_instruction = f"""CRITICAL REQUIREMENTS:
-- You MUST generate EXACTLY {target_acl_count} adjectival clause(s) (relative clause).
-{clauses_str}
-- Each clause must describe/modify a noun in the main sentence (e.g., the product).
-- FORBIDDEN: Do NOT use 'who' (only use 'which' for this task).
-- FORBIDDEN: Do NOT use 'to + verb' patterns (e.g., "A1 intended to buy").
-- FORBIDDEN: Do NOT use 'whether', 'if', 'what', 'whatever' to introduce clauses.
-- FORBIDDEN: Do NOT use 'that' as a clause marker in this task.
-- The adjectival clause must modify/describe a noun, not complete the meaning of a verb."""
-    elif target_acl_count == 0:
-        acl_instruction = """CRITICAL REQUIREMENTS:
-- You MUST generate EXACTLY ZERO adjectival clauses (relative clauses).
-- FORBIDDEN: Do NOT use 'which', 'who', 'whom', 'whose', 'that' to introduce any clause.
-- FORBIDDEN: Do NOT use 'to + verb' patterns.
-- MANDATORY: ALL 5 placeholders (A1, A2, A3, A4, A5) MUST appear exactly once.
-
-STRUCTURE RULES:
-- Use ONLY simple phrases connected by 'and' or 'or'
-- Example: "A1 by A2 priced at A3 with A4 finish for A5."
-- GOOD: A1 by A2 at A3 with A4 color for A5."""
-    else:
-        acl_instruction = f"""CRITICAL REQUIREMENTS:
-- You MUST generate EXACTLY {target_acl_count} adjectival clause(s) (relative clause).
-- Each clause MUST use 'which' followed by a complete clause that describes the noun.
-- Example: "A1 which are priced at A3" or "A1 which come from A2"
-- FORBIDDEN: Do NOT use 'who' (only use 'which' for this task).
-- FORBIDDEN: Do NOT use 'to + verb' patterns (e.g., "A1 intended to find", "A1 made to use").
-- FORBIDDEN: Do NOT use 'whether', 'if', 'what', 'whatever' to introduce clauses.
-- FORBIDDEN: Do NOT use 'that' as a clause marker.
-- The 'which' clause must describe/modify a noun, not complete the meaning of a verb."""
-
-    prompt = f"""Generate a product search query based on the user's linguistic profile.
-
-USER PROFILE:
-- Adjectival clause usage: {acl_ratio*100:.0f}% of sentences contain adjectival clauses
-- Writing style: {density_label} with {length_label} sentences
-{length_instruction}
-
-Product attributes - MUST use these placeholders:
-- A1 = product type (e.g., markers, fabric, ribbon)
-- A2 = brand name (e.g., Darice, Fiskars)
-- A3 = price (e.g., $6.63, $10.00)
-- A4 = appearance/feature (e.g., red color, smooth finish, vibrant hues)
-- A5 = use case/purpose (e.g., for calligraphy, for painting, for crafting)
-
-IMPORTANT: Replace ALL specific product attributes with their placeholders:
-- Replace actual product type with "A1"
-- Replace actual brand with "A2"
-- Replace actual price with "A3"
-- Replace actual appearance/feature with "A4"
-- Replace actual use case with "A5"
-
-Example transformation:
-- Real: "I want markers which are priced at $6.63 and are perfect for calligraphy."
-- Placeholder: "I want A1 which are A3 and are A4 for A5."
-
-{acl_instruction}
-
-FORBIDDEN patterns:
-- NO "because/when/if/although/since" clauses
-- NO complement clauses with 'that' (e.g., "I think that it is good")
-- NO 'who', 'whom', 'whose' in this task
-- The placeholders A1, A2, A3, A4, A5 must appear EXACTLY as written (uppercase A followed by number)
-
-Output format: Output ONLY a valid JSON object. No text before or after.
-{{"query_id": 1, "query": "your query here with A1-A5 placeholders"}}
-"""
-    return prompt
-
-
-# ========================================
-# 根据画像构建Prompt（有错误用户 - 非 ground_truth：只含正确形式，单版本）
-# ========================================
-def build_persona_prompt_with_correct_words(persona: dict, error_patterns: list) -> str:
-    """有错误用户但非 ground_truth：要求包含错误词的正确形式，只输出单版本"""
-
-    acl_ratio = persona.get('acl_sentence_ratio', 0.0)
-    density_label = persona.get('density_label', 'simple')
-    length_label = persona.get('length_label', 'medium')
-
-    target_length = persona.get('target_length')
-    if target_length is not None:
-        length_instruction = f"- Target sentence length: approximately {target_length} words (tolerance: ±5 words)"
-    else:
-        length_instruction = ""
-
-    if 'target_acl_override' in persona:
-        target_acl_count = persona['target_acl_override']
-    else:
-        words_per_acl = persona.get('words_per_acl', 20.0)
-        if words_per_acl > 35:
-            target_acl_count = 0
-        elif words_per_acl >= 18:
-            target_acl_count = 1
-        elif words_per_acl >= 12:
-            target_acl_count = 2
-        else:
-            target_acl_count = 3
-
-    # ACL 指令
-    if target_acl_count == 0:
-        acl_instruction = """CRITICAL REQUIREMENTS:
-- You MUST generate EXACTLY ZERO adjectival clauses (relative clauses).
-- FORBIDDEN: Do NOT use 'which', 'who', 'whom', 'whose', 'that' to introduce any clause.
-- FORBIDDEN: Do NOT use 'to + verb' patterns.
-- MANDATORY: ALL 5 placeholders (A1, A2, A3, A4, A5) MUST appear exactly once.
-
-STRUCTURE RULES:
-- Use ONLY simple phrases connected by 'and' or 'or'
-- Example: "A1 by A2 priced at A3 with A4 finish for A5." """
-    else:
-        acl_instruction = f"""CRITICAL REQUIREMENTS:
-- You MUST generate EXACTLY {target_acl_count} adjectival clause(s) (relative clause).
-- Each clause MUST use 'which' followed by a complete clause that describes the noun.
-- FORBIDDEN: Do NOT use 'who' (only use 'which' for this task).
-- FORBIDDEN: Do NOT use 'to + verb' patterns.
-- FORBIDDEN: Do NOT use 'whether', 'if', 'what', 'whatever' to introduce clauses.
-- FORBIDDEN: Do NOT use 'that' as a clause marker.
-- The 'which' clause must describe/modify a noun, not complete the meaning of a verb."""
-
-    # 构建必须包含的正确词列表
-    forced_words_str = ""
-    for ep in error_patterns[:10]:
-        corr = ep.get("corrected", "")
-        forced_words_str += f"- \"{corr}\"\n"
-
-    prompt = f"""Generate a product search query based on the user's linguistic profile.
-
-USER PROFILE:
-- Adjectival clause usage: {acl_ratio*100:.0f}% of sentences contain adjectival clauses
-- Writing style: {density_label} with {length_label} sentences
-{length_instruction}
-
-Product attributes - MUST use these placeholders:
-- A1 = product type
-- A2 = brand name
-- A3 = price
-- A4 = appearance/feature
-- A5 = use case/purpose
-
-{acl_instruction}
-
-FORBIDDEN patterns:
-- NO "because/when/if/although/since" clauses
-- NO complement clauses with 'that' (e.g., "I think that it is good")
-- NO 'who', 'whom', 'whose' in this task
-- The placeholders A1, A2, A3, A4, A5 must appear EXACTLY as written (uppercase A followed by number)
-
-CRITICAL: The query MUST naturally include ALL of the following words/phrases (not as placeholders, as regular words):
-{forced_words_str}
-Each of these words must appear naturally in the query context.
-
-Output format: Output ONLY a valid JSON object. No text before or after.
-{{"query_id": 1, "query": "your query here with A1-A5 placeholders"}}
-"""
-    return prompt
-
-
-# ========================================
-# 根据画像构建Prompt（有错误用户 - ground_truth：双版本）
-# ========================================
-def build_persona_prompt_with_errors(persona: dict, error_patterns: list) -> str:
-    """根据用户画像构建查询生成prompt，强制包含用户错误单词，输出correct和error两个版本"""
-
-    acl_ratio = persona.get('acl_sentence_ratio', 0.0)
-    density_label = persona.get('density_label', 'simple')
-    length_label = persona.get('length_label', 'medium')
-
-    # target_length
-    target_length = persona.get('target_length')
-    if target_length is not None:
-        length_instruction = f"- Target sentence length: approximately {target_length} words (tolerance: ±5 words)"
-    else:
-        length_instruction = ""
-
-    if 'target_acl_override' in persona:
-        target_acl_count = persona['target_acl_override']
-    else:
-        words_per_acl = persona.get('words_per_acl', 20.0)
-        if words_per_acl > 35:
-            target_acl_count = 0
-        elif words_per_acl >= 18:
-            target_acl_count = 1
-        elif words_per_acl >= 12:
-            target_acl_count = 2
-        else:
-            target_acl_count = 3
-
-    # ACL 指令（与旧逻辑一致）
-    if target_acl_count == 0:
-        acl_instruction = """CRITICAL REQUIREMENTS:
-- You MUST generate EXACTLY ZERO adjectival clauses (relative clauses).
-- FORBIDDEN: Do NOT use 'which', 'who', 'whom', 'whose', 'that' to introduce any clause.
-- FORBIDDEN: Do NOT use 'to + verb' patterns.
-- MANDATORY: ALL 5 placeholders (A1, A2, A3, A4, A5) MUST appear exactly once.
-
-STRUCTURE RULES:
-- Use ONLY simple phrases connected by 'and' or 'or'
-- Example: "A1 by A2 priced at A3 with A4 finish for A5." """
-    else:
-        acl_instruction = f"""CRITICAL REQUIREMENTS:
-- You MUST generate EXACTLY {target_acl_count} adjectival clause(s) (relative clause).
-- Each clause MUST use 'which' followed by a complete clause that describes the noun.
-- FORBIDDEN: Do NOT use 'who' (only use 'which' for this task).
-- FORBIDDEN: Do NOT use 'to + verb' patterns.
-- FORBIDDEN: Do NOT use 'whether', 'if', 'what', 'whatever' to introduce clauses.
-- FORBIDDEN: Do NOT use 'that' as a clause marker.
-- The 'which' clause must describe/modify a noun, not complete the meaning of a verb."""
-
-    # 构建错误模式列表
-    error_list_str = ""
-    forced_words = []
-    for i, ep in enumerate(error_patterns[:10]):
-        orig = ep.get("original", "")
-        corr = ep.get("corrected", "")
-        etype = ep.get("error_type", "unknown")
-        error_list_str += f"{i+1}. [{etype}] user writes: \"{orig}\" but correct is: \"{corr}\"\n"
-        forced_words.append({"correct": corr, "error": orig})
-
-    forced_words_str = ""
-    for fw in forced_words:
-        forced_words_str += f"- correct: \"{fw['correct']}\", error: \"{fw['error']}\"\n"
-
-    prompt = f"""Generate a product search query based on the user's linguistic profile.
-
-USER PROFILE:
-- Adjectival clause usage: {acl_ratio*100:.0f}% of sentences contain adjectival clauses
-- Writing style: {density_label} with {length_label} sentences
-{length_instruction}
-
-Product attributes - MUST use these placeholders:
-- A1 = product type
-- A2 = brand name
-- A3 = price
-- A4 = appearance/feature
-- A5 = use case/purpose
-
-{acl_instruction}
-
-FORBIDDEN patterns:
-- NO "because/when/if/although/since" clauses
-- NO complement clauses with 'that' (e.g., "I think that it is good")
-- NO 'who', 'whom', 'whose' in this task
-- The placeholders A1, A2, A3, A4, A5 must appear EXACTLY as written (uppercase A followed by number)
-
-USER ERROR PATTERNS (this user makes these spelling mistakes):
-{error_list_str}
-
-CRITICAL: The query MUST naturally include ALL of the following correct words/phrases in the sentence (not as placeholders, as regular words):
-{forced_words_str}
-Each of these words must appear naturally in the query context.
-
-You MUST output TWO versions:
-1. "correct_query": The query with ALL words in their CORRECT form (from the "correct" column above)
-2. "error_query": Same query but with EVERY correct word replaced by its corresponding ERROR form (from the "error" column above)
-
-Output format: Output ONLY a valid JSON object. No text before or after.
-{{
-  "query_id": 1,
-  "correct_query": "query with A1-A5 placeholders and all correct words",
-  "error_query": "same query but with error forms replacing correct words",
-  "error_words": [
-    {{"correct": "...", "error": "..."}},
-    ...
-  ]
-}}
-"""
-    return prompt
+    return system_base, user_content
 
 
 # ========================================
 # LLM 调用
 # ========================================
-def call_llm(prompt: str) -> str:
-    """调用LLM"""
-    client = MiniMaxAnthropicClient(model='MiniMax-M2.5')
-    thinking, text = client.call_with_thinking(prompt, max_tokens=16384, temperature=0.3)
+_minimax_client = None
+_first_request = True
+
+
+def load_minimax_client():
+    """加载 MiniMax API 客户端"""
+    global _minimax_client
+    if _minimax_client is None:
+        from llm_client import MiniMaxAnthropicClient
+        _minimax_client = MiniMaxAnthropicClient()
+        print(" MiniMax API 客户端初始化完成")
+
+
+def call_llm(prompt: str, system_base: str = None) -> str:
+    """调用 MiniMax API，支持可选的系统提示词缓存"""
+    global _minimax_client, _first_request
+
+    if _minimax_client is None:
+        load_minimax_client()
+
+    cache_info = {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}
+
+    # 第一次请求时打印 system_base（创建缓存）
+    if system_base and _first_request:
+        log(f"[Request] system_base (FIRST REQUEST - cache creation):\n{system_base}")
+        _first_request = False
+
+    # 打印 user_content
+    log(f"[Request] user_content:\n{prompt}")
+
+    if system_base:
+        # 使用缓存版本的 API
+        response, cache_info = _minimax_client.call_with_cache(
+            system_base=system_base,
+            user_content=prompt,
+            max_tokens=8192,
+            temperature=1.0
+        )
+    else:
+        response = _minimax_client.call(
+            prompt=prompt,
+            max_tokens=8192,
+            temperature=1.0
+        )
+
+    # 打印所有缓存相关字段
+    log(f"[Cache] {cache_info}")
+
+    # 修复被截断的 JSON
+    text = fix_incomplete_json(response)
+    return text
+
+
+def fix_incomplete_json(text: str) -> str:
+    """修复可能被截断的 JSON"""
+    if not text:
+        return text
+    text = text.strip()
+
+    if not text.startswith('{'):
+        return text
+
+    # 计算括号数量
+    open_braces = text.count('{')
+    close_braces = text.count('}')
+    open_brackets = text.count('[')
+    close_brackets = text.count(']')
+
+    # 修复缺失的闭合括号
+    if open_brackets > close_brackets:
+        text = text + ']' * (open_brackets - close_brackets)
+    if open_braces > close_braces:
+        text = text + '}' * (open_braces - close_braces)
+
     return text
 
 
@@ -399,6 +248,9 @@ def call_llm(prompt: str) -> str:
 def parse_query(text_content: str) -> dict:
     """解析JSON查询"""
     try:
+        if not text_content:
+            log(f"    [DEBUG] JSON解析失败: 空回复")
+            return None
         json_match = re.search(r'\{[\s\S]*\}', text_content)
         if json_match:
             data = json.loads(json_match.group())
@@ -412,15 +264,18 @@ def parse_query(text_content: str) -> dict:
                 'word_count': count_words(query),
             }
     except Exception as e:
-        log(f"    [DEBUG] JSON解析失败: {e}")
+        log(f"    [DEBUG] JSON解析失败: {e}, text_content={repr(text_content[:500])}")
     return None
 
 
 # ========================================
-# 解析结果（有错误用户 - 双版本）
+# 解析4版本查询结果
 # ========================================
-def parse_query_with_errors(text_content: str) -> dict:
-    """解析包含correct_query和error_query的JSON"""
+def parse_4_versions_query(text_content: str, ground_truth_acl: int = 0) -> dict:
+    """解析包含4个acl版本的JSON（全部是单版本字符串）
+
+    ground_truth_acl: 用户的真实acl级别（用于标记）
+    """
     try:
         json_match = re.search(r'\{[\s\S]*\}', text_content)
         if json_match:
@@ -428,19 +283,29 @@ def parse_query_with_errors(text_content: str) -> dict:
         else:
             data = json.loads(text_content)
 
-        correct_q = data.get('correct_query', '').strip()
-        error_q = data.get('error_query', '').strip()
-        error_words = data.get('error_words', [])
+        result = {}
+        for acl_level in ['acl_0', 'acl_1', 'acl_2', 'acl_3']:
+            if acl_level not in data:
+                return None
 
-        if correct_q and error_q:
-            return {
-                'correct_query': correct_q,
-                'error_query': error_q,
-                'error_words': error_words,
-                'word_count': count_words(correct_q),
-            }
+            item = data[acl_level]
+            acl_num = int(acl_level.split('_')[1])
+            is_ground_truth = (acl_num == ground_truth_acl)
+
+            # 单版本: "query string"
+            query = item.strip() if isinstance(item, str) else ''
+            if query:
+                result[acl_level] = {
+                    'query': query,
+                    'word_count': count_words(query),
+                    'is_ground_truth': is_ground_truth,
+                }
+            else:
+                return None
+
+        return result
     except Exception as e:
-        log(f"    [DEBUG] JSON解析失败: {e}")
+        log(f"    [DEBUG] 4版本JSON解析失败: {e}, text_content={repr(text_content[:500])}")
     return None
 
 
@@ -467,6 +332,20 @@ def fill_placeholders(query: str, attrs: dict) -> str:
         if isinstance(val, list):
             val = ', '.join(str(v) for v in val)
         result = result.replace(key, str(val))
+    return result
+
+
+def inject_errors(query: str, error_patterns: list) -> str:
+    """将查询中的正确词替换为错误词"""
+    if not error_patterns:
+        return query
+    result = query
+    for ep in error_patterns[:10]:
+        orig = ep.get("original", "")
+        corr = ep.get("corrected", "")
+        if orig and corr:
+            # 替换正确词为错误词
+            result = result.replace(corr, orig)
     return result
 
 
@@ -499,32 +378,26 @@ def main():
 
     # 加载用户错误画像
     log(f"加载用户错误画像 from {USER_ERROR_FILE}...")
-    user_errors = load_user_errors(USER_ERROR_FILE)
-    log(f"加载了 {len(user_errors)} 个有错误的用户")
+    user_errors = {}
+    if os.path.exists(USER_ERROR_FILE):
+        user_errors = load_user_errors(USER_ERROR_FILE)
+        log(f"加载了 {len(user_errors)} 个有错误的用户")
+    else:
+        log(f"错误文件不存在，跳过错误处理（所有用户按无错误处理）")
 
     # 构建用户画像 map
     profile_map = {p['user_id']: p for p in all_user_profiles}
 
-    # 筛选目标用户（优先选有错误的用户，但必须在两个画像中都存在）
-    error_uids = [uid for uid in user_errors if uid in profile_map and uid in user_wpa_map]
-    normal_uids = [uid for uid in profile_map if uid not in user_errors and uid in user_wpa_map]
-    target_uids = error_uids[:NUM_USERS_TO_TEST]
-    remaining = NUM_USERS_TO_TEST - len(target_uids)
-    if remaining > 0:
-        target_uids += normal_uids[:remaining]
-    has_error_count = sum(1 for uid in target_uids if uid in user_errors)
-    log(f"目标用户: {len(target_uids)} 个（其中 {has_error_count} 个有错误）")
-
-    # 构建 tasks
-    tasks = []
-    for uid in target_uids:
+    # 第一步：计算所有用户的 ground_truth_acl 并过滤
+    all_user_data = []
+    for uid in profile_map:
+        if uid not in user_wpa_map:
+            continue
         profile = profile_map[uid]
         products = profile.get('products', [])
         if not products:
             continue
         prod = products[0]
-        asin = prod.get('asin', '')
-        errors = user_errors.get(uid, None)
 
         # 获取 words_per_attribute（从 attr_density 画像）
         words_per_attribute = user_wpa_map.get(uid)
@@ -548,150 +421,146 @@ def main():
         else:
             ground_truth_acl = 0
 
-        # 如果 ground_truth_acl > 3，跳过该用户
+        # 过滤 ground_truth_acl > 3 的用户
         if ground_truth_acl > 3:
             continue
 
-        persona_base = {
-            'user_id': uid,
-            'asin': asin,
-            'acl_sentence_ratio': profile.get('acl_sentence_ratio', 0.0),
-            'density_label': profile.get('density_label', 'simple'),
-            'length_label': profile.get('length_label', 'medium'),
+        all_user_data.append({
+            'uid': uid,
+            'profile': profile,
+            'prod': prod,
             'words_per_attribute': words_per_attribute,
             'words_per_acl': words_per_acl,
             'target_length': target_length,
             'ground_truth_acl': ground_truth_acl,
+            'has_errors': uid in user_errors,
+        })
+
+    log(f"过滤后（ground_truth_acl <= 3）的用户数: {len(all_user_data)}")
+
+    # 第二步：优先选有错误的用户，再选无错误用户
+    error_users = [u for u in all_user_data if u['has_errors']]
+    normal_users = [u for u in all_user_data if not u['has_errors']]
+
+    target_users = error_users[:NUM_USERS_TO_TEST]
+    remaining = NUM_USERS_TO_TEST - len(target_users)
+    if remaining > 0:
+        target_users += normal_users[:remaining]
+
+    has_error_count = sum(1 for u in target_users if u['has_errors'])
+    log(f"目标用户: {len(target_users)} 个（其中 {has_error_count} 个有错误）")
+
+    # 构建用户任务列表（每个用户一个任务，一次性返回4个版本）
+    user_tasks = []
+    for u in target_users:
+        uid = u['uid']
+        profile = u['profile']
+        prod = u['prod']
+        errors = user_errors.get(uid, None)
+
+        persona_base = {
+            'user_id': uid,
+            'asin': prod.get('asin', ''),
+            'acl_sentence_ratio': profile.get('acl_sentence_ratio', 0.0),
+            'density_label': profile.get('density_label', 'simple'),
+            'length_label': profile.get('length_label', 'medium'),
+            'words_per_attribute': u['words_per_attribute'],
+            'words_per_acl': u['words_per_acl'],
+            'target_length': u['target_length'],
+            'ground_truth_acl': u['ground_truth_acl'],
             'original_attrs': {
                 'A1': prod.get('A1_product_type', ''),
                 'A2': prod.get('A2_brand', ''),
                 'A3': prod.get('A3_price', ''),
                 'A4': prod.get('A4_appearance', ''),
                 'A5': prod.get('A5_use_case', ''),
-            }
+            },
+            'errors': errors,
         }
+        user_tasks.append(persona_base)
 
-        for target_acl_count in [0, 1, 2, 3]:
-            task = persona_base.copy()
-            task['target_acl_override'] = target_acl_count
-            task['is_target_acl'] = (target_acl_count == ground_truth_acl)
-            task['error_patterns'] = errors
-            # 三种情况：
-            # 1. 有错误 + ground_truth → 双版本 (correct + noisy)
-            # 2. 有错误 + 非 ground_truth → 单版本但包含正确形式
-            # 3. 无错误 → 普通单版本
-            if errors is not None:
-                task['has_errors'] = True
-                task['is_ground_truth_version'] = task['is_target_acl']
-            else:
-                task['has_errors'] = False
-                task['is_ground_truth_version'] = False
-            tasks.append(task)
-
-    log(f"构建了 {len(tasks)} 个查询任务 ({len(target_uids)} 用户 × 4 acl版本)")
+    log(f"构建了 {len(user_tasks)} 个用户任务")
     log(f"开始处理，并发数={MAX_WORKERS}")
 
-    def process_one(task):
-        uid = task['user_id']
-        target_acl_count = task['target_acl_override']
-        attrs = task['original_attrs']
+    def process_one_user(persona):
+        """处理单个用户，一次返回4个acl版本"""
+        uid = persona['user_id']
+        attrs = persona['original_attrs']
+        errors = persona['errors']
+        ground_truth_acl = persona['ground_truth_acl']
 
-        if task['has_errors'] and task.get('is_ground_truth_version'):
-            # 有错误 + ground_truth：生成 correct + error 双版本
-            prompt = build_persona_prompt_with_errors(task, task['error_patterns'])
-            text = call_llm(prompt)
-            query_data = parse_query_with_errors(text)
-            if query_data:
-                correct_filled = fill_placeholders(query_data['correct_query'], attrs)
-                error_filled = fill_placeholders(query_data['error_query'], attrs)
-                # 从原始 error_patterns 回填 error_type
-                error_words = query_data.get('error_words', [])
-                for ew in error_words:
-                    for ep in task['error_patterns']:
-                        if ew.get('correct') == ep.get('corrected') and ew.get('error') == ep.get('original'):
-                            ew['error_type'] = ep.get('error_type', 'unknown')
-                            break
-                    if 'error_type' not in ew:
-                        ew['error_type'] = 'unknown'
-                return {
+        has_errors = errors is not None
+
+        # 构建 prompt
+        system_base, user_content = build_user_prompt(persona, errors)
+        text = call_llm(user_content, system_base=system_base)
+
+        # 解析4个版本
+        query_data = parse_4_versions_query(text, ground_truth_acl)
+        if not query_data:
+            return None
+
+        # 构建4个结果
+        results = []
+        for acl_level in ['acl_0', 'acl_1', 'acl_2', 'acl_3']:
+            target_acl = int(acl_level.split('_')[1])
+            qdata = query_data[acl_level]
+
+            if qdata.get('is_ground_truth') and has_errors:
+                # ground_truth 级别：使用 inject_errors 生成 noisy_query
+                correct_filled = fill_placeholders(qdata['query'], attrs)
+                noisy_filled = inject_errors(correct_filled, errors)
+                results.append({
                     'user_id': uid,
-                    'asin': task['asin'],
-                    'target_acl': target_acl_count,
-                    'words_per_acl': task.get('words_per_acl'),
-                    'ground_truth_acl': task.get('ground_truth_acl'),
-                    'target_length': task.get('target_length'),
+                    'asin': persona['asin'],
+                    'target_acl': target_acl,
+                    'acl_sentence_ratio': persona.get('acl_sentence_ratio', 0.0),
+                    'density_label': persona.get('density_label', 'simple'),
+                    'length_label': persona.get('length_label', 'medium'),
+                    'words_per_acl': persona.get('words_per_acl'),
+                    'ground_truth_acl': ground_truth_acl,
+                    'target_length': persona.get('target_length'),
                     'has_errors': True,
                     'correct_query': correct_filled,
-                    'noisy_query': error_filled,
-                    'error_words': error_words,
-                    'word_count': query_data['word_count'],
+                    'noisy_query': noisy_filled,
+                    'error_words': [{'correct': ep['corrected'], 'error': ep['original'], 'error_type': ep.get('error_type', 'unknown')} for ep in (errors or [])[:10]],
+                    'word_count': qdata['word_count'],
                     'is_ground_truth': True,
-                }
-        elif task['has_errors'] and not task.get('is_ground_truth_version'):
-            # 有错误 + 非 ground_truth：包含正确形式的单版本
-            prompt = build_persona_prompt_with_correct_words(task, task['error_patterns'])
-            text = call_llm(prompt)
-            query_data = parse_query(text)
-            if query_data:
-                filled_query = fill_placeholders(query_data['query'], attrs)
-                return {
+                })
+            else:
+                # 其他级别：单版本
+                filled_query = fill_placeholders(qdata['query'], attrs)
+                results.append({
                     'user_id': uid,
-                    'asin': task['asin'],
-                    'target_acl': target_acl_count,
-                    'words_per_acl': task.get('words_per_acl'),
-                    'ground_truth_acl': task.get('ground_truth_acl'),
-                    'target_length': task.get('target_length'),
-                    'has_errors': True,
+                    'asin': persona['asin'],
+                    'target_acl': target_acl,
+                    'acl_sentence_ratio': persona.get('acl_sentence_ratio', 0.0),
+                    'density_label': persona.get('density_label', 'simple'),
+                    'length_label': persona.get('length_label', 'medium'),
+                    'words_per_acl': persona.get('words_per_acl'),
+                    'ground_truth_acl': ground_truth_acl,
+                    'target_length': persona.get('target_length'),
+                    'has_errors': has_errors,
                     'filled_query': filled_query,
-                    'word_count': query_data['word_count'],
-                    'is_ground_truth': False,
-                }
-        else:
-            # 无错误用户：旧逻辑，普通单版本
-            prompt = build_persona_prompt(task)
-            text = call_llm(prompt)
-            query_data = parse_query(text)
-            if query_data:
-                filled_query = fill_placeholders(query_data['query'], attrs)
-                return {
-                    'user_id': uid,
-                    'asin': task['asin'],
-                    'target_acl': target_acl_count,
-                    'words_per_acl': task.get('words_per_acl'),
-                    'ground_truth_acl': task.get('ground_truth_acl'),
-                    'target_length': task.get('target_length'),
-                    'has_errors': False,
-                    'filled_query': filled_query,
-                    'word_count': query_data['word_count'],
-                    'is_ground_truth': (target_acl_count == task.get('ground_truth_acl')),
-                }
-        return None
+                    'word_count': qdata['word_count'],
+                    'is_ground_truth': qdata.get('is_ground_truth', False),
+                })
+
+        return results
 
     results = []
-    total_batches = (len(tasks) + BATCH_SIZE - 1) // BATCH_SIZE
     total_start = time.time()
-    total_users = len(target_uids)
-    user_completed_count = {}
-    printed_users = set()
+    total_users = len(user_tasks)
 
-    for batch_idx in range(total_batches):
-        batch_start = batch_idx * BATCH_SIZE
-        batch_end = min(batch_start + BATCH_SIZE, len(tasks))
-        batch_tasks = tasks[batch_start:batch_end]
-
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(process_one, t): t for t in batch_tasks}
-            for future in as_completed(futures):
-                r = future.result()
-                if r:
-                    results.append(r)
-                    uid = r['user_id']
-                    user_completed_count[uid] = user_completed_count.get(uid, 0) + 1
-                    if user_completed_count[uid] == 4 and uid not in printed_users:
-                        printed_users.add(uid)
-                        done_users = sum(1 for c in user_completed_count.values() if c >= 4)
-                        err_tag = " [error user]" if r['has_errors'] else ""
-                        log(f"  [{done_users}/{total_users}] user={uid[:20]}{err_tag}")
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(process_one_user, t): t for t in user_tasks}
+        for future in as_completed(futures):
+            r = future.result()
+            if r:
+                results.extend(r)
+                done_users = len(set(x['user_id'] for x in results))
+                err_tag = " [error user]" if r[0]['has_errors'] else ""
+                log(f"  [{done_users}/{total_users}] user={r[0]['user_id'][:20]}{err_tag}")
 
     total_elapsed = time.time() - total_start
 

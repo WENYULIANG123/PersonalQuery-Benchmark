@@ -414,26 +414,16 @@ def main():
     # 构建用户画像 map
     profile_map = {p['user_id']: p for p in all_user_profiles}
 
-    # 筛选目标用户（优先选有错误的用户，但必须在两个画像中都存在）
-    error_uids = [uid for uid in user_errors if uid in profile_map and uid in user_wpa_map]
-    normal_uids = [uid for uid in profile_map if uid not in user_errors and uid in user_wpa_map]
-    target_uids = error_uids[:NUM_USERS_TO_TEST]
-    remaining = NUM_USERS_TO_TEST - len(target_uids)
-    if remaining > 0:
-        target_uids += normal_uids[:remaining]
-    has_error_count = sum(1 for uid in target_uids if uid in user_errors)
-    log(f"目标用户: {len(target_uids)} 个（其中 {has_error_count} 个有错误）")
-
-    # 构建用户任务列表（每个用户一个任务，一次性返回4个版本）
-    user_tasks = []
-    for uid in target_uids:
+    # 第一步：计算所有用户的 ground_truth_ccomp 并过滤
+    all_user_data = []
+    for uid in profile_map:
+        if uid not in user_wpa_map:
+            continue
         profile = profile_map[uid]
         products = profile.get('products', [])
         if not products:
             continue
         prod = products[0]
-        asin = prod.get('asin', '')
-        errors = user_errors.get(uid, None)
 
         # 获取 words_per_attribute（从 attr_density 画像）
         words_per_attribute = user_wpa_map.get(uid)
@@ -457,20 +447,53 @@ def main():
         else:
             ground_truth_ccomp = 0
 
-        # 如果 ground_truth_ccomp > 3，跳过该用户
+        # 过滤 ground_truth_ccomp > 3 的用户
         if ground_truth_ccomp > 3:
             continue
 
-        persona_base = {
-            'user_id': uid,
-            'asin': asin,
-            'ccomp_sentence_ratio': profile.get('ccomp_sentence_ratio', 0.0),
-            'density_label': profile.get('density_label', 'simple'),
-            'length_label': profile.get('length_label', 'medium'),
+        all_user_data.append({
+            'uid': uid,
+            'profile': profile,
+            'prod': prod,
             'words_per_attribute': words_per_attribute,
             'words_per_ccomp': words_per_ccomp,
             'target_length': target_length,
             'ground_truth_ccomp': ground_truth_ccomp,
+            'has_errors': uid in user_errors,
+        })
+
+    log(f"过滤后（ground_truth_ccomp <= 3）的用户数: {len(all_user_data)}")
+
+    # 第二步：优先选有错误的用户，再选无错误用户
+    error_users = [u for u in all_user_data if u['has_errors']]
+    normal_users = [u for u in all_user_data if not u['has_errors']]
+
+    target_users = error_users[:NUM_USERS_TO_TEST]
+    remaining = NUM_USERS_TO_TEST - len(target_users)
+    if remaining > 0:
+        target_users += normal_users[:remaining]
+
+    has_error_count = sum(1 for u in target_users if u['has_errors'])
+    log(f"目标用户: {len(target_users)} 个（其中 {has_error_count} 个有错误）")
+
+    # 构建用户任务列表（每个用户一个任务，一次性返回4个版本）
+    user_tasks = []
+    for u in target_users:
+        uid = u['uid']
+        profile = u['profile']
+        prod = u['prod']
+        errors = user_errors.get(uid, None)
+
+        persona_base = {
+            'user_id': uid,
+            'asin': prod.get('asin', ''),
+            'ccomp_sentence_ratio': profile.get('ccomp_sentence_ratio', 0.0),
+            'density_label': profile.get('density_label', 'simple'),
+            'length_label': profile.get('length_label', 'medium'),
+            'words_per_attribute': u['words_per_attribute'],
+            'words_per_ccomp': u['words_per_ccomp'],
+            'target_length': u['target_length'],
+            'ground_truth_ccomp': u['ground_truth_ccomp'],
             'original_attrs': {
                 'A1': prod.get('A1_product_type', ''),
                 'A2': prod.get('A2_brand', ''),

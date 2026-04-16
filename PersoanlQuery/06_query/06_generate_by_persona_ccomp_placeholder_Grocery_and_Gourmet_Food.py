@@ -325,6 +325,61 @@ def fill_placeholders(query: str, attrs: dict) -> str:
     return result
 
 
+def inject_errors(query: str, error_patterns: list) -> str:
+    """将查询中的正确词替换为错误词"""
+    if not error_patterns:
+        return query
+    result = query
+    for ep in error_patterns[:10]:
+        orig = ep.get("original", "")
+        corr = ep.get("corrected", "")
+        if orig and corr:
+            # 替换正确词为错误词
+            result = result.replace(corr, orig)
+    return result
+
+
+# ========================================
+# 解析4版本查询结果
+# ========================================
+def parse_4_versions_query(text_content: str, ground_truth_ccomp: int = 0) -> dict:
+    """解析包含4个ccomp版本的JSON（全部是单版本字符串）
+
+    ground_truth_ccomp: 用户的真实ccomp级别（用于标记）
+    """
+    try:
+        json_match = re.search(r'\{[\s\S]*\}', text_content)
+        if json_match:
+            data = json.loads(json_match.group())
+        else:
+            data = json.loads(text_content)
+
+        result = {}
+        for ccomp_level in ['ccomp_0', 'ccomp_1', 'ccomp_2', 'ccomp_3']:
+            if ccomp_level not in data:
+                return None
+
+            item = data[ccomp_level]
+            ccomp_num = int(ccomp_level.split('_')[1])
+            is_ground_truth = (ccomp_num == ground_truth_ccomp)
+
+            # 单版本: "query string"
+            query = item.strip() if isinstance(item, str) else ''
+            if query:
+                result[ccomp_level] = {
+                    'query': query,
+                    'word_count': count_words(query),
+                    'is_ground_truth': is_ground_truth,
+                }
+            else:
+                return None
+
+        return result
+    except Exception as e:
+        log(f"    [DEBUG] 4版本JSON解析失败: {e}, text_content={repr(text_content[:500])}")
+    return None
+
+
 # ========================================
 # 主函数
 # ========================================
@@ -364,26 +419,16 @@ def main():
     # 构建用户画像 map
     profile_map = {p['user_id']: p for p in all_user_profiles}
 
-    # 筛选目标用户（优先选有错误的用户，但必须在两个画像中都存在）
-    error_uids = [uid for uid in user_errors if uid in profile_map and uid in user_wpa_map]
-    normal_uids = [uid for uid in profile_map if uid not in user_errors and uid in user_wpa_map]
-    target_uids = error_uids[:NUM_USERS_TO_TEST]
-    remaining = NUM_USERS_TO_TEST - len(target_uids)
-    if remaining > 0:
-        target_uids += normal_uids[:remaining]
-    has_error_count = sum(1 for uid in target_uids if uid in user_errors)
-    log(f"目标用户: {len(target_uids)} 个（其中 {has_error_count} 个有错误）")
-
-    # 构建 tasks
-    tasks = []
-    for uid in target_uids:
+    # 第一步：计算所有用户的 ground_truth_ccomp 并过滤
+    all_user_data = []
+    for uid in profile_map:
+        if uid not in user_wpa_map:
+            continue
         profile = profile_map[uid]
         products = profile.get('products', [])
         if not products:
             continue
         prod = products[0]
-        asin = prod.get('asin', '')
-        errors = user_errors.get(uid, None)
 
         # 获取 words_per_attribute（从 attr_density 画像）
         words_per_attribute = user_wpa_map.get(uid)
@@ -407,150 +452,146 @@ def main():
         else:
             ground_truth_ccomp = 0
 
-        # 如果 ground_truth_ccomp > 3，跳过该用户
+        # 过滤 ground_truth_ccomp > 3 的用户
         if ground_truth_ccomp > 3:
             continue
 
-        persona_base = {
-            'user_id': uid,
-            'asin': asin,
-            'ccomp_sentence_ratio': profile.get('ccomp_sentence_ratio', 0.0),
-            'density_label': profile.get('density_label', 'simple'),
-            'length_label': profile.get('length_label', 'medium'),
+        all_user_data.append({
+            'uid': uid,
+            'profile': profile,
+            'prod': prod,
             'words_per_attribute': words_per_attribute,
             'words_per_ccomp': words_per_ccomp,
             'target_length': target_length,
             'ground_truth_ccomp': ground_truth_ccomp,
+            'has_errors': uid in user_errors,
+        })
+
+    log(f"过滤后（ground_truth_ccomp <= 3）的用户数: {len(all_user_data)}")
+
+    # 第二步：优先选有错误的用户，再选无错误用户
+    error_users = [u for u in all_user_data if u['has_errors']]
+    normal_users = [u for u in all_user_data if not u['has_errors']]
+
+    target_users = error_users[:NUM_USERS_TO_TEST]
+    remaining = NUM_USERS_TO_TEST - len(target_users)
+    if remaining > 0:
+        target_users += normal_users[:remaining]
+
+    has_error_count = sum(1 for u in target_users if u['has_errors'])
+    log(f"目标用户: {len(target_users)} 个（其中 {has_error_count} 个有错误）")
+
+    # 构建用户任务列表（每个用户一个任务，一次性返回4个版本）
+    user_tasks = []
+    for u in target_users:
+        uid = u['uid']
+        profile = u['profile']
+        prod = u['prod']
+        errors = user_errors.get(uid, None)
+
+        persona_base = {
+            'user_id': uid,
+            'asin': prod.get('asin', ''),
+            'ccomp_sentence_ratio': profile.get('ccomp_sentence_ratio', 0.0),
+            'density_label': profile.get('density_label', 'simple'),
+            'length_label': profile.get('length_label', 'medium'),
+            'words_per_attribute': u['words_per_attribute'],
+            'words_per_ccomp': u['words_per_ccomp'],
+            'target_length': u['target_length'],
+            'ground_truth_ccomp': u['ground_truth_ccomp'],
             'original_attrs': {
                 'A1': prod.get('A1_product_type', ''),
                 'A2': prod.get('A2_brand', ''),
                 'A3': prod.get('A3_price', ''),
                 'A4': prod.get('A4_appearance', ''),
                 'A5': prod.get('A5_use_case', ''),
-            }
+            },
+            'errors': errors,
         }
+        user_tasks.append(persona_base)
 
-        for target_ccomp_count in [0, 1, 2, 3]:
-            task = persona_base.copy()
-            task['target_ccomp_override'] = target_ccomp_count
-            task['is_target_ccomp'] = (target_ccomp_count == ground_truth_ccomp)
-            task['error_patterns'] = errors
-            # 三种情况：
-            # 1. 有错误 + ground_truth → 双版本 (correct + noisy)
-            # 2. 有错误 + 非 ground_truth → 单版本但包含正确形式
-            # 3. 无错误 → 普通单版本
-            if errors is not None:
-                task['has_errors'] = True
-                task['is_ground_truth_version'] = task['is_target_ccomp']
-            else:
-                task['has_errors'] = False
-                task['is_ground_truth_version'] = False
-            tasks.append(task)
-
-    log(f"构建了 {len(tasks)} 个查询任务 ({len(target_uids)} 用户 × 4 ccomp版本)")
+    log(f"构建了 {len(user_tasks)} 个用户任务")
     log(f"开始处理，并发数={MAX_WORKERS}")
 
-    def process_one(task):
-        uid = task['user_id']
-        target_ccomp_count = task['target_ccomp_override']
-        attrs = task['original_attrs']
+    def process_one_user(persona):
+        """处理单个用户，一次返回4个ccomp版本"""
+        uid = persona['user_id']
+        attrs = persona['original_attrs']
+        errors = persona['errors']
+        ground_truth_ccomp = persona['ground_truth_ccomp']
 
-        if task['has_errors'] and task.get('is_ground_truth_version'):
-            # 有错误 + ground_truth：生成 correct + error 双版本
-            prompt = build_persona_prompt_with_errors(task, task['error_patterns'])
-            text = call_llm(prompt)
-            query_data = parse_query_with_errors(text)
-            if query_data:
-                correct_filled = fill_placeholders(query_data['correct_query'], attrs)
-                error_filled = fill_placeholders(query_data['error_query'], attrs)
-                # 从原始 error_patterns 回填 error_type
-                error_words = query_data.get('error_words', [])
-                for ew in error_words:
-                    for ep in task['error_patterns']:
-                        if ew.get('correct') == ep.get('corrected') and ew.get('error') == ep.get('original'):
-                            ew['error_type'] = ep.get('error_type', 'unknown')
-                            break
-                    if 'error_type' not in ew:
-                        ew['error_type'] = 'unknown'
-                return {
+        has_errors = errors is not None
+
+        # 构建 prompt
+        system_base, user_content = build_user_prompt(persona, errors)
+        text = call_llm(user_content, system_base=system_base)
+
+        # 解析4个版本
+        query_data = parse_4_versions_query(text, ground_truth_ccomp)
+        if not query_data:
+            return None
+
+        # 构建4个结果
+        results = []
+        for ccomp_level in ['ccomp_0', 'ccomp_1', 'ccomp_2', 'ccomp_3']:
+            target_ccomp = int(ccomp_level.split('_')[1])
+            qdata = query_data[ccomp_level]
+
+            if qdata.get('is_ground_truth') and has_errors:
+                # ground_truth 级别：使用 inject_errors 生成 noisy_query
+                correct_filled = fill_placeholders(qdata['query'], attrs)
+                noisy_filled = inject_errors(correct_filled, errors)
+                results.append({
                     'user_id': uid,
-                    'asin': task['asin'],
-                    'target_ccomp': target_ccomp_count,
-                    'words_per_ccomp': task.get('words_per_ccomp'),
-                    'ground_truth_ccomp': task.get('ground_truth_ccomp'),
-                    'target_length': task.get('target_length'),
+                    'asin': persona['asin'],
+                    'target_ccomp': target_ccomp,
+                    'ccomp_sentence_ratio': persona.get('ccomp_sentence_ratio', 0.0),
+                    'density_label': persona.get('density_label', 'simple'),
+                    'length_label': persona.get('length_label', 'medium'),
+                    'words_per_ccomp': persona.get('words_per_ccomp'),
+                    'ground_truth_ccomp': ground_truth_ccomp,
+                    'target_length': persona.get('target_length'),
                     'has_errors': True,
                     'correct_query': correct_filled,
-                    'noisy_query': error_filled,
-                    'error_words': error_words,
-                    'word_count': query_data['word_count'],
+                    'noisy_query': noisy_filled,
+                    'error_words': [{'correct': ep['corrected'], 'error': ep['original'], 'error_type': ep.get('error_type', 'unknown')} for ep in (errors or [])[:10]],
+                    'word_count': qdata['word_count'],
                     'is_ground_truth': True,
-                }
-        elif task['has_errors'] and not task.get('is_ground_truth_version'):
-            # 有错误 + 非 ground_truth：包含正确形式的单版本
-            prompt = build_persona_prompt_with_correct_words(task, task['error_patterns'])
-            text = call_llm(prompt)
-            query_data = parse_query(text)
-            if query_data:
-                filled_query = fill_placeholders(query_data['query'], attrs)
-                return {
+                })
+            else:
+                # 其他级别：单版本
+                filled_query = fill_placeholders(qdata['query'], attrs)
+                results.append({
                     'user_id': uid,
-                    'asin': task['asin'],
-                    'target_ccomp': target_ccomp_count,
-                    'words_per_ccomp': task.get('words_per_ccomp'),
-                    'ground_truth_ccomp': task.get('ground_truth_ccomp'),
-                    'target_length': task.get('target_length'),
-                    'has_errors': True,
+                    'asin': persona['asin'],
+                    'target_ccomp': target_ccomp,
+                    'ccomp_sentence_ratio': persona.get('ccomp_sentence_ratio', 0.0),
+                    'density_label': persona.get('density_label', 'simple'),
+                    'length_label': persona.get('length_label', 'medium'),
+                    'words_per_ccomp': persona.get('words_per_ccomp'),
+                    'ground_truth_ccomp': ground_truth_ccomp,
+                    'target_length': persona.get('target_length'),
+                    'has_errors': has_errors,
                     'filled_query': filled_query,
-                    'word_count': query_data['word_count'],
-                    'is_ground_truth': False,
-                }
-        else:
-            # 无错误用户：旧逻辑，普通单版本
-            prompt = build_persona_prompt(task)
-            text = call_llm(prompt)
-            query_data = parse_query(text)
-            if query_data:
-                filled_query = fill_placeholders(query_data['query'], attrs)
-                return {
-                    'user_id': uid,
-                    'asin': task['asin'],
-                    'target_ccomp': target_ccomp_count,
-                    'words_per_ccomp': task.get('words_per_ccomp'),
-                    'ground_truth_ccomp': task.get('ground_truth_ccomp'),
-                    'target_length': task.get('target_length'),
-                    'has_errors': False,
-                    'filled_query': filled_query,
-                    'word_count': query_data['word_count'],
-                    'is_ground_truth': (target_ccomp_count == task.get('ground_truth_ccomp')),
-                }
-        return None
+                    'word_count': qdata['word_count'],
+                    'is_ground_truth': qdata.get('is_ground_truth', False),
+                })
+
+        return results
 
     results = []
-    total_batches = (len(tasks) + BATCH_SIZE - 1) // BATCH_SIZE
     total_start = time.time()
-    total_users = len(target_uids)
-    user_completed_count = {}
-    printed_users = set()
+    total_users = len(user_tasks)
 
-    for batch_idx in range(total_batches):
-        batch_start = batch_idx * BATCH_SIZE
-        batch_end = min(batch_start + BATCH_SIZE, len(tasks))
-        batch_tasks = tasks[batch_start:batch_end]
-
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(process_one, t): t for t in batch_tasks}
-            for future in as_completed(futures):
-                r = future.result()
-                if r:
-                    results.append(r)
-                    uid = r['user_id']
-                    user_completed_count[uid] = user_completed_count.get(uid, 0) + 1
-                    if user_completed_count[uid] == 4 and uid not in printed_users:
-                        printed_users.add(uid)
-                        done_users = sum(1 for c in user_completed_count.values() if c >= 4)
-                        err_tag = " [error user]" if r['has_errors'] else ""
-                        log(f"  [{done_users}/{total_users}] user={uid[:20]}{err_tag}")
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(process_one_user, t): t for t in user_tasks}
+        for future in as_completed(futures):
+            r = future.result()
+            if r:
+                results.extend(r)
+                done_users = len(set(x['user_id'] for x in results))
+                err_tag = " [error user]" if r[0]['has_errors'] else ""
+                log(f"  [{done_users}/{total_users}] user={r[0]['user_id'][:20]}{err_tag}")
 
     total_elapsed = time.time() - total_start
 
