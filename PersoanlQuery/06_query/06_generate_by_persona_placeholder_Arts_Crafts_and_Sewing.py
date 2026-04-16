@@ -825,13 +825,26 @@ def main():
             has_acl_err = persona['has_acl_errors']
 
             # 从变体中选择最佳结果
-            selected = select_best_variant(
+            result = select_best_variant(
                 qdata['variants'], attrs, 'acl', target_acl
             )
 
-            if not selected:
-                log(f"    [DEBUG] {acl_level} 所有变体都失败")
+            if result is None:
+                # 收集失败原因
+                reasons = []
+                for variant in qdata['variants']:
+                    query = variant['query']
+                    validation = validate_placeholders(query)
+                    missing = [ph for ph, present in validation.items() if not present]
+                    if missing:
+                        reasons.append(f"缺少占位符: {missing}")
+                    else:
+                        actual = count_which_in_query(query)
+                        reasons.append(f"which数量不匹配(期望{target_acl},实际{actual})")
+                log(f"    [DEBUG] {acl_level} 所有变体都失败: {reasons[:2]}")
                 return None
+
+            selected = result
 
             if qdata.get('is_ground_truth') and has_acl_err and errors:
                 correct_filled = selected['filled_query']
@@ -882,13 +895,26 @@ def main():
             has_ccomp_err = persona['has_ccomp_errors']
 
             # 从变体中选择最佳结果
-            selected = select_best_variant(
+            result = select_best_variant(
                 qdata['variants'], attrs, 'ccomp', target_ccomp
             )
 
-            if not selected:
-                log(f"    [DEBUG] {ccomp_level} 所有变体都失败")
+            if result is None:
+                # 收集失败原因
+                reasons = []
+                for variant in qdata['variants']:
+                    query = variant['query']
+                    validation = validate_placeholders(query)
+                    missing = [ph for ph, present in validation.items() if not present]
+                    if missing:
+                        reasons.append(f"缺少占位符: {missing}")
+                    else:
+                        actual = count_that_in_query(query)
+                        reasons.append(f"that数量不匹配(期望{target_ccomp},实际{actual})")
+                log(f"    [DEBUG] {ccomp_level} 所有变体都失败: {reasons[:2]}")
                 return None
+
+            selected = result
 
             if qdata.get('is_ground_truth') and has_ccomp_err and errors:
                 correct_filled = selected['filled_query']
