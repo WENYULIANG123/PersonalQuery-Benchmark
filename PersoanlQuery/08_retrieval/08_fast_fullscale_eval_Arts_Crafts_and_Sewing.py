@@ -820,22 +820,9 @@ class DenseSearcher:
         if not query_embeddings:
             return []
         query_tensor = torch.from_numpy(np.array(query_embeddings)).float().to(self.device)
-        # 归一化 query embeddings
-        q_norms = np.linalg.norm(query_embeddings, axis=1, keepdims=True)
-        q_norms = np.where(q_norms == 0, 1, q_norms)
-        query_tensor = query_tensor / torch.from_numpy(q_norms).float().to(self.device)
-        # 余弦相似度 = 归一化点积 (cuBLAS 可能不稳定，添加重试)
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                scores = torch.mm(query_tensor, self.embeddings_tensor.T)
-                break
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-                    continue
-                raise
+        # 使用 sentence_transformers 的 util.cos_sim，它有更好的 GPU 处理
+        from sentence_transformers import util
+        scores = util.cos_sim(query_tensor, self.embeddings_tensor)
         results = []
         for i in range(len(query_embeddings)):
             top_scores, top_indices = torch.topk(scores[i], min(top_k, len(self.doc_ids)))
