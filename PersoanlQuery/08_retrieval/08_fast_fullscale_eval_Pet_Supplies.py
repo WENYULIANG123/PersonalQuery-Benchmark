@@ -1958,27 +1958,46 @@ def main():
         for qt, results in all_results_by_type.items():
             all_results_by_category_and_type[(query_category, qt)] = results
 
-        # ========== 该类别的 CORRECT 组间性能比较 ==========
+    # =========================================================
+    # ========== 所有评估完成，开始输出结果 ==========
+    # =========================================================
+    log("\n")
+    log("=" * 100)
+    log(f"========== 评估结果汇总 [{CATEGORY_NAME}] ==========")
+    log("=" * 100)
+
+    # ========== 输出每个类别的结果 ==========
+    for query_category in QUERY_CATEGORIES:
+        all_results_by_type = {
+            'correct': all_results_by_category_and_type.get((query_category, 'correct'), []),
+            'noisy': all_results_by_category_and_type.get((query_category, 'noisy'), [])
+        }
+
+        log("\n" + "=" * 80)
+        log(f"========== {query_category.upper()} 评估结果 ==========")
+        log("=" * 80)
+
+        # 该类别的 CORRECT 组间性能比较
         if all_results_by_type.get('correct'):
             print_summary_table_wide(all_results_by_type['correct'], f'{query_category.upper()}-CORRECT')
 
-        # ========== 该类别的 NOISY 组间性能比较 ==========
+        # 该类别的 NOISY 组间性能比较
         if all_results_by_type.get('noisy'):
             print_summary_table_wide(all_results_by_type['noisy'], f'{query_category.upper()}-NOISY')
 
-        # ========== 该类别的 CORRECT vs NOISY 配对比较 ==========
+        # 该类别的 CORRECT vs NOISY 配对比较
         if all_results_by_type.get('noisy') and all_results_by_type.get('correct'):
             print_query_type_comparison(all_results_by_type, k_values)
 
-        # ========== 该类别的 OLS回归分析 (CORRECT 版本) ==========
+        # 该类别的 OLS回归分析 (CORRECT 版本)
         if all_results_by_type.get('correct'):
             run_ols_group_analysis(all_results_by_type['correct'])
 
-        # ========== 该类别的 Paired Difference 分析 (CORRECT 版本) ==========
+        # 该类别的 Paired Difference 分析 (CORRECT 版本)
         if all_results_by_type.get('correct'):
             run_paired_difference_analysis(all_results_by_type['correct'])
 
-        # ========== 该类别的纯效应回归 (CORRECT 版本) ==========
+        # 该类别的纯效应回归 (CORRECT 版本)
         if all_results_by_type.get('correct'):
             run_group_pure_effect_regression(all_results_by_type['correct'])
 
