@@ -1872,6 +1872,7 @@ def print_query_type_comparison(all_results_by_type: Dict[str, List[Dict]], k_va
 def main():
     log("=" * 60)
     log(f"快速全量评估 - 多检索器 + ACL/CCOMP 双类别 + 交叉对比")
+    log(f"类别: {CATEGORY_NAME}")
     log("=" * 60)
 
     if torch.cuda.is_available():
@@ -2048,6 +2049,7 @@ def main():
     with open(output_file, 'w') as f:
         json.dump({
             'timestamp': datetime.now().isoformat(),
+            'category_name': CATEGORY_NAME,
             'query_types': QUERY_TYPES,
             'query_categories': QUERY_CATEGORIES,
             'results_by_category_and_type': sanitize_for_json(all_results_by_category_and_type),
