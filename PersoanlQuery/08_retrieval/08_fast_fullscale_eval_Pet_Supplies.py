@@ -217,7 +217,8 @@ def load_raw_queries(query_category: str = 'acl') -> Tuple[Dict, List[int], str]
                         'query': query,
                         'asin': asin,
                         'word_count': word_count,
-                        f'{GROUP_FIELD}_ratio': 0.0
+                        f'{GROUP_FIELD}_ratio': 0.0,
+                        GROUP_FIELD: gv
                     })
         else:
             gv = item.get(f'target_{GROUP_FIELD}', item.get(GROUP_FIELD, 0))
@@ -230,7 +231,8 @@ def load_raw_queries(query_category: str = 'acl') -> Tuple[Dict, List[int], str]
                     'query': query,
                     'asin': asin,
                     'word_count': word_count,
-                    f'{GROUP_FIELD}_ratio': group_ratio
+                    f'{GROUP_FIELD}_ratio': group_ratio,
+                    GROUP_FIELD: gv
                 })
 
     return groups_dict, UNIQUE_GROUPS, GROUP_FIELD
@@ -824,6 +826,14 @@ class BM25Searcher:
 
 # ============ 评估 ============
 def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = 'correct', query_category: str = 'acl') -> Dict:
+    global GROUP_FIELD, UNIQUE_GROUPS
+    # 确保 GROUP_FIELD 与 query_category 一致
+    GROUP_FIELD = query_category
+    # 清理 CUDA 缓存，避免 cuBLAS 上下文冲突
+    import torch
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
     log(f"\n{'='*60}")
     log(f"检索器: {retriever_name.upper()} (密集) - {query_category.upper()}/{query_type.upper()}")
     log(f"{'='*60}")
@@ -989,6 +999,13 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_gr
                 'metrics': compute_average_metrics(metrics_list, k_values)
             }
 
+    # 显式释放 GPU 内存
+    del embeddings
+    del searcher
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
     return {
         'retriever': retriever_name, 'dim': dim, 'type': 'dense', 'num_users': len(matched_users),
         'num_queries': len(all_metrics), 'eval_time_seconds': eval_time,
@@ -1002,6 +1019,9 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_gr
     }
 
 def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = 'correct', query_category: str = 'acl') -> Dict:
+    global GROUP_FIELD, UNIQUE_GROUPS
+    # 确保 GROUP_FIELD 与 query_category 一致
+    GROUP_FIELD = query_category
     log(f"\n{'='*60}")
     log(f"检索器: BM25 (稀疏) - {query_category.upper()}/{query_type.upper()}")
     log(f"{'='*60}")
@@ -1112,9 +1132,9 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: L
                 idf_group_cross[(label, group)].append(metrics)
                 break
 
-        if (user_idx + 1) % 100 == 0:
+        if (i + 1) % 100 == 0:
             elapsed = time.time() - eval_start
-            log(f"    进度: {user_idx+1}/{len(matched_users)} ({100*(user_idx+1)/len(matched_users):.1f}%)")
+            log(f"    进度: {i+1}/{len(all_results)} ({100*(i+1)/len(all_results):.1f}%)")
 
     eval_time = time.time() - eval_start
     log(f"  评估完成，总耗时: {eval_time:.1f}秒")
@@ -1388,6 +1408,7 @@ def print_summary_table_long(all_results: List[Dict], query_type: str = 'CORRECT
 # ============ 分层分析：IDF × CCOMP ============
 def run_ols_group_analysis(all_results: List[Dict]):
     """OLS回归分析: 控制IDF、查询长度、词汇复杂度后，检验acl/ccomp效应是否独立"""
+    global GROUP_FIELD
     log("\n" + "=" * 80)
     log(f"6C. OLS回归分析: {GROUP_FIELD.upper()}效应是否独立于IDF等混淆因素")
     log("=" * 80)
@@ -1408,6 +1429,13 @@ def run_ols_group_analysis(all_results: List[Dict]):
         return
 
     df = pd.DataFrame(all_records)
+
+    # 检查 GROUP_FIELD 是否存在于 DataFrame 中
+    if GROUP_FIELD not in df.columns:
+        log(f"  (分组字段 '{GROUP_FIELD}' 不存在于数据中，跳过 OLS 分析)")
+        log(f"  可用列: {list(df.columns)}")
+        return
+
     # 动态阈值：使用中位数分组
     threshold = UNIQUE_GROUPS[len(UNIQUE_GROUPS) // 2] if UNIQUE_GROUPS else 2
     df['group_high'] = (df[GROUP_FIELD] >= threshold).astype(int)
@@ -1492,6 +1520,7 @@ def run_ols_group_analysis(all_results: List[Dict]):
 # ============ Paired Difference 分析 ============
 def run_paired_difference_analysis(all_results: List[Dict]):
     """Paired Difference 分析：比较两个极端版本（低 vs 高）的检索性能差异"""
+    global GROUP_FIELD
     log("\n" + "=" * 80)
     log(f"{GROUP_FIELD.upper()} Paired Difference 分析 (极端版本: {GROUP_FIELD}=0 vs {GROUP_FIELD}=max)")
     log("=" * 80)
@@ -1632,6 +1661,7 @@ def run_group_pure_effect_regression(all_results: List[Dict]):
     - diff_length 系数 = 长度每多 1 词，P@10 变化多少
     - diff_idf 系数 = IDF 每多 1，P@10 变化多少
     """
+    global GROUP_FIELD
     log("\n" + "=" * 80)
     log(f"{GROUP_FIELD.upper()} 纯效应回归分析 (控制 diff_length + diff_idf)")
     log("=" * 80)
@@ -1769,7 +1799,7 @@ def run_group_pure_effect_regression(all_results: List[Dict]):
 
 
 # ============ 主流程 ============
-def print_query_type_comparison(all_results_by_type: Dict[str, List[Dict]], k_values: List[int]):
+def print_query_type_comparison(all_results_by_type: Dict[str, List[Dict]], k_values: List[int], category_name: str = ''):
     """打印 correct vs noisy 配对比较表（宽格式）
 
     对于每个 noisy 查询，找到其同 CCOMP 级别的 correct 查询进行配对
@@ -1777,7 +1807,7 @@ def print_query_type_comparison(all_results_by_type: Dict[str, List[Dict]], k_va
     输出宽格式表格，包含所有指标
     """
     log("\n" + "=" * 100)
-    log(f"CORRECT vs NOISY 配对比较（宽格式 | 基于 (user_id, asin, {GROUP_FIELD.upper()}) 匹配）")
+    log(f"{category_name} CORRECT vs NOISY 配对比较（宽格式 | 基于 (user_id, asin, {GROUP_FIELD.upper()}) 匹配）")
     log("=" * 100)
 
     # 获取所有检索器
@@ -1886,6 +1916,8 @@ def main():
     all_results_by_category = {}
 
     for query_category in QUERY_CATEGORIES:
+        global GROUP_FIELD
+        GROUP_FIELD = query_category
         log("\n" + "=" * 80)
         log(f"========== 开始评估 {query_category.upper()} ==========")
         log("=" * 80)
@@ -1968,6 +2000,8 @@ def main():
 
     # ========== 输出每个类别的结果 ==========
     for query_category in QUERY_CATEGORIES:
+        # 确保 GROUP_FIELD 与当前 query_category 一致
+        GROUP_FIELD = query_category
         all_results_by_type = {
             'correct': all_results_by_category_and_type.get((query_category, 'correct'), []),
             'noisy': all_results_by_category_and_type.get((query_category, 'noisy'), [])
@@ -1979,15 +2013,15 @@ def main():
 
         # 该类别的 CORRECT 组间性能比较
         if all_results_by_type.get('correct'):
-            print_summary_table_wide(all_results_by_type['correct'], f'{query_category.upper()}-CORRECT')
+            print_summary_table_wide(all_results_by_type['correct'], f'{CATEGORY_NAME} {query_category.upper()}-CORRECT')
 
         # 该类别的 NOISY 组间性能比较
         if all_results_by_type.get('noisy'):
-            print_summary_table_wide(all_results_by_type['noisy'], f'{query_category.upper()}-NOISY')
+            print_summary_table_wide(all_results_by_type['noisy'], f'{CATEGORY_NAME} {query_category.upper()}-NOISY')
 
         # 该类别的 CORRECT vs NOISY 配对比较
         if all_results_by_type.get('noisy') and all_results_by_type.get('correct'):
-            print_query_type_comparison(all_results_by_type, k_values)
+            print_query_type_comparison(all_results_by_type, k_values, CATEGORY_NAME)
 
         # 该类别的 OLS回归分析 (CORRECT 版本)
         if all_results_by_type.get('correct'):
