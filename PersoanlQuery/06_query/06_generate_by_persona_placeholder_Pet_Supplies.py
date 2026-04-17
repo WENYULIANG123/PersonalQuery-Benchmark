@@ -25,6 +25,7 @@ CATEGORY = "Pet_Supplies"
 ACL_USER_PROFILES_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/Pet_Supplies/acl_user_profiles.json'
 CCOMP_USER_PROFILES_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/Pet_Supplies/ccomp_user_profiles.json'
 ATTR_DENSITY_PROFILES_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/Pet_Supplies/attr_density_user_profiles.json'
+ATTR_VALUES_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction/Pet_Supplies/attributes_Pet_Supplies.json'
 USER_ERROR_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/Pet_Supplies/acl_ccomp_error.json'
 ACL_OUTPUT_FILE = '/fs04/ar57/wenyu/result/personal_query/06_query/Pet_Supplies/acl_query.json'
 CCOMP_OUTPUT_FILE = '/fs04/ar57/wenyu/result/personal_query/06_query/Pet_Supplies/ccomp_query.json'
@@ -132,7 +133,7 @@ def build_acl_prompt(query_level: int, attrs: dict, correct_words: list = None) 
 
     # 构建正确词 section
     if correct_words:
-        correct_words_section = "Correct words that MUST appear in the query:\n" + "\n".join(f"- {w}" for w in correct_words) + "\n"
+        correct_words_section = "Correct words that SHOULD appear in the query if they can fit naturally:\n- " + "\n- ".join(correct_words) + "\n"
     else:
         correct_words_section = ""
 
@@ -148,9 +149,42 @@ def build_acl_prompt(query_level: int, attrs: dict, correct_words: list = None) 
     return system_base, user_content
 
 
-def build_acl_batch_prompt(attrs: dict, correct_words: list = None) -> tuple:
+def build_acl_batch_prompt(attrs: dict, correct_words: list = None, groundtruth_level: int = None) -> tuple:
     """为 ACL 批量生成构建 prompt（K=0,1,2,3 一次返回）
 
+    attrs: 属性字典 {'A1': ..., 'A2': ..., 'A3': ..., 'A4': ..., 'A5': ...}
+    correct_words: 用户的正确词列表，如果为 None 则不包含
+    groundtruth_level: groundtruth 级别，如果为 None 则不包含
+
+    Returns: (system_base, user_content)
+    """
+    system_base = ACL_SYSTEM_BASE
+
+    # 构建正确词 section
+    if correct_words and groundtruth_level is not None:
+        words_list = "\n- ".join(correct_words)
+        correct_words_section = f"For level {groundtruth_level} (groundtruth level only), try to naturally incorporate these USER CORRECT WORDS if they fit. The 'that'/'which' keywords used for CCOMP/ACL sentence structure are NOT user correct words - do NOT include them in used_correct_words. If the user words cannot fit naturally, simply skip them. Do NOT return IMPOSSIBLE:\n- {words_list}\n"
+    elif correct_words:
+        correct_words_section = ""
+    else:
+        correct_words_section = ""
+
+    user_content = _ACL_PROMPTS["user_content_acl_batch"].format(
+        A1=attrs.get('A1', ''),
+        A2=attrs.get('A2', ''),
+        A3=attrs.get('A3', ''),
+        A4=attrs.get('A4', ''),
+        A5=attrs.get('A5', ''),
+        correct_words_section=correct_words_section
+    )
+
+    return system_base, user_content
+
+
+def build_acl_single_prompt(level: int, attrs: dict, correct_words: list = None) -> tuple:
+    """为 ACL 单个级别构建 prompt
+
+    level: 0, 1, 2, 3
     attrs: 属性字典 {'A1': ..., 'A2': ..., 'A3': ..., 'A4': ..., 'A5': ...}
     correct_words: 用户的正确词列表，如果为 None 则不包含
 
@@ -160,11 +194,12 @@ def build_acl_batch_prompt(attrs: dict, correct_words: list = None) -> tuple:
 
     # 构建正确词 section
     if correct_words:
-        correct_words_section = "Correct words that MUST appear in the queries:\n" + "\n".join(f"- {w}" for w in correct_words) + "\n"
+        correct_words_section = "Correct words that SHOULD appear in the query if they can fit naturally:\n- " + "\n- ".join(correct_words) + "\n"
     else:
         correct_words_section = ""
 
-    user_content = _ACL_PROMPTS["user_content_acl_batch"].format(
+    user_content = _ACL_PROMPTS["user_content_acl_single"].format(
+        level=level,
         A1=attrs.get('A1', ''),
         A2=attrs.get('A2', ''),
         A3=attrs.get('A3', ''),
@@ -189,7 +224,7 @@ def build_ccomp_prompt(query_level: int, attrs: dict, correct_words: list = None
 
     # 构建正确词 section
     if correct_words:
-        correct_words_section = "Correct words that MUST appear in the query:\n" + "\n".join(f"- {w}" for w in correct_words) + "\n"
+        correct_words_section = "Correct words that SHOULD appear in the query if they can fit naturally:\n- " + "\n- ".join(correct_words) + "\n"
     else:
         correct_words_section = ""
 
@@ -205,19 +240,23 @@ def build_ccomp_prompt(query_level: int, attrs: dict, correct_words: list = None
     return system_base, user_content
 
 
-def build_ccomp_batch_prompt(attrs: dict, correct_words: list = None) -> tuple:
+def build_ccomp_batch_prompt(attrs: dict, correct_words: list = None, groundtruth_level: int = None) -> tuple:
     """为 CCOMP 批量生成构建 prompt（K=0,1,2,3 一次返回）
 
     attrs: 属性字典 {'A1': ..., 'A2': ..., 'A3': ..., 'A4': ..., 'A5': ...}
     correct_words: 用户的正确词列表，如果为 None 则不包含
+    groundtruth_level: groundtruth 级别，如果为 None 则不包含
 
     Returns: (system_base, user_content)
     """
     system_base = CCOMP_SYSTEM_BASE
 
     # 构建正确词 section
-    if correct_words:
-        correct_words_section = "Correct words that MUST appear in the queries:\n" + "\n".join(f"- {w}" for w in correct_words) + "\n"
+    if correct_words and groundtruth_level is not None:
+        words_list = "\n- ".join(correct_words)
+        correct_words_section = f"For level {groundtruth_level} (groundtruth level only), try to naturally incorporate these USER CORRECT WORDS if they fit. The 'that'/'which' keywords used for CCOMP/ACL sentence structure are NOT user correct words - do NOT include them in used_correct_words. If the user words cannot fit naturally, simply skip them. Do NOT return IMPOSSIBLE:\n- {words_list}\n"
+    elif correct_words:
+        correct_words_section = ""
     else:
         correct_words_section = ""
 
@@ -232,7 +271,26 @@ def build_ccomp_batch_prompt(attrs: dict, correct_words: list = None) -> tuple:
 
     return system_base, user_content
 
-    user_content = _CCOMP_PROMPTS[f"user_content_ccomp_{query_level}"].format(
+
+def build_ccomp_single_prompt(level: int, attrs: dict, correct_words: list = None) -> tuple:
+    """为 CCOMP 单个级别构建 prompt
+
+    level: 0, 1, 2, 3
+    attrs: 属性字典 {'A1': ..., 'A2': ..., 'A3': ..., 'A4': ..., 'A5': ...}
+    correct_words: 用户的正确词列表，如果为 None 则不包含
+
+    Returns: (system_base, user_content)
+    """
+    system_base = CCOMP_SYSTEM_BASE
+
+    # 构建正确词 section
+    if correct_words:
+        correct_words_section = "Correct words that SHOULD appear in the query if they can fit naturally:\n- " + "\n- ".join(correct_words) + "\n"
+    else:
+        correct_words_section = ""
+
+    user_content = _CCOMP_PROMPTS["user_content_ccomp_single"].format(
+        level=level,
         A1=attrs.get('A1', ''),
         A2=attrs.get('A2', ''),
         A3=attrs.get('A3', ''),
@@ -470,12 +528,20 @@ def parse_batch_query_response(text_content: str, query_type: str) -> dict:
         for item in data:
             if isinstance(item, dict) and 'level' in item:
                 level = item['level']
+                # 支持字符串或整数类型的 level
+                if isinstance(level, str):
+                    try:
+                        level = int(level)
+                    except (ValueError, TypeError):
+                        continue
                 query = item.get('query', '').strip()
+                used_correct_words = item.get('used_correct_words', [])
                 if query and level in [0, 1, 2, 3]:
                     result[level] = {
                         'query': query,
                         'word_count': count_words(query),
                         'attrs_used': item.get('attrs_used', {}),
+                        'used_correct_words': used_correct_words if isinstance(used_correct_words, list) else [],
                     }
 
         if not result:
@@ -570,6 +636,24 @@ def is_pure_punctuation_change(orig: str, corr: str) -> bool:
     return False
 
 
+def is_apostrophe_only_change(orig: str, corr: str) -> bool:
+    """检查是否只是撇号差异（如 daughter's vs daughters）"""
+    # 移除撇号后比较
+    orig_clean = orig.replace("'", "").replace("'", "")
+    corr_clean = corr.replace("'", "").replace("'", "")
+    # 如果移除撇号后相同，则是撇号差异
+    if orig_clean.lower() == corr_clean.lower():
+        return True
+    return False
+
+
+def is_case_only_change(orig: str, corr: str) -> bool:
+    """检查是否只是大小写差异（如 I vs i）"""
+    if orig.lower() == corr.lower() and orig != corr:
+        return True
+    return False
+
+
 def filter_error_patterns(error_patterns: list) -> list:
     """过滤掉不需要的错误类型"""
     if not error_patterns:
@@ -590,6 +674,10 @@ def filter_error_patterns(error_patterns: list) -> list:
         if is_pure_suffix_change(orig, corr):
             continue
         if is_pure_punctuation_change(orig, corr):
+            continue
+        if is_apostrophe_only_change(orig, corr):
+            continue
+        if is_case_only_change(orig, corr):
             continue
 
         filtered.append(ep)
@@ -631,7 +719,7 @@ def main():
         ccomp_user_profiles = json.load(f)
     log(f"加载了 {len(ccomp_user_profiles)} 个CCOMP用户画像")
 
-    # 加载 attr_density 用户画像
+    # 加载 attr_density 用户画像（用于 words_per_attribute）
     log(f"加载attr_density用户画像 from {ATTR_DENSITY_PROFILES_FILE}...")
     with open(ATTR_DENSITY_PROFILES_FILE, 'r') as f:
         attr_density_profiles = json.load(f)
@@ -642,6 +730,20 @@ def main():
         if uid and wpa is not None:
             user_wpa_map[uid] = float(wpa)
     log(f"加载了 {len(user_wpa_map)} 个attr_density用户画像")
+
+    # 加载属性值文件（用于 A1-A5）
+    log(f"加载属性值 from {ATTR_VALUES_FILE}...")
+    with open(ATTR_VALUES_FILE, 'r') as f:
+        attr_values_data = json.load(f)
+    user_prod_map = {}
+    if isinstance(attr_values_data, dict) and 'products' in attr_values_data:
+        for p in attr_values_data['products']:
+            uid = p.get('user_id')
+            if uid:
+                if uid not in user_prod_map:
+                    user_prod_map[uid] = []
+                user_prod_map[uid].append(p)
+    log(f"加载了 {len(user_prod_map)} 个用户的属性产品")
 
     # 加载用户错误画像
     log(f"加载用户错误画像 from {USER_ERROR_FILE}...")
@@ -675,11 +777,11 @@ def main():
         acl_profile = acl_profile_map[uid]
         ccomp_profile = ccomp_profile_map[uid]
 
-        acl_products = acl_profile.get('products', [])
-        ccomp_products = ccomp_profile.get('products', [])
-        if not acl_products or not ccomp_products:
+        # 使用新的attributes文件获取产品属性
+        user_products = user_prod_map.get(uid, [])
+        if not user_products:
             continue
-        prod = acl_products[0]
+        prod = user_products[0]
 
         words_per_attribute = user_wpa_map.get(uid)
         if words_per_attribute is None:
@@ -806,21 +908,19 @@ def main():
         acl_results = []
         ccomp_results = []
 
-        # ========== ACL 批量查询（1次请求生成 K=0,1,2,3）==========
-        # 如果用户有 ACL 错误，传入正确词（用于 ground_truth）
-        acl_correct_words = None
-        if persona['has_acl_errors'] and errors and errors.get('acl'):
-            acl_correct_words = [ep['corrected'] for ep in errors['acl'][:10] if ep.get('corrected')]
-
-        system_base, user_content = build_acl_batch_prompt(attrs, correct_words=acl_correct_words)
+        # ========== ACL 批量查询（K=0,1,2,3）==========
+        correct_words = [ep['corrected'] for ep in errors['acl'][:10] if ep.get('corrected')] if persona['has_acl_errors'] and errors and errors.get('acl') else None
+        system_base, user_content = build_acl_batch_prompt(attrs, correct_words=correct_words, groundtruth_level=ground_truth_acl if persona['has_acl_errors'] and correct_words else None)
         response = call_llm(user_content, system_base=system_base, is_acl=True)
 
         # 解析批量结果
         batch_results = parse_batch_query_response(response, 'acl')
+
+        # 存储结果到 dict
+        acl_results_dict = {}
         if batch_results:
             for acl_level in range(4):
                 query_key = f"acl_{acl_level}"
-                is_ground_truth = (acl_level == ground_truth_acl)
 
                 if acl_level not in batch_results:
                     log(f"    [DEBUG] {query_key} 缺失，user={uid}")
@@ -829,6 +929,7 @@ def main():
                 parsed = batch_results[acl_level]
                 query = parsed['query']
                 attrs_used = parsed.get('attrs_used', {})
+                used_correct_words = parsed.get('used_correct_words', [])
 
                 # 验证 which 数量
                 actual_which = count_which_in_query(query)
@@ -836,79 +937,93 @@ def main():
                     log(f"    [DEBUG] {query_key} which数量不匹配(期望{acl_level},实际{actual_which})")
                     continue
 
-                # 如果是 ground_truth 且有错误，生成 noisy 版本
-                if is_ground_truth and persona['has_acl_errors'] and errors and errors.get('acl'):
-                    correct_words = [ep['corrected'] for ep in errors['acl'][:10] if ep.get('corrected')]
-                    if correct_words:
-                        noisy_query = inject_errors(query, errors.get('acl', []))
-                        acl_results.append({
-                            'user_id': uid,
-                            'asin': persona['asin'],
-                            'target_acl': acl_level,
-                            'acl_sentence_ratio': persona.get('acl_sentence_ratio', 0.0),
-                            'density_label': persona.get('density_label', 'simple'),
-                            'length_label': persona.get('length_label', 'medium'),
-                            'words_per_acl': persona.get('words_per_acl'),
-                            'ground_truth_acl': ground_truth_acl,
-                            'target_length': persona.get('target_length'),
-                            'has_errors': True,
-                            'correct_query': query,
-                            'noisy_query': noisy_query,
-                            'attrs_used': attrs_used,
-                            'error_words': [{'correct': ep['corrected'], 'error': ep['original'], 'error_type': ep.get('error_type', 'unknown')} for ep in errors.get('acl', [])[:10]],
-                            'word_count': count_words(query),
-                            'is_ground_truth': True,
-                        })
-                    else:
-                        acl_results.append({
-                            'user_id': uid,
-                            'asin': persona['asin'],
-                            'target_acl': acl_level,
-                            'acl_sentence_ratio': persona.get('acl_sentence_ratio', 0.0),
-                            'density_label': persona.get('density_label', 'simple'),
-                            'length_label': persona.get('length_label', 'medium'),
-                            'words_per_acl': persona.get('words_per_acl'),
-                            'ground_truth_acl': ground_truth_acl,
-                            'target_length': persona.get('target_length'),
-                            'has_errors': False,
-                            'query': query,
-                            'attrs_used': attrs_used,
-                            'word_count': count_words(query),
-                            'is_ground_truth': is_ground_truth,
-                        })
-                else:
-                    acl_results.append({
-                        'user_id': uid,
-                        'asin': persona['asin'],
-                        'target_acl': acl_level,
-                        'acl_sentence_ratio': persona.get('acl_sentence_ratio', 0.0),
-                        'density_label': persona.get('density_label', 'simple'),
-                        'length_label': persona.get('length_label', 'medium'),
-                        'words_per_acl': persona.get('words_per_acl'),
-                        'ground_truth_acl': ground_truth_acl,
-                        'target_length': persona.get('target_length'),
-                        'has_errors': persona['has_acl_errors'],
-                        'query': query,
-                        'attrs_used': attrs_used,
-                        'word_count': count_words(query),
-                        'is_ground_truth': is_ground_truth,
-                    })
+                acl_results_dict[acl_level] = {
+                    'query': query,
+                    'attrs_used': attrs_used,
+                    'used_correct_words': used_correct_words,
+                }
 
-        # ========== CCOMP 批量查询（1次请求生成 K=0,1,2,3）==========
-        # 如果用户有 CCOMP 错误，传入正确词（用于 ground_truth）
-        ccomp_correct_words = None
-        if persona['has_ccomp_errors'] and errors and errors.get('ccomp'):
-            ccomp_correct_words = [ep['corrected'] for ep in errors['ccomp'][:10] if ep.get('corrected')]
+        # 构建最终结果
+        for acl_level in range(4):
+            if acl_level not in acl_results_dict:
+                continue
 
-        system_base, user_content = build_ccomp_batch_prompt(attrs, correct_words=ccomp_correct_words)
+            is_ground_truth = (acl_level == ground_truth_acl)
+            entry = acl_results_dict[acl_level]
+            query = entry['query']
+            attrs_used = entry.get('attrs_used', {})
+            used_correct_words = entry.get('used_correct_words', [])
+
+            if is_ground_truth and 'noisy_query' in entry:
+                acl_results.append({
+                    'user_id': uid,
+                    'asin': persona['asin'],
+                    'target_acl': acl_level,
+                    'acl_sentence_ratio': persona.get('acl_sentence_ratio', 0.0),
+                    'density_label': persona.get('density_label', 'simple'),
+                    'length_label': persona.get('length_label', 'medium'),
+                    'words_per_acl': persona.get('words_per_acl'),
+                    'ground_truth_acl': ground_truth_acl,
+                    'target_length': persona.get('target_length'),
+                    'has_errors': True,
+                    'correct_query': query,
+                    'noisy_query': entry['noisy_query'],
+                    'attrs_used': attrs_used,
+                    'used_correct_words': used_correct_words,
+                    'error_words': [{'correct': ep['corrected'], 'error': ep['original'], 'error_type': ep.get('error_type', 'unknown')} for ep in errors.get('acl', [])[:10]],
+                    'word_count': count_words(query),
+                    'is_ground_truth': True,
+                })
+            elif is_ground_truth:
+                acl_results.append({
+                    'user_id': uid,
+                    'asin': persona['asin'],
+                    'target_acl': acl_level,
+                    'acl_sentence_ratio': persona.get('acl_sentence_ratio', 0.0),
+                    'density_label': persona.get('density_label', 'simple'),
+                    'length_label': persona.get('length_label', 'medium'),
+                    'words_per_acl': persona.get('words_per_acl'),
+                    'ground_truth_acl': ground_truth_acl,
+                    'target_length': persona.get('target_length'),
+                    'has_errors': False,
+                    'query': query,
+                    'attrs_used': attrs_used,
+                    'used_correct_words': used_correct_words,
+                    'word_count': count_words(query),
+                    'is_ground_truth': True,
+                })
+            else:
+                acl_results.append({
+                    'user_id': uid,
+                    'asin': persona['asin'],
+                    'target_acl': acl_level,
+                    'acl_sentence_ratio': persona.get('acl_sentence_ratio', 0.0),
+                    'density_label': persona.get('density_label', 'simple'),
+                    'length_label': persona.get('length_label', 'medium'),
+                    'words_per_acl': persona.get('words_per_acl'),
+                    'ground_truth_acl': ground_truth_acl,
+                    'target_length': persona.get('target_length'),
+                    'has_errors': persona['has_acl_errors'],
+                    'query': query,
+                    'attrs_used': attrs_used,
+                    'used_correct_words': used_correct_words,
+                    'word_count': count_words(query),
+                    'is_ground_truth': is_ground_truth,
+                })
+
+        # ========== CCOMP 批量查询（K=0,1,2,3）==========
+        correct_words = [ep['corrected'] for ep in errors['ccomp'][:10] if ep.get('corrected')] if persona['has_ccomp_errors'] and errors and errors.get('ccomp') else None
+        system_base, user_content = build_ccomp_batch_prompt(attrs, correct_words=correct_words, groundtruth_level=ground_truth_ccomp if persona['has_ccomp_errors'] and correct_words else None)
         response = call_llm(user_content, system_base=system_base, is_acl=False)
 
         # 解析批量结果
         batch_results = parse_batch_query_response(response, 'ccomp')
+
+        # 存储结果到 dict
+        ccomp_results_dict = {}
         if batch_results:
             for ccomp_level in range(4):
                 query_key = f"ccomp_{ccomp_level}"
-                is_ground_truth = (ccomp_level == ground_truth_ccomp)
 
                 if ccomp_level not in batch_results:
                     log(f"    [DEBUG] {query_key} 缺失，user={uid}")
@@ -917,6 +1032,7 @@ def main():
                 parsed = batch_results[ccomp_level]
                 query = parsed['query']
                 attrs_used = parsed.get('attrs_used', {})
+                used_correct_words = parsed.get('used_correct_words', [])
 
                 # 验证 that 数量
                 actual_that = count_that_in_query(query)
@@ -924,63 +1040,79 @@ def main():
                     log(f"    [DEBUG] {query_key} that数量不匹配(期望{ccomp_level},实际{actual_that})")
                     continue
 
-                # 如果是 ground_truth 且有错误，生成 noisy 版本
-                if is_ground_truth and persona['has_ccomp_errors'] and errors and errors.get('ccomp'):
-                    correct_words = [ep['corrected'] for ep in errors['ccomp'][:10] if ep.get('corrected')]
-                    if correct_words:
-                        noisy_query = inject_errors(query, errors.get('ccomp', []))
-                        ccomp_results.append({
-                            'user_id': uid,
-                            'asin': persona['asin'],
-                            'target_ccomp': ccomp_level,
-                            'ccomp_sentence_ratio': persona.get('ccomp_sentence_ratio', 0.0),
-                            'density_label': persona.get('density_label', 'simple'),
-                            'length_label': persona.get('length_label', 'medium'),
-                            'words_per_ccomp': persona.get('words_per_ccomp'),
-                            'ground_truth_ccomp': ground_truth_ccomp,
-                            'target_length': persona.get('target_length'),
-                            'has_errors': True,
-                            'correct_query': query,
-                            'noisy_query': noisy_query,
-                            'attrs_used': attrs_used,
-                            'error_words': [{'correct': ep['corrected'], 'error': ep['original'], 'error_type': ep.get('error_type', 'unknown')} for ep in errors.get('ccomp', [])[:10]],
-                            'word_count': count_words(query),
-                            'is_ground_truth': True,
-                        })
-                    else:
-                        ccomp_results.append({
-                            'user_id': uid,
-                            'asin': persona['asin'],
-                            'target_ccomp': ccomp_level,
-                            'ccomp_sentence_ratio': persona.get('ccomp_sentence_ratio', 0.0),
-                            'density_label': persona.get('density_label', 'simple'),
-                            'length_label': persona.get('length_label', 'medium'),
-                            'words_per_ccomp': persona.get('words_per_ccomp'),
-                            'ground_truth_ccomp': ground_truth_ccomp,
-                            'target_length': persona.get('target_length'),
-                            'has_errors': False,
-                            'query': query,
-                            'attrs_used': attrs_used,
-                            'word_count': count_words(query),
-                            'is_ground_truth': is_ground_truth,
-                        })
-                else:
-                    ccomp_results.append({
-                        'user_id': uid,
-                        'asin': persona['asin'],
-                        'target_ccomp': ccomp_level,
-                        'ccomp_sentence_ratio': persona.get('ccomp_sentence_ratio', 0.0),
-                        'density_label': persona.get('density_label', 'simple'),
-                        'length_label': persona.get('length_label', 'medium'),
-                        'words_per_ccomp': persona.get('words_per_ccomp'),
-                        'ground_truth_ccomp': ground_truth_ccomp,
-                        'target_length': persona.get('target_length'),
-                        'has_errors': persona['has_ccomp_errors'],
-                        'query': query,
-                        'attrs_used': attrs_used,
-                        'word_count': count_words(query),
-                        'is_ground_truth': is_ground_truth,
-                    })
+                ccomp_results_dict[ccomp_level] = {
+                    'query': query,
+                    'attrs_used': attrs_used,
+                    'used_correct_words': used_correct_words,
+                }
+
+        # 构建最终结果
+        for ccomp_level in range(4):
+            if ccomp_level not in ccomp_results_dict:
+                continue
+
+            is_ground_truth = (ccomp_level == ground_truth_ccomp)
+            entry = ccomp_results_dict[ccomp_level]
+            query = entry['query']
+            attrs_used = entry.get('attrs_used', {})
+            used_correct_words = entry.get('used_correct_words', [])
+
+            if is_ground_truth and 'noisy_query' in entry:
+                ccomp_results.append({
+                    'user_id': uid,
+                    'asin': persona['asin'],
+                    'target_ccomp': ccomp_level,
+                    'ccomp_sentence_ratio': persona.get('ccomp_sentence_ratio', 0.0),
+                    'density_label': persona.get('density_label', 'simple'),
+                    'length_label': persona.get('length_label', 'medium'),
+                    'words_per_ccomp': persona.get('words_per_ccomp'),
+                    'ground_truth_ccomp': ground_truth_ccomp,
+                    'target_length': persona.get('target_length'),
+                    'has_errors': True,
+                    'correct_query': query,
+                    'noisy_query': entry['noisy_query'],
+                    'attrs_used': attrs_used,
+                    'used_correct_words': used_correct_words,
+                    'error_words': [{'correct': ep['corrected'], 'error': ep['original'], 'error_type': ep.get('error_type', 'unknown')} for ep in errors.get('ccomp', [])[:10]],
+                    'word_count': count_words(query),
+                    'is_ground_truth': True,
+                })
+            elif is_ground_truth:
+                ccomp_results.append({
+                    'user_id': uid,
+                    'asin': persona['asin'],
+                    'target_ccomp': ccomp_level,
+                    'ccomp_sentence_ratio': persona.get('ccomp_sentence_ratio', 0.0),
+                    'density_label': persona.get('density_label', 'simple'),
+                    'length_label': persona.get('length_label', 'medium'),
+                    'words_per_ccomp': persona.get('words_per_ccomp'),
+                    'ground_truth_ccomp': ground_truth_ccomp,
+                    'target_length': persona.get('target_length'),
+                    'has_errors': False,
+                    'query': query,
+                    'attrs_used': attrs_used,
+                    'used_correct_words': used_correct_words,
+                    'word_count': count_words(query),
+                    'is_ground_truth': True,
+                })
+            else:
+                ccomp_results.append({
+                    'user_id': uid,
+                    'asin': persona['asin'],
+                    'target_ccomp': ccomp_level,
+                    'ccomp_sentence_ratio': persona.get('ccomp_sentence_ratio', 0.0),
+                    'density_label': persona.get('density_label', 'simple'),
+                    'length_label': persona.get('length_label', 'medium'),
+                    'words_per_ccomp': persona.get('words_per_ccomp'),
+                    'ground_truth_ccomp': ground_truth_ccomp,
+                    'target_length': persona.get('target_length'),
+                    'has_errors': persona['has_ccomp_errors'],
+                    'query': query,
+                    'attrs_used': attrs_used,
+                    'used_correct_words': used_correct_words,
+                    'word_count': count_words(query),
+                    'is_ground_truth': is_ground_truth,
+                })
 
         return {'acl': acl_results, 'ccomp': ccomp_results}
 
