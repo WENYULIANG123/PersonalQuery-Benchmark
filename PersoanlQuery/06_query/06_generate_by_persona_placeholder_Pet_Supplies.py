@@ -935,10 +935,12 @@ def main():
         if batch_results:
             for acl_level in range(4):
                 query_key = f"acl_{acl_level}"
+                is_ground_truth = (acl_level == ground_truth_acl)
 
                 if acl_level not in batch_results:
                     log(f"    [DEBUG] {query_key} 缺失，user={uid}")
-                    continue
+                    log(f"    [ERROR] level {acl_level} 缺失，user={uid} 标记为失败")
+                    return None
 
                 parsed = batch_results[acl_level]
                 query = parsed['query']
@@ -949,7 +951,8 @@ def main():
                 actual_which = count_which_in_query(query)
                 if actual_which != acl_level:
                     log(f"    [DEBUG] {query_key} which数量不匹配(期望{acl_level},实际{actual_which})")
-                    continue
+                    log(f"    [ERROR] level {acl_level} 验证失败，user={uid} 标记为失败")
+                    return None
 
                 acl_results_dict[acl_level] = {
                     'query': query,
@@ -1063,10 +1066,12 @@ def main():
         if batch_results:
             for ccomp_level in range(4):
                 query_key = f"ccomp_{ccomp_level}"
+                is_ground_truth = (ccomp_level == ground_truth_ccomp)
 
                 if ccomp_level not in batch_results:
                     log(f"    [DEBUG] {query_key} 缺失，user={uid}")
-                    continue
+                    log(f"    [ERROR] level {ccomp_level} 缺失，user={uid} 标记为失败")
+                    return None
 
                 parsed = batch_results[ccomp_level]
                 query = parsed['query']
@@ -1077,7 +1082,8 @@ def main():
                 actual_that = count_that_in_query(query)
                 if actual_that != ccomp_level:
                     log(f"    [DEBUG] {query_key} that数量不匹配(期望{ccomp_level},实际{actual_that})")
-                    continue
+                    log(f"    [ERROR] level {ccomp_level} 验证失败，user={uid} 标记为失败")
+                    return None
 
                 ccomp_results_dict[ccomp_level] = {
                     'query': query,
