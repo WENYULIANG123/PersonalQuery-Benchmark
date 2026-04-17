@@ -92,7 +92,7 @@ def load_acl_queries() -> Tuple[List[Dict], List[Dict]]:
     """从 acl_query.json 加载所有查询，返回 (correct_queries, noisy_queries)
 
     每个查询结构：
-    - correct_query / filled_query: 正确版本查询
+    - correct_query / filled_query / query: 正确版本查询
     - noisy_query: 含错误版本查询（仅 ground_truth 版本有）
     """
     if not os.path.exists(PERSONA_GENERATED_QUERIES_FILE):
@@ -118,8 +118,8 @@ def load_acl_queries() -> Tuple[List[Dict], List[Dict]]:
             continue
 
         for q in item['queries']:
-            # 正确版本查询：从 correct_query 或 filled_query 获取
-            correct_text = q.get('correct_query', '') or q.get('filled_query', '')
+            # 正确版本查询：从 correct_query 或 filled_query 或 query 获取
+            correct_text = q.get('correct_query', '') or q.get('filled_query', '') or q.get('query', '')
             if correct_text:
                 correct_queries.append({
                     'user_id': user_id,
@@ -148,7 +148,7 @@ def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
     """从 ccomp_query.json 加载所有查询，返回 (correct_queries, noisy_queries)
 
     每个查询结构：
-    - correct_query / filled_query: 正确版本查询
+    - correct_query / filled_query / query: 正确版本查询
     - noisy_query: 含错误版本查询（仅 ground_truth 版本有）
     """
     if not os.path.exists(CCOMP_QUERY_FILE):
@@ -174,8 +174,8 @@ def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
             continue
 
         for q in item['queries']:
-            # 正确版本查询：从 correct_query 或 filled_query 获取
-            correct_text = q.get('correct_query', '') or q.get('filled_query', '')
+            # 正确版本查询：从 correct_query 或 filled_query 或 query 获取
+            correct_text = q.get('correct_query', '') or q.get('filled_query', '') or q.get('query', '')
             if correct_text:
                 correct_queries.append({
                     'user_id': user_id,

@@ -273,24 +273,32 @@ class DenseRetriever:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         model = self._get_model()
-        
+
         with _model_inference_lock:
-            query_embedding = model.encode([query])
-        
+            query_embedding = model.encode(
+                [query],
+                truncation=True,
+                max_length=512
+            )
+
         if isinstance(query_embedding, torch.Tensor):
             query_embedding = query_embedding.cpu().numpy()
-        
+
         return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
-    
+
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using dense vectors with optimized top-k extraction"""
         if not hasattr(self, 'device'):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         model = self._get_model()
-        
+
         with _model_inference_lock:
-            query_embedding = model.encode([query])
+            query_embedding = model.encode(
+                [query],
+                truncation=True,
+                max_length=512
+            )
         
         if isinstance(query_embedding, np.ndarray):
             query_embedding = torch.from_numpy(query_embedding).float().to(self.device)
@@ -375,7 +383,9 @@ class E5Retriever:
             result = model.encode(
                 [text_with_prefix],
                 convert_to_tensor=True,
-                show_progress_bar=False
+                show_progress_bar=False,
+                truncation=True,
+                max_length=512
             )
             log_with_timestamp(f"    [E5_ENC_DEBUG] text len={len(text_with_prefix)}, tokens={num_tokens}, result shape={result.shape}")
             embedding = result[0]
@@ -408,7 +418,9 @@ class E5Retriever:
                 window_embedding = model.encode(
                     [window_text],
                     convert_to_tensor=True,
-                    show_progress_bar=False
+                    show_progress_bar=False,
+                    truncation=True,
+                    max_length=512
                 )[0]
 
                 window_embeddings.append(window_embedding)
@@ -471,25 +483,30 @@ class E5Retriever:
 
     def encode_query(self, query: str) -> np.ndarray:
         """Encode query using E5 embeddings
-        
+
         Args:
             query: Query text
-            
+
         Returns:
             numpy array of shape (embedding_dim,)
         """
         if not hasattr(self, 'device'):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         model = self._get_model()
-        
+
         with _model_inference_lock:
             query_with_prefix = self._add_instruction(query, is_query=True)
-            query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
-        
+            query_embedding = model.encode(
+                [query_with_prefix],
+                convert_to_tensor=True,
+                truncation=True,
+                max_length=512
+            )[0]
+
         if isinstance(query_embedding, torch.Tensor):
             query_embedding = query_embedding.cpu().numpy()
-        
+
         return query_embedding
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
@@ -501,10 +518,15 @@ class E5Retriever:
 
         with _model_inference_lock:
             query_with_prefix = self._add_instruction(query, is_query=True)
-            query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
+            query_embedding = model.encode(
+                [query_with_prefix],
+                convert_to_tensor=True,
+                truncation=True,
+                max_length=512
+            )[0]
 
         query_embedding = query_embedding.to(self.device)
-        
+
         from sentence_transformers import util
         all_scores = [0.0] * len(self.doc_ids)
         
@@ -647,7 +669,8 @@ class BGERetriever:
         texts = [build_document_text(doc, all_metadata) for doc in documents]
 
         # 直接批量编码（debug显示绝大多数文档 < 512 tokens，直接encode即可）
-        batch_size = 2048
+        # 注意：bge-large 模型较大，batch_size 需要适度以避免 CUDA OOM
+        batch_size = 256
         log_with_timestamp(f"  Batch encoding {len(texts)} docs (batch_size={batch_size})...")
 
         all_embeddings = model.encode(
@@ -675,14 +698,19 @@ class BGERetriever:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         model = self._get_model()
-        
+
         with _model_inference_lock:
             query_with_prefix = self._add_instruction(query, is_query=True)
-            query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
-        
+            query_embedding = model.encode(
+                [query_with_prefix],
+                convert_to_tensor=True,
+                truncation=True,
+                max_length=512
+            )[0]
+
         if isinstance(query_embedding, torch.Tensor):
             query_embedding = query_embedding.cpu().numpy()
-        
+
         return query_embedding
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
@@ -694,10 +722,15 @@ class BGERetriever:
 
         with _model_inference_lock:
             query_with_prefix = self._add_instruction(query, is_query=True)
-            query_embedding = model.encode([query_with_prefix], convert_to_tensor=True)[0]
+            query_embedding = model.encode(
+                [query_with_prefix],
+                convert_to_tensor=True,
+                truncation=True,
+                max_length=512
+            )[0]
 
         query_embedding = query_embedding.to(self.device)
-        
+
         from sentence_transformers import util
         scores = util.cos_sim(query_embedding, self.doc_embeddings)[0]
 
@@ -1130,7 +1163,8 @@ class GritLMRetriever:
         if self.model is None:
             log_with_timestamp(f"  Loading GritLM model: {self.model_name}")
             from gritlm import GritLM
-            self.model = GritLM(self.model_name, torch_dtype=torch.bfloat16)
+            # local_files_only=True 确保只使用本地缓存，不尝试网络访问
+            self.model = GritLM(self.model_name, torch_dtype=torch.bfloat16, local_files_only=True)
             log_with_timestamp(f"  GritLM loaded on {self.device}")
             log_with_timestamp(f"  Model name: {self.model_name}")
             log_with_timestamp(f"  HF_HOME: {os.environ.get('HF_HOME', 'not set')}")
@@ -1249,25 +1283,31 @@ class ANCERetriever:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         model = self._get_model()
-        
+
         with _model_inference_lock:
-            query_embedding = model.encode(["query: " + query])
-        
+            query_embedding = model.encode(
+                ["query: " + query]
+            )
+
         if isinstance(query_embedding, torch.Tensor):
             query_embedding = query_embedding.cpu().numpy()
-        
+
         return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
-    
+
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using ANCE embeddings"""
         if not hasattr(self, 'device'):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         model = self._get_model()
-        
+
         with _model_inference_lock:
-            query_embedding = model.encode(["query: " + query])
-        
+            query_embedding = model.encode(
+                ["query: " + query],
+                truncation=True,
+                max_length=512
+            )
+
         if isinstance(query_embedding, np.ndarray):
             query_embedding = torch.from_numpy(query_embedding).float().to(self.device)
         
@@ -1338,24 +1378,30 @@ class STARRetriever:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         model = self._get_model()
-        
+
         with _model_inference_lock:
-            query_embedding = model.encode([query])
-        
+            query_embedding = model.encode(
+                [query]
+            )
+
         if isinstance(query_embedding, torch.Tensor):
             query_embedding = query_embedding.cpu().numpy()
-        
+
         return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using STAR embeddings"""
         if not hasattr(self, 'device'):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         model = self._get_model()
-        
+
         with _model_inference_lock:
-            query_embedding = model.encode([query])
+            query_embedding = model.encode(
+                [query],
+                truncation=True,
+                max_length=512
+            )
         
         if isinstance(query_embedding, np.ndarray):
             query_embedding = torch.from_numpy(query_embedding).float().to(self.device)
@@ -1415,37 +1461,43 @@ class MiniLMRetriever:
         """Encode query to embedding vector"""
         if not hasattr(self, 'device'):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         model = self._get_model()
-        
+
         with _model_inference_lock:
-            query_embedding = model.encode([query])
-        
+            query_embedding = model.encode(
+                [query]
+            )
+
         if isinstance(query_embedding, torch.Tensor):
             query_embedding = query_embedding.cpu().numpy()
-        
+
         return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using MiniLM embeddings"""
         if not hasattr(self, 'device'):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         model = self._get_model()
-        
+
         with _model_inference_lock:
-            query_embedding = model.encode([query])
-        
+            query_embedding = model.encode(
+                [query],
+                truncation=True,
+                max_length=512
+            )
+
         if isinstance(query_embedding, np.ndarray):
             query_embedding = torch.from_numpy(query_embedding).float().to(self.device)
-        
+
         doc_embeddings = self.doc_embeddings
         if isinstance(doc_embeddings, np.ndarray):
             doc_embeddings = torch.from_numpy(doc_embeddings).float().to(query_embedding.device)
         if torch.is_tensor(doc_embeddings):
             if doc_embeddings.device != query_embedding.device:
                 doc_embeddings = doc_embeddings.to(query_embedding.device)
-        
+
         from sentence_transformers import util
         scores = util.cos_sim(query_embedding, doc_embeddings)[0]
         
