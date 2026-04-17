@@ -685,22 +685,36 @@ def filter_error_patterns(error_patterns: list) -> list:
     return filtered
 
 
-def inject_errors(query: str, error_patterns: list) -> str:
-    """将查询中的正确词替换为错误词"""
+def inject_errors(query: str, error_patterns: list) -> tuple:
+    """将查询中的正确词替换为错误词
+
+    Returns: (noisy_query, injected_errors)
+        noisy_query: 替换后的查询
+        injected_errors: 实际被注入的错误列表 [{'correct': ..., 'error': ..., 'error_type': ...}, ...]
+    """
+    import re
+
     if not error_patterns:
-        return query
+        return query, []
 
     filtered_patterns = filter_error_patterns(error_patterns)
     if not filtered_patterns:
-        return query
+        return query, []
 
     result = query
+    injected_errors = []
     for ep in filtered_patterns[:10]:
         orig = ep.get("original", "")
         corr = ep.get("corrected", "")
         if orig and corr:
-            result = re.sub(re.escape(corr), orig, result, flags=re.IGNORECASE)
-    return result
+            # 使用单词边界确保只替换完整单词，不替换子串
+            # 例如 "or" 不会替换 "for" 中的 "or"
+            pattern = r'\b' + re.escape(corr) + r'\b'
+            if re.search(pattern, result, re.IGNORECASE):
+                result = re.sub(pattern, orig, result, flags=re.IGNORECASE)
+                injected_errors.append(ep)
+
+    return result, injected_errors
 
 
 # ========================================
@@ -966,7 +980,7 @@ def main():
             if is_ground_truth and persona['has_acl_errors'] and errors and errors.get('acl'):
                 correct_words = [ep['corrected'] for ep in errors['acl'][:10] if ep.get('corrected')]
                 if correct_words:
-                    noisy_query = inject_errors(query, errors.get('acl', []))
+                    noisy_query, injected_errors = inject_errors(query, errors.get('acl', []))
                     # 只有当实际注入了错误时才生成双版本
                     if noisy_query != query:
                         acl_results.append({
@@ -984,7 +998,7 @@ def main():
                             'noisy_query': noisy_query,
                             'attrs_used': attrs_used,
                             'used_correct_words': used_correct_words,
-                            'error_words': [{'correct': ep['corrected'], 'error': ep['original'], 'error_type': ep.get('error_type', 'unknown')} for ep in errors.get('acl', [])[:10]],
+                            'error_words': injected_errors,
                             'word_count': count_words(query),
                             'is_ground_truth': True,
                         })
@@ -1101,7 +1115,7 @@ def main():
             if is_ground_truth and persona['has_ccomp_errors'] and errors and errors.get('ccomp'):
                 correct_words = [ep['corrected'] for ep in errors['ccomp'][:10] if ep.get('corrected')]
                 if correct_words:
-                    noisy_query = inject_errors(query, errors.get('ccomp', []))
+                    noisy_query, injected_errors = inject_errors(query, errors.get('ccomp', []))
                     # 只有当实际注入了错误时才生成双版本
                     if noisy_query != query:
                         ccomp_results.append({
@@ -1119,7 +1133,7 @@ def main():
                             'noisy_query': noisy_query,
                             'attrs_used': attrs_used,
                             'used_correct_words': used_correct_words,
-                            'error_words': [{'correct': ep['corrected'], 'error': ep['original'], 'error_type': ep.get('error_type', 'unknown')} for ep in errors.get('ccomp', [])[:10]],
+                            'error_words': injected_errors,
                             'word_count': count_words(query),
                             'is_ground_truth': True,
                         })

@@ -685,22 +685,36 @@ def filter_error_patterns(error_patterns: list) -> list:
     return filtered
 
 
-def inject_errors(query: str, error_patterns: list) -> str:
-    """将查询中的正确词替换为错误词"""
+def inject_errors(query: str, error_patterns: list) -> tuple:
+    """将查询中的正确词替换为错误词
+
+    Returns: (noisy_query, injected_errors)
+        noisy_query: 替换后的查询
+        injected_errors: 实际被注入的错误列表 [{'correct': ..., 'error': ..., 'error_type': ...}, ...]
+    """
+    import re
+
     if not error_patterns:
-        return query
+        return query, []
 
     filtered_patterns = filter_error_patterns(error_patterns)
     if not filtered_patterns:
-        return query
+        return query, []
 
     result = query
+    injected_errors = []
     for ep in filtered_patterns[:10]:
         orig = ep.get("original", "")
         corr = ep.get("corrected", "")
         if orig and corr:
-            result = re.sub(re.escape(corr), orig, result, flags=re.IGNORECASE)
-    return result
+            # 使用单词边界确保只替换完整单词，不替换子串
+            # 例如 "or" 不会替换 "for" 中的 "or"
+            pattern = r'\b' + re.escape(corr) + r'\b'
+            if re.search(pattern, result, re.IGNORECASE):
+                result = re.sub(pattern, orig, result, flags=re.IGNORECASE)
+                injected_errors.append(ep)
+
+    return result, injected_errors
 
 
 # ========================================
@@ -954,26 +968,51 @@ def main():
             attrs_used = entry.get('attrs_used', {})
             used_correct_words = entry.get('used_correct_words', [])
 
-            if is_ground_truth and 'noisy_query' in entry:
-                acl_results.append({
-                    'user_id': uid,
-                    'asin': persona['asin'],
-                    'target_acl': acl_level,
-                    'acl_sentence_ratio': persona.get('acl_sentence_ratio', 0.0),
-                    'density_label': persona.get('density_label', 'simple'),
-                    'length_label': persona.get('length_label', 'medium'),
-                    'words_per_acl': persona.get('words_per_acl'),
-                    'ground_truth_acl': ground_truth_acl,
-                    'target_length': persona.get('target_length'),
-                    'has_errors': True,
-                    'correct_query': query,
-                    'noisy_query': entry['noisy_query'],
-                    'attrs_used': attrs_used,
-                    'used_correct_words': used_correct_words,
-                    'error_words': [{'correct': ep['corrected'], 'error': ep['original'], 'error_type': ep.get('error_type', 'unknown')} for ep in errors.get('acl', [])[:10]],
-                    'word_count': count_words(query),
-                    'is_ground_truth': True,
-                })
+            # 如果是 ground_truth 且有错误，生成 noisy 版本
+            if is_ground_truth and persona['has_acl_errors'] and errors and errors.get('acl'):
+                correct_words = [ep['corrected'] for ep in errors['acl'][:10] if ep.get('corrected')]
+                if correct_words:
+                    noisy_query, injected_errors = inject_errors(query, errors.get('acl', []))
+                    # 只有当实际注入了错误时才生成双版本
+                    if noisy_query != query:
+                        acl_results.append({
+                            'user_id': uid,
+                            'asin': persona['asin'],
+                            'target_acl': acl_level,
+                            'acl_sentence_ratio': persona.get('acl_sentence_ratio', 0.0),
+                            'density_label': persona.get('density_label', 'simple'),
+                            'length_label': persona.get('length_label', 'medium'),
+                            'words_per_acl': persona.get('words_per_acl'),
+                            'ground_truth_acl': ground_truth_acl,
+                            'target_length': persona.get('target_length'),
+                            'has_errors': True,
+                            'correct_query': query,
+                            'noisy_query': noisy_query,
+                            'attrs_used': attrs_used,
+                            'used_correct_words': used_correct_words,
+                            'error_words': injected_errors,
+                            'word_count': count_words(query),
+                            'is_ground_truth': True,
+                        })
+                    else:
+                        # 没有实际注入错误，只生成单版本
+                        acl_results.append({
+                            'user_id': uid,
+                            'asin': persona['asin'],
+                            'target_acl': acl_level,
+                            'acl_sentence_ratio': persona.get('acl_sentence_ratio', 0.0),
+                            'density_label': persona.get('density_label', 'simple'),
+                            'length_label': persona.get('length_label', 'medium'),
+                            'words_per_acl': persona.get('words_per_acl'),
+                            'ground_truth_acl': ground_truth_acl,
+                            'target_length': persona.get('target_length'),
+                            'has_errors': False,
+                            'query': query,
+                            'attrs_used': attrs_used,
+                            'used_correct_words': used_correct_words,
+                            'word_count': count_words(query),
+                            'is_ground_truth': True,
+                        })
             elif is_ground_truth:
                 acl_results.append({
                     'user_id': uid,
@@ -1057,26 +1096,51 @@ def main():
             attrs_used = entry.get('attrs_used', {})
             used_correct_words = entry.get('used_correct_words', [])
 
-            if is_ground_truth and 'noisy_query' in entry:
-                ccomp_results.append({
-                    'user_id': uid,
-                    'asin': persona['asin'],
-                    'target_ccomp': ccomp_level,
-                    'ccomp_sentence_ratio': persona.get('ccomp_sentence_ratio', 0.0),
-                    'density_label': persona.get('density_label', 'simple'),
-                    'length_label': persona.get('length_label', 'medium'),
-                    'words_per_ccomp': persona.get('words_per_ccomp'),
-                    'ground_truth_ccomp': ground_truth_ccomp,
-                    'target_length': persona.get('target_length'),
-                    'has_errors': True,
-                    'correct_query': query,
-                    'noisy_query': entry['noisy_query'],
-                    'attrs_used': attrs_used,
-                    'used_correct_words': used_correct_words,
-                    'error_words': [{'correct': ep['corrected'], 'error': ep['original'], 'error_type': ep.get('error_type', 'unknown')} for ep in errors.get('ccomp', [])[:10]],
-                    'word_count': count_words(query),
-                    'is_ground_truth': True,
-                })
+            # 如果是 ground_truth 且有错误，生成 noisy 版本
+            if is_ground_truth and persona['has_ccomp_errors'] and errors and errors.get('ccomp'):
+                correct_words = [ep['corrected'] for ep in errors['ccomp'][:10] if ep.get('corrected')]
+                if correct_words:
+                    noisy_query, injected_errors = inject_errors(query, errors.get('ccomp', []))
+                    # 只有当实际注入了错误时才生成双版本
+                    if noisy_query != query:
+                        ccomp_results.append({
+                            'user_id': uid,
+                            'asin': persona['asin'],
+                            'target_ccomp': ccomp_level,
+                            'ccomp_sentence_ratio': persona.get('ccomp_sentence_ratio', 0.0),
+                            'density_label': persona.get('density_label', 'simple'),
+                            'length_label': persona.get('length_label', 'medium'),
+                            'words_per_ccomp': persona.get('words_per_ccomp'),
+                            'ground_truth_ccomp': ground_truth_ccomp,
+                            'target_length': persona.get('target_length'),
+                            'has_errors': True,
+                            'correct_query': query,
+                            'noisy_query': noisy_query,
+                            'attrs_used': attrs_used,
+                            'used_correct_words': used_correct_words,
+                            'error_words': injected_errors,
+                            'word_count': count_words(query),
+                            'is_ground_truth': True,
+                        })
+                    else:
+                        # 没有实际注入错误，只生成单版本
+                        ccomp_results.append({
+                            'user_id': uid,
+                            'asin': persona['asin'],
+                            'target_ccomp': ccomp_level,
+                            'ccomp_sentence_ratio': persona.get('ccomp_sentence_ratio', 0.0),
+                            'density_label': persona.get('density_label', 'simple'),
+                            'length_label': persona.get('length_label', 'medium'),
+                            'words_per_ccomp': persona.get('words_per_ccomp'),
+                            'ground_truth_ccomp': ground_truth_ccomp,
+                            'target_length': persona.get('target_length'),
+                            'has_errors': False,
+                            'query': query,
+                            'attrs_used': attrs_used,
+                            'used_correct_words': used_correct_words,
+                            'word_count': count_words(query),
+                            'is_ground_truth': True,
+                        })
             elif is_ground_truth:
                 ccomp_results.append({
                     'user_id': uid,
