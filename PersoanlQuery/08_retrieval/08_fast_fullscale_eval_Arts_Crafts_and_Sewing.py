@@ -36,7 +36,7 @@ ACL_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Art
 CCOMP_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Arts_Crafts_and_Sewing/ccomp_query.json"
 OUTPUT_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/Arts_Crafts_and_Sewing"
 META_FILE = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2023/raw/meta_categories/meta_Arts_Crafts_and_Sewing.jsonl.gz"
-CATEGORY_NAME = "_Arts_Crafts_and_Sewing"
+CATEGORY_NAME = "Arts_Crafts_and_Sewing"
 
 # 要评估的检索器列表
 RETRIEVERS = ['bge', 'e5', 'minilm', 'star', 'gritlm', 'bm25']

@@ -36,7 +36,7 @@ ACL_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Pet
 CCOMP_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Pet_Supplies/ccomp_query.json"
 OUTPUT_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/Pet_Supplies"
 META_FILE = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2023/raw/meta_categories/meta_Pet_Supplies.jsonl.gz"
-CATEGORY_NAME = "_Pet_Supplies"
+CATEGORY_NAME = "Pet_Supplies"
 
 # 要评估的检索器列表
 RETRIEVERS = ['bge', 'e5', 'minilm', 'star', 'gritlm', 'bm25']
@@ -1856,6 +1856,7 @@ def print_query_type_comparison(all_results_by_type: Dict[str, List[Dict]], k_va
 def main():
     log("=" * 60)
     log(f"快速全量评估 - 多检索器 + ACL/CCOMP 双类别 + 交叉对比")
+    log(f"类别: {CATEGORY_NAME}")
     log("=" * 60)
 
     if torch.cuda.is_available():
@@ -1902,6 +1903,9 @@ def main():
 
         # 计算查询长度分组统计
         all_word_counts = [q.get('word_count') or 0 for user_qs in user_queries_correct.values() for q in user_qs]
+        if not all_word_counts:
+            log(f"  [{query_category.upper()}] 警告: 没有查询数据，跳过此类别")
+            continue
         q25, q50, q75 = np.percentile(all_word_counts, [25, 50, 75])
         log(f"  [{query_category.upper()}] Query长度分布: min={min(all_word_counts)}, Q25={q25:.0f}, Q50={q50:.0f}, Q75={q75:.0f}, max={max(all_word_counts)}")
 
@@ -2032,6 +2036,7 @@ def main():
     with open(output_file, 'w') as f:
         json.dump({
             'timestamp': datetime.now().isoformat(),
+            'category_name': CATEGORY_NAME,
             'query_types': QUERY_TYPES,
             'query_categories': QUERY_CATEGORIES,
             'results_by_category_and_type': sanitize_for_json(all_results_by_category_and_type),

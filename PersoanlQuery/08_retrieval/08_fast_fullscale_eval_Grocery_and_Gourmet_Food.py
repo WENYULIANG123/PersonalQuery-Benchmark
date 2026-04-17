@@ -36,7 +36,7 @@ ACL_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Gro
 CCOMP_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Grocery_and_Gourmet_Food/ccomp_query.json"
 OUTPUT_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/Grocery_and_Gourmet_Food"
 META_FILE = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2023/raw/meta_categories/meta_Grocery_and_Gourmet_Food.jsonl.gz"
-CATEGORY_NAME = "_Grocery_and_Gourmet_Food"
+CATEGORY_NAME = "Grocery_and_Gourmet_Food"
 
 # 要评估的检索器列表
 RETRIEVERS = ['bge', 'e5', 'minilm', 'star', 'gritlm', 'bm25']
@@ -1835,6 +1835,7 @@ def print_query_type_comparison(all_results_by_type: Dict[str, List[Dict]], k_va
 def main():
     log("=" * 60)
     log(f"快速全量评估 - 多检索器 + ACL/CCOMP 双类别 + 交叉对比")
+    log(f"类别: {CATEGORY_NAME}")
     log("=" * 60)
 
     if torch.cuda.is_available():
@@ -2011,6 +2012,7 @@ def main():
     with open(output_file, 'w') as f:
         json.dump({
             'timestamp': datetime.now().isoformat(),
+            'category_name': CATEGORY_NAME,
             'query_types': QUERY_TYPES,
             'query_categories': QUERY_CATEGORIES,
             'results_by_category_and_type': sanitize_for_json(all_results_by_category_and_type),
