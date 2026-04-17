@@ -499,9 +499,7 @@ class E5Retriever:
             query_with_prefix = self._add_instruction(query, is_query=True)
             query_embedding = model.encode(
                 [query_with_prefix],
-                convert_to_tensor=True,
-                truncation=True,
-                max_length=512
+                convert_to_tensor=True
             )[0]
 
         if isinstance(query_embedding, torch.Tensor):
@@ -703,9 +701,7 @@ class BGERetriever:
             query_with_prefix = self._add_instruction(query, is_query=True)
             query_embedding = model.encode(
                 [query_with_prefix],
-                convert_to_tensor=True,
-                truncation=True,
-                max_length=512
+                convert_to_tensor=True
             )[0]
 
         if isinstance(query_embedding, torch.Tensor):
