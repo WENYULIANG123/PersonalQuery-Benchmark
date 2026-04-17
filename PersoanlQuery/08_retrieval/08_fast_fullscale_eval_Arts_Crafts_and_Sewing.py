@@ -787,11 +787,23 @@ class DenseSearcher:
         self.doc_ids = doc_ids
         self.retriever_name = retriever_name
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        # 初始化 GPU 确保 cuBLAS 可用
+        if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
         # 归一化 doc embeddings 以支持余弦相似度
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms = np.where(norms == 0, 1, norms)  # 避免除零
         normalized_embeddings = embeddings / norms
         self.embeddings_tensor = torch.from_numpy(normalized_embeddings).float().to(self.device)
+        # 确保 cuBLAS 初始化成功
+        if self.device.type == 'cuda':
+            try:
+                _test = torch.mm(self.embeddings_tensor[:1], self.embeddings_tensor[:1].T)
+                del _test
+            except Exception:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
 
     def search_batch(self, query_embeddings: List[np.ndarray], top_k: int = 10) -> List[List[Tuple[str, float]]]:
         if not query_embeddings:
