@@ -904,12 +904,12 @@ def main():
                 'A1': u['prod'].get('A1_product_type', ''),
                 'A2': u['prod'].get('A2_brand', ''),
                 'A3': u['prod'].get('A3_price', ''),
-                # A4 和 A5 从 A6_detailed 中获取
+                # A4 和 A5 从 A6_detailed 中获取，格式为 "属性类型 (A4): 属性值"
                 # A6_detailed 是字典，如 {'material': 'Glass, Plastic', 'shape': 'Diamond'}
-                # A4 = 第一个属性类型的属性值
-                # A5 = 第二个属性类型的属性值
-                'A4': list(u['prod'].get('A6_detailed', {}).values())[0] if u['prod'].get('A6_detailed') and len(u['prod'].get('A6_detailed', {})) > 0 else 'None',
-                'A5': list(u['prod'].get('A6_detailed', {}).values())[1] if u['prod'].get('A6_detailed') and len(u['prod'].get('A6_detailed', {})) > 1 else 'None',
+                # A4 = 第一个属性类型的 "属性类型 (A4): 属性值"
+                # A5 = 第二个属性类型的 "属性类型 (A5): 属性值"
+                'A4': f"{list(u['prod'].get('A6_detailed', {}).keys())[0]} (A4): {list(u['prod'].get('A6_detailed', {}).values())[0]}" if u['prod'].get('A6_detailed') and len(u['prod'].get('A6_detailed', {})) > 0 else 'None',
+                'A5': f"{list(u['prod'].get('A6_detailed', {}).keys())[1]} (A5): {list(u['prod'].get('A6_detailed', {}).values())[1]}" if u['prod'].get('A6_detailed') and len(u['prod'].get('A6_detailed', {})) > 1 else 'None',
             },
             'errors': errors,
         }
