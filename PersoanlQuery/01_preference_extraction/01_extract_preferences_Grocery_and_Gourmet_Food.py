@@ -708,6 +708,73 @@ def extract_description_attributes(description) -> Dict[str, List[str]]:
     }
 
 
+def extract_domain_specific_grocery(item: Dict) -> Dict[str, Any]:
+    """
+    提取 Grocery & Gourmet Food 领域特定的详细属性 (A6)
+    包含: Flavor, Caffeine Content, Roast Level, Unit Count, Diet Type, Package Type, Variety 等
+    """
+    details = item.get('details', {})
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except Exception:
+            details = {}
+
+    a6_fields = {}
+
+    # Flavor - 口味
+    flavor = details.get('Flavor', '')
+    if flavor:
+        a6_fields['flavor'] = str(flavor).strip()
+
+    # Caffeine Content - 咖啡因含量
+    caffeine = details.get('Caffeine Content', '')
+    if caffeine:
+        a6_fields['caffeine_content'] = str(caffeine).strip()
+
+    # Roast Level - 烘焙程度
+    roast = details.get('Roast Level', '')
+    if roast:
+        a6_fields['roast_level'] = str(roast).strip()
+
+    # Unit Count - 单位数量
+    unit_count = details.get('Unit Count', '')
+    if unit_count:
+        a6_fields['unit_count'] = str(unit_count).strip()
+
+    # Diet Type - 饮食类型
+    diet = details.get('Diet Type', '')
+    if diet:
+        a6_fields['diet_type'] = str(diet).strip()
+
+    # Package Type - 包装类型
+    pkg_type = details.get('Package Type', '')
+    if pkg_type:
+        a6_fields['package_type'] = str(pkg_type).strip()
+
+    # Variety - 品种/种类
+    variety = details.get('Variety', '')
+    if variety:
+        a6_fields['variety'] = str(variety).strip()
+
+    # Item Form - 商品形态
+    item_form = details.get('Item Form', '')
+    if item_form:
+        a6_fields['item_form'] = str(item_form).strip()
+
+    # Chocolate Type - 巧克力类型
+    chocolate = details.get('Chocolate Type', '')
+    if chocolate:
+        a6_fields['chocolate_type'] = str(chocolate).strip()
+
+    # Tea Variety - 茶品种
+    tea = details.get('Tea Variety', '')
+    if tea:
+        a6_fields['tea_variety'] = str(tea).strip()
+
+    return a6_fields
+
+
 def extract_attributes(item: Dict) -> Dict:
     """从商品元数据提取多个槽位"""
     # 支持 2018 格式 (asin, brand, category) 和 2023 格式 (parent_asin, details.Brand, categories)
@@ -761,6 +828,9 @@ def extract_attributes(item: Dict) -> Dict:
         combined_a18 = list(dict.fromkeys(structured_a18 + desc_a18))
         structured['A18_quality'] = combined_a18
 
+    # 提取 Grocery 领域特定属性
+    domain_specific = extract_domain_specific_grocery(item)
+
     return {
         'asin': asin,
         'A1_product_type': extract_product_type(category),
@@ -768,6 +838,7 @@ def extract_attributes(item: Dict) -> Dict:
         'A3_price': extract_price(price),
         'A4_appearance': structured.get('A4_appearance', []),
         'A5_use_case': extract_use_case(title, description, feature),
+        'A6_detailed': domain_specific,
     }
 
 
@@ -829,8 +900,10 @@ def process_item(item: Dict) -> Optional[Dict]:
 
     attrs = extract_attributes(item)
 
-    # 只保留 A1_product_type、A3_price、A4_appearance 和 A5_use_case都不为空的商品
-    if not attrs.get('A1_product_type') or not attrs.get('A3_price') or not attrs.get('A4_appearance') or not attrs.get('A5_use_case'):
+    # 只保留 A1_product_type、A3_price、A4_appearance、A5_use_case 都不为空
+    # 且 A6_detailed 至少包含2个属性值的商品
+    a6 = attrs.get('A6_detailed', {})
+    if not attrs.get('A1_product_type') or not attrs.get('A3_price') or not attrs.get('A4_appearance') or not attrs.get('A5_use_case') or not a6 or len(a6) < 2:
         return None
 
     return attrs
@@ -1110,6 +1183,7 @@ def main():
                     'A3': 'Price - 价格',
                     'A4': 'Appearance - 外观（颜色+风格+表面）',
                     'A5': 'Usage - 使用场景',
+                    'A6': 'Detailed - Grocery领域特定属性（Flavor/Caffeine/RoastLevel等）',
                     'A7': 'Material - 材料',
                     'A8': 'Safety - 安全/环保',
                     'A9': 'Durability - 耐用性',
@@ -1150,7 +1224,9 @@ def main():
     log_with_timestamp("")
     log_with_timestamp("📋 示例输出 (前3个):")
     for i, p in enumerate(all_results[:3]):
-        print(f"  {i+1}. asin={p['asin']}, A1={p['A1_product_type']}, A2={p['A2_brand']}, A3={p['A3_price']}, A5={p['A5_use_case']}, A7={len(p.get('A7_material', []))} mat, A18={len(p.get('A18_quality', []))} qual")
+        a6 = p.get('A6_detailed', {})
+        a6_str = str(a6) if a6 else '{}'
+        print(f"  {i+1}. asin={p['asin']}, A1={p['A1_product_type']}, A2={p['A2_brand']}, A3={p['A3_price']}, A5={p['A5_use_case']}, A6_detailed={a6_str}")
 
     # ========== 匈牙利算法最大匹配 ==========
     log_with_timestamp("")
@@ -1187,6 +1263,7 @@ def main():
                     'A3': 'Price - 价格',
                     'A4': 'Appearance - 外观（颜色+风格+表面）',
                     'A5': 'Usage - 使用场景',
+                    'A6': 'Detailed - Grocery领域特定属性（Flavor/Caffeine/RoastLevel等）',
                     'A7': 'Material - 材料',
                     'A8': 'Safety - 安全/环保',
                     'A9': 'Durability - 耐用性',

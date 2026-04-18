@@ -708,6 +708,73 @@ def extract_description_attributes(description) -> Dict[str, List[str]]:
     }
 
 
+def extract_domain_specific_pet(item: Dict) -> Dict[str, Any]:
+    """
+    提取 Pet Supplies 领域特定的详细属性 (A6)
+    包含: Target Species, Breed Recommendation, Size, Material, Color, Harness Type 等
+    """
+    details = item.get('details', {})
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except Exception:
+            details = {}
+
+    a6_fields = {}
+
+    # Target Species - 目标物种
+    target = details.get('Target Species', '')
+    if target:
+        a6_fields['target_species'] = str(target).strip()
+
+    # Breed Recommendation - 品种推荐
+    breed = details.get('Breed Recommendation', '')
+    if breed:
+        a6_fields['breed_recommendation'] = str(breed).strip()
+
+    # Size - 尺寸
+    size = details.get('Size', '')
+    if size:
+        a6_fields['size'] = str(size).strip()
+
+    # Material - 材料
+    material = details.get('Material', '')
+    if material:
+        a6_fields['material'] = str(material).strip()
+
+    # Color - 颜色
+    color = details.get('Color', '')
+    if color:
+        a6_fields['color'] = str(color).strip()
+
+    # Harness Type - 背带类型
+    harness = details.get('Harness Type', '')
+    if harness:
+        a6_fields['harness_type'] = str(harness).strip()
+
+    # Age Range Description - 年龄范围
+    age_range = details.get('Age Range Description', '')
+    if age_range:
+        a6_fields['age_range'] = str(age_range).strip()
+
+    # Item Form - 商品形态
+    item_form = details.get('Item Form', '')
+    if item_form:
+        a6_fields['item_form'] = str(item_form).strip()
+
+    # Special Feature - 特殊功能
+    special = details.get('Special Feature', '')
+    if special:
+        a6_fields['special_feature'] = str(special).strip()
+
+    # Fit Type - 适合类型
+    fit = details.get('Fit Type', '')
+    if fit:
+        a6_fields['fit_type'] = str(fit).strip()
+
+    return a6_fields
+
+
 def extract_attributes(item: Dict) -> Dict:
     """从商品元数据提取多个槽位"""
     # 支持 2018 格式 (asin, brand, category) 和 2023 格式 (parent_asin, details.Brand, categories)
@@ -761,6 +828,9 @@ def extract_attributes(item: Dict) -> Dict:
         combined_a18 = list(dict.fromkeys(structured_a18 + desc_a18))
         structured['A18_quality'] = combined_a18
 
+    # 提取 Pet Supplies 领域特定属性
+    domain_specific = extract_domain_specific_pet(item)
+
     return {
         'asin': asin,
         'A1_product_type': extract_product_type(category),
@@ -768,6 +838,7 @@ def extract_attributes(item: Dict) -> Dict:
         'A3_price': extract_price(price),
         'A4_appearance': structured.get('A4_appearance', []),
         'A5_use_case': extract_use_case(title, description, feature),
+        'A6_detailed': domain_specific,
     }
 
 
@@ -829,8 +900,10 @@ def process_item(item: Dict) -> Optional[Dict]:
 
     attrs = extract_attributes(item)
 
-    # 只保留 A1_product_type、A3_price、A4_appearance 和 A5_use_case都不为空的商品
-    if not attrs.get('A1_product_type') or not attrs.get('A3_price') or not attrs.get('A4_appearance') or not attrs.get('A5_use_case'):
+    # 只保留 A1_product_type、A3_price、A4_appearance、A5_use_case 都不为空
+    # 且 A6_detailed 至少包含2个属性值的商品
+    a6 = attrs.get('A6_detailed', {})
+    if not attrs.get('A1_product_type') or not attrs.get('A3_price') or not attrs.get('A4_appearance') or not attrs.get('A5_use_case') or not a6 or len(a6) < 2:
         return None
 
     return attrs
@@ -1110,6 +1183,7 @@ def main():
                     'A3': 'Price - 价格',
                     'A4': 'Appearance - 外观（颜色+风格+表面）',
                     'A5': 'Usage - 使用场景',
+                    'A6': 'Detailed - Pet领域特定属性（TargetSpecies/Breed/Size/Material等）',
                     'A7': 'Material - 材料',
                     'A8': 'Safety - 安全/环保',
                     'A9': 'Durability - 耐用性',
@@ -1150,7 +1224,9 @@ def main():
     log_with_timestamp("")
     log_with_timestamp("📋 示例输出 (前3个):")
     for i, p in enumerate(all_results[:3]):
-        print(f"  {i+1}. asin={p['asin']}, A1={p['A1_product_type']}, A2={p['A2_brand']}, A3={p['A3_price']}, A5={p['A5_use_case']}, A7={len(p.get('A7_material', []))} mat, A18={len(p.get('A18_quality', []))} qual")
+        a6 = p.get('A6_detailed', {})
+        a6_str = str(a6) if a6 else '{}'
+        print(f"  {i+1}. asin={p['asin']}, A1={p['A1_product_type']}, A2={p['A2_brand']}, A3={p['A3_price']}, A5={p['A5_use_case']}, A6_detailed={a6_str}")
 
     # ========== 匈牙利算法最大匹配 ==========
     log_with_timestamp("")
@@ -1187,6 +1263,7 @@ def main():
                     'A3': 'Price - 价格',
                     'A4': 'Appearance - 外观（颜色+风格+表面）',
                     'A5': 'Usage - 使用场景',
+                    'A6': 'Detailed - Pet领域特定属性（TargetSpecies/Breed/Size/Material等）',
                     'A7': 'Material - 材料',
                     'A8': 'Safety - 安全/环保',
                     'A9': 'Durability - 耐用性',
