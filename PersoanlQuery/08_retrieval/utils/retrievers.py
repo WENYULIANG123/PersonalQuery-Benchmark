@@ -18,6 +18,7 @@ import torch
 from typing import List, Dict, Tuple
 import threading
 import pickle
+from tqdm import tqdm
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1144,23 +1145,42 @@ class GritLMRetriever:
 
     Uses the official gritlm package for encoding with proper instruction prefixes.
     Reference: STaRK implementation (https://github.com/snap-stanford/STaRK)
+              https://github.com/allenai/gritlm
     """
     def __init__(self, model_name: str = "GritLM/GritLM-7B"):
         self.model_name = model_name
         self.model = None
+        self.tokenizer = None
         self.doc_embeddings = None
         self.doc_ids = []
         self.all_metadata = None
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # STaRK 使用的 instruction 格式
-        self.instruction = "<|user|>\n<|embed|>\n"
+        # STaRK 格式：与 gritlm 包一致，当 instruction 为空时不加 <|user|> 前缀
+        self.instruction = ""  # 空字符串，使用 "<|embed|>\n" 格式
+        # Pooling method (与 gritlm 包一致)
+        self.pooling_method = 'mean'
+        self.normalized = True
+
+    def _get_instruction(self) -> str:
+        """与 STaRK/gritlm 包一致的 instruction 格式"""
+        if self.instruction:
+            return "<|user|>\n" + self.instruction + "\n<|embed|>\n"
+        else:
+            return "<|embed|>\n"
 
     def _get_model(self):
         if self.model is None:
             log_with_timestamp(f"  Loading GritLM model: {self.model_name}")
             from gritlm import GritLM
-            # local_files_only=True 确保只使用本地缓存，不尝试网络访问
-            self.model = GritLM(self.model_name, torch_dtype=torch.bfloat16, local_files_only=True)
+            # 参考 gritlm 包的实现：不使用 local_files_only，让 transformers 自动处理缓存
+            self.model = GritLM(
+                self.model_name,
+                mode='unified',
+                pooling_method=self.pooling_method,
+                normalized=self.normalized,
+                torch_dtype=torch.bfloat16,
+                is_inference=True,
+            )
             log_with_timestamp(f"  GritLM loaded on {self.device}")
             log_with_timestamp(f"  Model name: {self.model_name}")
             log_with_timestamp(f"  HF_HOME: {os.environ.get('HF_HOME', 'not set')}")
@@ -1169,10 +1189,11 @@ class GritLMRetriever:
     def _encode_text(self, text: str, max_length: int = 512) -> torch.Tensor:
         """Encode text using GritLM with instruction prefix (STaRK format)."""
         model = self._get_model()
-        embedding = model.encode(
+        # 与 STaRK/gritlm 包一致的 instruction 格式
+        embedding = model.encode_queries(
             [text],
-            instruction=self.instruction,
-            max_length=max_length
+            instruction=self._get_instruction(),
+            max_length=max_length,
         )
         return torch.from_numpy(embedding[0])
 
@@ -1187,24 +1208,21 @@ class GritLMRetriever:
         # Build document texts
         texts = [build_document_text(doc, all_metadata) for doc in documents]
 
-        # Batch encode documents with instruction
+        # 参考 gritlm 包的 encode_corpus 方法进行批量编码
         log_with_timestamp(f"  Encoding {len(texts)} documents...")
-        embeddings = []
-        batch_size = 4  # Small batch size for 7B model
+        batch_size = 8  # 与 gritlm 包默认值 256 相比减小以适应 7B 模型
 
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i:i+batch_size]
-            batch_embeddings = model.encode(
+        all_embeddings = []
+        for start_index in tqdm(range(0, len(texts), batch_size), desc="GritLM encoding"):
+            batch_texts = texts[start_index:start_index + batch_size]
+            batch_embeddings = model.encode_corpus(
                 batch_texts,
-                instruction=self.instruction,
-                max_length=512
+                instruction=self._get_instruction(),
+                max_length=512,
             )
-            embeddings.append(torch.from_numpy(batch_embeddings))
+            all_embeddings.append(torch.from_numpy(batch_embeddings))
 
-            if (i // batch_size) % 20 == 0:
-                log_with_timestamp(f"    Encoded {min(i+batch_size, len(texts))}/{len(texts)} docs")
-
-        self.doc_embeddings = torch.cat(embeddings, dim=0).float()
+        self.doc_embeddings = torch.cat(all_embeddings, dim=0).float()
         log_with_timestamp(f"  GritLM index built with {len(self.doc_ids)} docs")
 
     def encode_query(self, query: str) -> np.ndarray:

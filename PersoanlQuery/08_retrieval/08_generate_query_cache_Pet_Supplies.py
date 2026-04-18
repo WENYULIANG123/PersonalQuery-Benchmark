@@ -17,10 +17,8 @@
     - 预期收益: 查询评估时间 14.6s → 11-12s (20-30% improvement)
 """
 
-# 完全离线模式 - 避免 HuggingFace 网络验证
 import os
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_HOME"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
 
 import sys
 import json
@@ -52,11 +50,11 @@ CCOMP_QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Pet
 CACHE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/query_cache_Pet_Supplies"
 
 AVAILABLE_RETRIEVERS = {
+    'GRITLM': GritLMRetriever,  # 优先处理 GRITLM
     'BGE': BGERetriever,
     'E5': E5Retriever,
     'MiniLM': MiniLMRetriever,
     'STAR': STARRetriever,
-    'GRITLM': GritLMRetriever,
     'BM25': None,  # BM25 不需要预计算查询嵌入
 }
 
@@ -424,9 +422,13 @@ def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str 
                 log_with_timestamp(f"      编码进度 [{retriever_name}|{user_id}|{mode}]: {progress}/{len(queries)} ({progress_pct:.1f}%)")
         
         except Exception as e:
-            failed_count += 1
-            log_with_timestamp(f"      ❌ 编码失败 [{retriever_name}|{user_id}|{mode}] 查询: {query_text[:40]}... 错误: {str(e)[:50]}")
-            continue
+            error_msg = str(e)
+            log_with_timestamp(f"      ❌ 编码失败 [{retriever_name}|{user_id}|{mode}] 查询: {query_text[:40]}... 错误: {error_msg[:100]}")
+            # 任何编码错误都立即结束脚本
+            log_with_timestamp(f"      ⚠️  检测到编码错误，立即结束任务")
+            log_with_timestamp(f"      ⚠️  当前检索器: {retriever_name}, 用户: {user_id}, 模式: {mode}")
+            import sys
+            sys.exit(1)
     
     if failed_count > 0:
         log_with_timestamp(f"      ⚠️  共有 {failed_count} 个查询编码失败")
@@ -883,7 +885,7 @@ def generate_cache_for_all_retrievers(
 def main():
     # ==================== 硬编码配置 ====================
     # 检索器列表：核心5个 + GritLM
-    RETRIEVER_NAMES = ['BGE', 'E5', 'MiniLM', 'STAR', 'GRITLM']
+    RETRIEVER_NAMES = ['GRITLM', 'BGE', 'E5', 'MiniLM', 'STAR']  # GRITLM 优先
     # 是否清理旧缓存
     CLEAR_CACHE_BEFORE = True
     # 数据源：persona_generated_queries.json
