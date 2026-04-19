@@ -24,11 +24,12 @@ sys.path.insert(0, '/home/wlia0047/ar57/wenyu/PersoanlQuery')
 # 硬编码参数
 # ========================================
 CATEGORY = "Pet_Supplies"
+LEVEL_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/Pet_Supplies/level.json'
 ACL_USER_PROFILES_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/Pet_Supplies/acl_user_profiles.json'
 CCOMP_USER_PROFILES_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/Pet_Supplies/ccomp_user_profiles.json'
 ATTR_DENSITY_PROFILES_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/Pet_Supplies/attr_density_user_profiles.json'
 ATTR_VALUES_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction/Pet_Supplies/attributes_Pet_Supplies.json'
-OUTPUT_FILE = '/fs04/ar57/wenyu/result/personal_query/06_query/Pet_Supplies/shared_level0_queries.json'
+OUTPUT_FILE = '/fs04/ar57/wenyu/result/personal_query/06_query/Pet_Supplies/query.json'
 
 QUERY_CONFIG_FILE = '/home/wlia0047/ar57/wenyu/PersoanlQuery/06_query/query_config.json'
 CCOMP_PROMPTS_FILE = '/home/wlia0047/ar57/wenyu/PersoanlQuery/06_query/ccomp_query_prompts.json'
@@ -59,6 +60,68 @@ def log(msg):
 def count_words(text: str) -> int:
     """简单分词统计词数"""
     return len(text.split())
+
+
+def _extract_attrs_from_product(prod: dict) -> dict:
+    """从产品中提取5个非空属性，优先选择 A1, A2...
+
+    返回格式: {"A1": {"value": "xxx", "type": "product_type"}, ...}
+    只选择有效的简单属性值（字符串或列表中的字符串），跳过 dict 类型和无效值。
+    规则：
+    1. 跳过 A14 (size) 类型
+    2. 如果属性值包含分号，只取分号前的第一个值
+    """
+    SKIP_KEYS = {'A14'}  # 跳过 size 类型
+    ATTR_TYPES = {
+        'A1': 'product_type', 'A2': 'brand', 'A3': 'price', 'A4': 'appearance',
+        'A5': 'use_case', 'A6': 'detailed', 'A7': 'material', 'A8': 'safety',
+        'A9': 'durability', 'A10': 'ease_of_use', 'A11': 'temperature_resistance',
+        'A12': 'surface', 'A13': 'reusability', 'A14': 'size', 'A15': 'weight',
+        'A16': 'compatibility', 'A17': 'flavor', 'A18': 'quality',
+    }
+    attr_keys = [f'A{i}' for i in range(1, 19)]  # A1-A18
+    attrs = {}
+    for key in attr_keys:
+        if len(attrs) >= 5:
+            break
+        # 跳过 A14 (size)
+        if key in SKIP_KEYS:
+            continue
+        prod_key = f'{key}_product_type' if key == 'A1' else f'{key}_' + {
+            'A2': 'brand', 'A3': 'price', 'A4': 'appearance', 'A5': 'use_case',
+            'A6': 'detailed', 'A7': 'material', 'A8': 'safety', 'A9': 'durability',
+            'A10': 'ease_of_use', 'A11': 'temperature_resistance', 'A12': 'surface',
+            'A13': 'reusability', 'A14': 'size', 'A15': 'weight', 'A16': 'compatibility',
+            'A17': 'flavor', 'A18': 'quality',
+        }.get(key, '')
+        value = prod.get(prod_key)
+        # 跳过 None、空字符串、空列表、字典
+        if value is None or value == '':
+            continue
+        if isinstance(value, dict):
+            continue
+        if isinstance(value, list):
+            if len(value) == 0:
+                continue
+            # 取列表中第一个非空字符串
+            for item in value:
+                if item and isinstance(item, str) and item.strip():
+                    value = item.strip()
+                    break
+            else:
+                continue
+        if isinstance(value, str) and value.strip():
+            # 如果值包含分号或逗号，只取第一个值
+            raw_value = value.strip()
+            if ';' in raw_value:
+                raw_value = raw_value.split(';')[0].strip()
+            elif ',' in raw_value:
+                raw_value = raw_value.split(',')[0].strip()
+            if raw_value:
+                attrs[key] = {'value': raw_value, 'type': ATTR_TYPES.get(key, 'unknown')}
+                if len(attrs) >= 5:
+                    break
+    return attrs
 
 
 # ========================================
@@ -105,6 +168,83 @@ def build_ccomp_expand_prompt(level0_query: str, attrs: dict) -> tuple:
         A5=attrs.get('A5', ''),
         correct_words_section=""
     )
+    return system_base, user_content
+
+
+def _format_attrs_for_prompt(attrs: dict) -> str:
+    """格式化属性用于 prompt 显示，只显示非空的属性"""
+    lines = []
+    for key in attrs.keys():  # 只遍历实际选中的 key
+        info = attrs.get(key)
+        # 处理字符串值（预热时用）或字典值（实际运行时用）
+        if isinstance(info, str):
+            value = info if info and info != 'None' else ''
+            attr_type = 'unknown'
+        else:
+            value = (info.get('value', 'None') or 'None') if info else 'None'
+            attr_type = info.get('type', 'unknown') if info else 'unknown'
+        if value and value != 'None':
+            lines.append(f"- {key} ({attr_type}): {value}")
+    return '\n'.join(lines)
+
+
+def build_direct_level0_prompt(attrs: dict) -> tuple:
+    """直接生成 Level 0 查询（简单句，无 which/that）"""
+    system_base = _PROMPTS[f'system_base_shared_{CATEGORY}']
+    user_content = f"""Generate a Level 0 query with ZERO 'which' and ZERO 'that' clauses.
+
+Product attributes:
+{_format_attrs_for_prompt(attrs)}
+
+Requirements:
+- Output JSON only: {{"level": 0, "query": "...", "attrs_used": {{"A1": "{{value}}", ...}}}}
+- Include ALL 5 attributes in the query
+- Query must be a natural e-commerce search phrase in FIRST PERSON
+- Level 0 = simple sentence with NO clauses (no 'which', no 'that')
+- Each attribute value appears EXACTLY ONCE in the query
+
+Example output:
+{{"level": 0, "query": "I need a product that has these features", "attrs_used": {{"A1": "...", "A2": "...", "A3": "...", "A4": "...", "A5": "..."}}}}"""
+    return system_base, user_content
+
+
+def build_direct_acl_prompt(target_level: int, attrs: dict) -> tuple:
+    """直接生成指定 ACL 等级的查询"""
+    system_base = _PROMPTS[f'system_base_shared_{CATEGORY}']
+    user_content = f"""Generate an ACL level {target_level} query with EXACTLY {target_level} 'which' clauses.
+
+Product attributes:
+{_format_attrs_for_prompt(attrs)}
+
+Requirements:
+- Output JSON only: {{"level": {target_level}, "query": "...", "attrs_used": {{"A1": "{{value}}", "A2": "{{value}}", ...}}}}
+- Include ALL 5 attributes in the query
+- Add EXACTLY {target_level} 'which' clauses (each with ONE characteristic)
+- Query must be a natural e-commerce search phrase in FIRST PERSON
+- Each attribute value appears EXACTLY ONCE in the query
+
+Example output:
+{{"level": {target_level}, "query": "I need ... which is ... which is ...", "attrs_used": {{"A1": "...", "A2": "...", "A3": "...", "A4": "...", "A5": "..."}}}}"""
+    return system_base, user_content
+
+
+def build_direct_ccomp_prompt(target_level: int, attrs: dict) -> tuple:
+    """直接生成指定 CCOMP 等级的查询"""
+    system_base = _PROMPTS[f'system_base_shared_{CATEGORY}']
+    user_content = f"""Generate a CCOMP level {target_level} query with EXACTLY {target_level} 'that' clauses.
+
+Product attributes:
+{_format_attrs_for_prompt(attrs)}
+
+Requirements:
+- Output JSON only: {{"level": {target_level}, "query": "...", "attrs_used": {{"A1": "...", ...}}}}
+- Include ALL 5 attributes in the query
+- Add EXACTLY {target_level} 'that' clauses (each with ONE user need/preference)
+- Query must be a natural e-commerce search phrase in FIRST PERSON
+- Each attribute value appears EXACTLY ONCE in the query
+
+Example output:
+{{"level": {target_level}, "query": "I need ... that ... that ...", "attrs_used": {{"A1": "...", "A2": "...", "A3": "...", "A4": "...", "A5": "..."}}}}"""
     return system_base, user_content
 
 
@@ -155,6 +295,15 @@ def prewarm_cache():
     log("[Cache] 预热 Step3 (CCOMP expand)...")
     system, user = build_ccomp_expand_prompt("generic level0 query example", generic_attrs)
     call_llm(user, system_base=system, step_name="Step3_CCOMPExpand")
+
+    # 预热直接生成
+    log("[Cache] 预热直接 ACL/CCOMP/Level0 生成...")
+    system, user = build_direct_acl_prompt(1, generic_attrs)
+    call_llm(user, system_base=system, step_name="Step4_DirectACL")
+    system, user = build_direct_ccomp_prompt(1, generic_attrs)
+    call_llm(user, system_base=system, step_name="Step5_DirectCCOMP")
+    system, user = build_direct_level0_prompt(generic_attrs)
+    call_llm(user, system_base=system, step_name="Step6_DirectLevel0")
 
     _cache_warmed = True
     log("[Cache] Cache 预热完成")
@@ -243,6 +392,30 @@ def parse_level0_response(text_content: str) -> dict:
     return None
 
 
+def parse_direct_response(text_content: str, target_level: int) -> dict:
+    """解析直接生成的查询响应"""
+    try:
+        json_match = re.search(r'\{[\s\S]*\}', text_content)
+        if json_match:
+            data = json.loads(json_match.group())
+        else:
+            data = json.loads(text_content)
+
+        if 'query' in data:
+            query = data.get('query', '').strip()
+            attrs_used = data.get('attrs_used', {})
+            if query:
+                return {
+                    'level': target_level,
+                    'query': query,
+                    'word_count': count_words(query),
+                    'attrs_used': attrs_used,
+                }
+    except Exception as e:
+        log(f"    [DEBUG] Direct JSON解析失败: {e}")
+    return None
+
+
 def parse_expand_response(text_content: str, expand_type: str) -> dict:
     """解析扩展查询响应（ACL 1-3 或 CCOMP 1-3）
 
@@ -305,6 +478,13 @@ def count_that_in_query(query: str) -> int:
 # 主函数
 # ========================================
 def main():
+    # 加载等级文件
+    log(f"加载用户等级 from {LEVEL_FILE}...")
+    with open(LEVEL_FILE, 'r') as f:
+        level_data = json.load(f)
+    user_level_map = {u['user_id']: {'acl_level': u['acl_level'], 'ccomp_level': u['ccomp_level']} for u in level_data}
+    log(f"加载了 {len(user_level_map)} 个用户的等级")
+
     # 加载 ACL 用户画像
     log(f"加载ACL用户画像 from {ACL_USER_PROFILES_FILE}...")
     with open(ACL_USER_PROFILES_FILE, 'r') as f:
@@ -347,9 +527,9 @@ def main():
     acl_profile_map = {p['user_id']: p for p in acl_user_profiles}
     ccomp_profile_map = {p['user_id']: p for p in ccomp_user_profiles}
 
-    # 计算所有用户的 ground_truth 并过滤
-    all_user_ids = set(acl_profile_map.keys()) & set(ccomp_profile_map.keys()) & set(user_wpa_map.keys())
-    log(f"同时存在于ACL、CCOMP和attr_density的用户数: {len(all_user_ids)}")
+    # 构建用户数据
+    all_user_ids = set(user_level_map.keys()) & set(acl_profile_map.keys()) & set(ccomp_profile_map.keys()) & set(user_wpa_map.keys())
+    log(f"同时存在于level、ACL、CCOMP和attr_density的用户数: {len(all_user_ids)}")
 
     all_user_data = []
     for uid in all_user_ids:
@@ -365,24 +545,11 @@ def main():
         if words_per_attribute is None:
             continue
 
-        words_per_acl = acl_profile.get('words_per_acl', 100.0)
-        words_per_ccomp = ccomp_profile.get('words_per_ccomp', 100.0)
+        level_info = user_level_map.get(uid, {})
+        acl_level = level_info.get('acl_level', 0)
+        ccomp_level = level_info.get('ccomp_level', 0)
 
-        target_length = math.ceil(words_per_attribute) * 5
-
-        if words_per_acl and words_per_acl > 0:
-            ground_truth_acl = int(target_length / words_per_acl)
-            ground_truth_acl = max(0, min(5, ground_truth_acl))
-        else:
-            ground_truth_acl = 0
-
-        if words_per_ccomp and words_per_ccomp > 0:
-            ground_truth_ccomp = int(target_length / words_per_ccomp)
-            ground_truth_ccomp = max(0, min(5, ground_truth_ccomp))
-        else:
-            ground_truth_ccomp = 0
-
-        if ground_truth_acl > 3 or ground_truth_ccomp > 3:
+        if acl_level > 3 or ccomp_level > 3:
             continue
 
         all_user_data.append({
@@ -391,11 +558,8 @@ def main():
             'ccomp_profile': ccomp_profile,
             'prod': prod,
             'words_per_attribute': words_per_attribute,
-            'words_per_acl': words_per_acl,
-            'words_per_ccomp': words_per_ccomp,
-            'target_length': target_length,
-            'ground_truth_acl': ground_truth_acl,
-            'ground_truth_ccomp': ground_truth_ccomp,
+            'acl_level': acl_level,
+            'ccomp_level': ccomp_level,
         })
 
     log(f"过滤后（ACL≤3 且 CCOMP≤3）的用户数: {len(all_user_data)}")
@@ -418,139 +582,122 @@ def main():
             'density_label': u['acl_profile'].get('density_label', 'simple'),
             'length_label': u['acl_profile'].get('length_label', 'medium'),
             'words_per_attribute': u['words_per_attribute'],
-            'words_per_acl': u['words_per_acl'],
-            'words_per_ccomp': u['words_per_ccomp'],
-            'target_length': u['target_length'],
-            'ground_truth_acl': u['ground_truth_acl'],
-            'ground_truth_ccomp': u['ground_truth_ccomp'],
-            'original_attrs': {
-                'A1': u['prod'].get('A1_product_type', ''),
-                'A2': u['prod'].get('A2_brand', ''),
-                'A3': u['prod'].get('A3_price', ''),
-                'A4': u['prod'].get('A4_appearance', '')[0] if isinstance(u['prod'].get('A4_appearance', ''), list) else u['prod'].get('A4_appearance', ''),
-                'A5': u['prod'].get('A5_use_case', ''),
-            },
+            'acl_level': u['acl_level'],
+            'ccomp_level': u['ccomp_level'],
+            'original_attrs': _extract_attrs_from_product(u['prod']),
         }
         user_tasks.append(persona_base)
 
     def process_one_user(persona):
-        """处理单个用户，三步生成查询"""
+        """处理单个用户，直接生成对应等级的查询"""
         uid = persona['user_id']
         attrs = persona['original_attrs']
+        target_acl_level = persona['acl_level']
+        target_ccomp_level = persona['ccomp_level']
 
-        # ========== Step 1: 生成共享 Level 0 ==========
-        system_base, user_content = build_shared_level0_prompt(attrs)
-        level0_response = call_llm(user_content, system_base=system_base, step_name="Step1_SharedLevel0")
-        level0_result = parse_level0_response(level0_response)
+        # ========== 直接生成 ACL 查询 ==========
+        acl_query_result = None
+        if target_acl_level > 0:
+            system_base, user_content = build_direct_acl_prompt(target_acl_level, attrs)
+            acl_response = call_llm(user_content, system_base=system_base, step_name="Step1_ACL")
+            acl_data = parse_direct_response(acl_response, target_acl_level)
 
-        if not level0_result:
-            log(f"    [ERROR] Level 0 解析失败，user={uid} 标记为失败")
-            return None
-
-        level0_query = level0_result['query']
-        level0_attrs = level0_result.get('attrs_used', {})
-
-        # 验证 Level 0 无 which/that
-        level0_which = count_which_in_query(level0_query)
-        level0_that = count_that_in_query(level0_query)
-        if level0_which != 0 or level0_that != 0:
-            log(f"    [DEBUG] Level 0 包含 which/that (which={level0_which}, that={level0_that})")
-            log(f"    [ERROR] Level 0 验证失败，user={uid} 标记为失败")
-            return None
-
-        # 验证 Level 0 词数（15-35词）
-        level0_word_count = level0_result.get('word_count', count_words(level0_query))
-        if not (15 <= level0_word_count <= 35):
-            log(f"    [DEBUG] Level 0 词数不在范围内 (词数={level0_word_count}, 要求=15-35)")
-            log(f"    [ERROR] Level 0 词数验证失败，user={uid} 标记为失败")
-            return None
-
-        # ========== Step 2: 生成 ACL 1-3 ==========
-        system_base, user_content = build_acl_expand_prompt(level0_query, attrs)
-        acl_response = call_llm(user_content, system_base=system_base, step_name="Step2_ACLExpand")
-        acl_results = parse_expand_response(acl_response, 'acl')
-
-        if not acl_results or len(acl_results) != 3:
-            log(f"    [ERROR] ACL 扩展解析失败，user={uid} 标记为失败")
-            return None
-
-        # 验证 ACL 结果
-        for acl_level in [1, 2, 3]:
-            if acl_level not in acl_results:
-                log(f"    [ERROR] ACL level {acl_level} 缺失，user={uid} 标记为失败")
+            if not acl_data:
+                log(f"    [ERROR] ACL 查询解析失败，user={uid} 标记为失败")
                 return None
-            query = acl_results[acl_level]['query']
+
+            query = acl_data['query']
             actual_which = count_which_in_query(query)
-            if actual_which != acl_level:
-                log(f"    [DEBUG] ACL level {acl_level} which数量不匹配(期望{acl_level},实际{actual_which})")
-                log(f"    [ERROR] ACL level {acl_level} 验证失败，user={uid} 标记为失败")
+            if actual_which != target_acl_level:
+                log(f"    [DEBUG] ACL level {target_acl_level} which数量不匹配(期望{target_acl_level},实际{actual_which})")
+                log(f"    [ERROR] ACL level {target_acl_level} 验证失败，user={uid} 标记为失败")
                 return None
 
-        # ========== Step 3: 生成 CCOMP 1-3 ==========
-        system_base, user_content = build_ccomp_expand_prompt(level0_query, attrs)
-        ccomp_response = call_llm(user_content, system_base=system_base, step_name="Step3_CCOMPExpand")
-        ccomp_results = parse_expand_response(ccomp_response, 'ccomp')
+            acl_query_result = {
+                'level': target_acl_level,
+                'query': query,
+                'word_count': count_words(query),
+                'attrs_used': acl_data.get('attrs_used', {}),
+            }
+        else:
+            # Level 0: 生成简单句查询
+            system_base, user_content = build_direct_level0_prompt(attrs)
+            acl_response = call_llm(user_content, system_base=system_base, step_name="Step1_ACL")
+            acl_data = parse_direct_response(acl_response, 0)
 
-        if not ccomp_results or len(ccomp_results) != 3:
-            log(f"    [ERROR] CCOMP 扩展解析失败，user={uid} 标记为失败")
-            return None
-
-        # 验证 CCOMP 结果
-        for ccomp_level in [1, 2, 3]:
-            if ccomp_level not in ccomp_results:
-                log(f"    [ERROR] CCOMP level {ccomp_level} 缺失，user={uid} 标记为失败")
+            if not acl_data:
+                log(f"    [ERROR] ACL Level 0 查询解析失败，user={uid} 标记为失败")
                 return None
-            query = ccomp_results[ccomp_level]['query']
+
+            query = acl_data['query']
+            actual_which = count_which_in_query(query)
+            if actual_which != 0:
+                log(f"    [DEBUG] ACL Level 0 which数量不匹配(期望0,实际{actual_which})")
+                log(f"    [ERROR] ACL Level 0 验证失败，user={uid} 标记为失败")
+                return None
+
+            acl_query_result = {
+                'level': 0,
+                'query': query,
+                'word_count': count_words(query),
+                'attrs_used': acl_data.get('attrs_used', {}),
+            }
+
+        # ========== 直接生成 CCOMP 查询 ==========
+        ccomp_query_result = None
+        if target_ccomp_level > 0:
+            system_base, user_content = build_direct_ccomp_prompt(target_ccomp_level, attrs)
+            ccomp_response = call_llm(user_content, system_base=system_base, step_name="Step2_CCOMP")
+            ccomp_data = parse_direct_response(ccomp_response, target_ccomp_level)
+
+            if not ccomp_data:
+                log(f"    [ERROR] CCOMP 查询解析失败，user={uid} 标记为失败")
+                return None
+
+            query = ccomp_data['query']
             actual_that = count_that_in_query(query)
-            if actual_that != ccomp_level:
-                log(f"    [DEBUG] CCOMP level {ccomp_level} that数量不匹配(期望{ccomp_level},实际{actual_that})")
-                log(f"    [ERROR] CCOMP level {ccomp_level} 验证失败，user={uid} 标记为失败")
+            if actual_that != target_ccomp_level:
+                log(f"    [DEBUG] CCOMP level {target_ccomp_level} that数量不匹配(期望{target_ccomp_level},实际{actual_that})")
+                log(f"    [ERROR] CCOMP level {target_ccomp_level} 验证失败，user={uid} 标记为失败")
                 return None
+
+            ccomp_query_result = {
+                'level': target_ccomp_level,
+                'query': query,
+                'word_count': count_words(query),
+                'attrs_used': ccomp_data.get('attrs_used', {}),
+            }
+        else:
+            # Level 0: 生成简单句查询
+            system_base, user_content = build_direct_level0_prompt(attrs)
+            ccomp_response = call_llm(user_content, system_base=system_base, step_name="Step2_CCOMP")
+            ccomp_data = parse_direct_response(ccomp_response, 0)
+
+            if not ccomp_data:
+                log(f"    [ERROR] CCOMP Level 0 查询解析失败，user={uid} 标记为失败")
+                return None
+
+            query = ccomp_data['query']
+            actual_that = count_that_in_query(query)
+            if actual_that != 0:
+                log(f"    [DEBUG] CCOMP Level 0 that数量不匹配(期望0,实际{actual_that})")
+                log(f"    [ERROR] CCOMP Level 0 验证失败，user={uid} 标记为失败")
+                return None
+
+            ccomp_query_result = {
+                'level': 0,
+                'query': query,
+                'word_count': count_words(query),
+                'attrs_used': ccomp_data.get('attrs_used', {}),
+            }
 
         # ========== 构建最终结果 ==========
         user_result = {
             'user_id': uid,
             'asin': persona['asin'],
-            'acl_sentence_ratio': persona.get('acl_sentence_ratio', 0.0),
-            'ccomp_sentence_ratio': persona.get('ccomp_sentence_ratio', 0.0),
-            'density_label': persona.get('density_label', 'simple'),
-            'length_label': persona.get('length_label', 'medium'),
-            'words_per_attribute': persona.get('words_per_attribute'),
-            'words_per_acl': persona.get('words_per_acl'),
-            'words_per_ccomp': persona.get('words_per_ccomp'),
-            'target_length': persona.get('target_length'),
-            'ground_truth_acl': persona.get('ground_truth_acl'),
-            'ground_truth_ccomp': persona.get('ground_truth_ccomp'),
-            'level0': {
-                'query': level0_query,
-                'word_count': level0_result['word_count'],
-                'attrs_used': level0_attrs,
-            },
-            'acl_queries': [],
-            'ccomp_queries': [],
+            'acl_query': acl_query_result,
+            'ccomp_query': ccomp_query_result,
         }
-
-        for acl_level in [1, 2, 3]:
-            entry = acl_results[acl_level]
-            is_ground_truth = (acl_level == persona.get('ground_truth_acl'))
-            user_result['acl_queries'].append({
-                'level': acl_level,
-                'query': entry['query'],
-                'word_count': entry['word_count'],
-                'attrs_used': entry.get('attrs_used', {}),
-                'is_ground_truth': is_ground_truth,
-            })
-
-        for ccomp_level in [1, 2, 3]:
-            entry = ccomp_results[ccomp_level]
-            is_ground_truth = (ccomp_level == persona.get('ground_truth_ccomp'))
-            user_result['ccomp_queries'].append({
-                'level': ccomp_level,
-                'query': entry['query'],
-                'word_count': entry['word_count'],
-                'attrs_used': entry.get('attrs_used', {}),
-                'is_ground_truth': is_ground_truth,
-            })
 
         return user_result
 
