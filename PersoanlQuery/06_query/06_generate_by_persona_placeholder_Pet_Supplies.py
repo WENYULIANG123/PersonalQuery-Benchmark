@@ -45,11 +45,11 @@ USE_MINIMAXIO = _CONFIG.get('use_minimaxio', False)
 
 with open(ACL_PROMPTS_FILE, 'r', encoding='utf-8') as f:
     _ACL_PROMPTS = json.load(f)
-ACL_SYSTEM_BASE = _ACL_PROMPTS['system_base']
+ACL_SYSTEM_BASE = _ACL_PROMPTS[f'system_base_{CATEGORY}']
 
 with open(CCOMP_PROMPTS_FILE, 'r', encoding='utf-8') as f:
     _CCOMP_PROMPTS = json.load(f)
-CCOMP_SYSTEM_BASE = _CCOMP_PROMPTS['system_base']
+CCOMP_SYSTEM_BASE = _CCOMP_PROMPTS[f'system_base_{CATEGORY}']
 
 
 # ========================================
