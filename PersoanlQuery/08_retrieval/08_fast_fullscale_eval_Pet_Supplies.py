@@ -174,300 +174,113 @@ def validate_cache() -> bool:
     log("  缓存完整性检查通过 ✓")
     return True
 
-# ============ ACL/CCOMP 混淆因素分析 ============
-# 模块级变量，动态从查询文件获取
-UNIQUE_GROUPS = [0, 1, 2, 3]  # 默认值，会在 load_raw_queries 时更新
-GROUP_FIELD = 'ccomp'  # 默认值，会在 load_raw_queries 时更新
+# ============ ACL/CCOMP Paired Analysis ============
+# 模块级变量
+UNIQUE_LEVELS = [0, 1, 2, 3]  # 默认值，会在 load_paired_queries 时更新
+GROUP_FIELD = 'ccomp'  # 默认值，会在 load_paired_queries 时更新
 
-def load_raw_queries(query_category: str = 'acl') -> Tuple[Dict, List[int], str]:
-    """加载原始查询数据用于分析，返回 (groups_dict, unique_groups, group_field_name)"""
-    global UNIQUE_GROUPS, GROUP_FIELD
 
-    # 根据 query_category 选择查询文件
-    queries_file = ACL_QUERIES_FILE if query_category == 'acl' else CCOMP_QUERIES_FILE
-    with open(queries_file, 'r') as f:
-        data = json.load(f)
+def load_paired_queries(query_category: str = 'acl') -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """加载 ACL 和 CCOMP 查询数据用于配对分析，返回 (acl_df, ccomp_df)
 
-    # query_category 直接决定 GROUP_FIELD
-    GROUP_FIELD = query_category
+    每条记录包含: user_id, asin, level, retriever, P@10, query, word_count, mean_idf
+    """
+    global UNIQUE_LEVELS
 
-    # 动态收集所有唯一的 group 值
-    group_values = set()
-    for item in data:
+    # ACL 查询文件
+    with open(ACL_QUERIES_FILE, 'r') as f:
+        acl_data = json.load(f)
+
+    # CCOMP 查询文件
+    with open(CCOMP_QUERIES_FILE, 'r') as f:
+        ccomp_data = json.load(f)
+
+    # 动态收集所有唯一的 level 值
+    acl_levels = set()
+    ccomp_levels = set()
+
+    acl_records = []
+    for item in acl_data:
         if 'queries' in item:
-            for q in item['queries']:
-                gv = q.get(GROUP_FIELD, 0)
-                group_values.add(gv)
-        else:
-            gv = item.get(f'target_{GROUP_FIELD}', item.get(GROUP_FIELD, 0))
-            group_values.add(gv)
-
-    UNIQUE_GROUPS = sorted(group_values)
-    groups_dict = {g: [] for g in UNIQUE_GROUPS}
-
-    for item in data:
-        if 'queries' in item:
+            user_id = item.get('user_id', '')
             asin = item.get('asin', '')
             for q in item['queries']:
-                gv = q.get(GROUP_FIELD, 0)
-                query = q.get('filled_query', '') or q.get('generated_query', '') or q.get('query', '')
+                level = q.get('acl', 0)
+                acl_levels.add(level)
+                query_text = q.get('filled_query', '') or q.get('generated_query', '') or q.get('query', '')
                 word_count = q.get('word_count', 0)
-                if query and asin:
-                    groups_dict[gv].append({
-                        'query': query,
+                if query_text and asin:
+                    acl_records.append({
+                        'user_id': user_id,
                         'asin': asin,
+                        'level': level,
+                        'query': query_text,
                         'word_count': word_count,
-                        f'{GROUP_FIELD}_ratio': 0.0,
-                        GROUP_FIELD: gv
                     })
         else:
-            gv = item.get(f'target_{GROUP_FIELD}', item.get(GROUP_FIELD, 0))
-            query = item.get('filled_query', '') or item.get('generated_query', '') or item.get('query', '')
+            user_id = item.get('user_id', '')
             asin = item.get('asin', '')
+            level = item.get('target_acl', item.get('acl', 0))
+            acl_levels.add(level)
+            query_text = item.get('filled_query', '') or item.get('generated_query', '') or item.get('query', '')
             word_count = item.get('word_count') or 0
-            group_ratio = item.get('persona', {}).get(f'{GROUP_FIELD}_sentence_ratio', 0.0)
-            if query and asin:
-                groups_dict[gv].append({
-                    'query': query,
+            if query_text and asin:
+                acl_records.append({
+                    'user_id': user_id,
                     'asin': asin,
+                    'level': level,
+                    'query': query_text,
                     'word_count': word_count,
-                    f'{GROUP_FIELD}_ratio': group_ratio,
-                    GROUP_FIELD: gv
                 })
 
-    return groups_dict, UNIQUE_GROUPS, GROUP_FIELD
-
-def check1_query_length(group_groups):
-    """Check 1: Query 长度分析"""
-    log("\n" + "=" * 80)
-    log("Check 1: Query 长度分析")
-    log("=" * 80)
-
-    results = {}
-    for group in UNIQUE_GROUPS:
-        lengths = [q['word_count'] for q in group_groups[group]]
-        results[group] = {
-            'count': len(lengths),
-            'mean': np.mean(lengths),
-            'std': np.std(lengths),
-            'min': np.min(lengths),
-            'max': np.max(lengths),
-            'median': np.median(lengths)
-        }
-
-    header = f"{GROUP_FIELD.upper():<10} {'N':<8} {'Mean':<10} {'Std':<10} {'Min':<8} {'Max':<8} {'Median':<10}"
-    log(header)
-    log("-" * 80)
-    for group in UNIQUE_GROUPS:
-        r = results[group]
-        log(f"{GROUP_FIELD.upper()}{group}      {r['count']:<8} {r['mean']:<10.2f} {r['std']:<10.2f} {r['min']:<8} {r['max']:<8} {r['median']:<10.2f}")
-
-    # Kruskal-Wallis 检验
-    groups = [[q['word_count'] for q in group_groups[g]] for g in UNIQUE_GROUPS]
-    stat, p_value = stats.kruskal(*groups)
-    log(f"\n  Kruskal-Wallis 检验: H={stat:.4f}, p={p_value:.4f}")
-    if p_value < 0.05:
-        log("  结论: 各组query长度存在显著差异 (p < 0.05) ⚠️ 长度可能是混淆因素!")
-    else:
-        log("  结论: 各组query长度无显著差异 (p >= 0.05)")
-    return results
-
-def check2_pos_ratio(group_groups):
-    """Check 2: Content/Function Word Ratio"""
-    log("\n" + "=" * 80)
-    log("Check 2: Content/Function Word Ratio (POS Tagging)")
-    log("=" * 80)
-
-    try:
-        import spacy
-        nlp = spacy.load('en_core_web_sm')
-    except:
-        log("  spaCy 未安装，跳过POS分析")
-        return None
-
-    CONTENT_POS = {'NOUN', 'VERB', 'ADJ', 'ADV'}
-    FUNCTION_POS = {'DET', 'ADP', 'AUX', 'PART', 'SCONJ', 'CCONJ', 'PRON'}
-
-    results = {}
-    all_ratios = {g: [] for g in UNIQUE_GROUPS}
-
-    for group in UNIQUE_GROUPS:
-        content_list, function_list, ratios = [], [], []
-        for q in group_groups[group]:
-            doc = nlp(q['query'])
-            content = sum(1 for t in doc if t.pos_ in CONTENT_POS)
-            function = sum(1 for t in doc if t.pos_ in FUNCTION_POS)
-            total = content + function
-            ratio = content / total if total > 0 else 0
-            content_list.append(content)
-            function_list.append(function)
-            ratios.append(ratio)
-            all_ratios[group].append(ratio)
-
-        results[group] = {
-            'count': len(ratios),
-            'mean_content': np.mean(content_list),
-            'mean_function': np.mean(function_list),
-            'mean_ratio': np.mean(ratios),
-            'std_ratio': np.std(ratios)
-        }
-
-    header = f"{GROUP_FIELD.upper():<10} {'N':<8} {'Content':<10} {'Function':<10} {'Ratio':<10} {'Std':<10}"
-    log(header)
-    log("-" * 80)
-    for group in UNIQUE_GROUPS:
-        r = results[group]
-        log(f"{GROUP_FIELD.upper()}{group}      {r['count']:<8} {r['mean_content']:<10.2f} {r['mean_function']:<10.2f} {r['mean_ratio']:<10.4f} {r['std_ratio']:<10.4f}")
-
-    # Kruskal-Wallis 检验
-    stat, p_value = stats.kruskal(*[all_ratios[g] for g in UNIQUE_GROUPS])
-    log(f"\n  Kruskal-Wallis 检验: H={stat:.4f}, p={p_value:.4f}")
-    if p_value < 0.05:
-        log("  结论: 各组ratio存在显著差异 (p < 0.05)")
-    else:
-        log("  结论: 各组ratio无显著差异 (p >= 0.05)")
-    return results
-
-def check3_mean_idf(group_groups):
-    """Check 3: Mean IDF"""
-    log("\n" + "=" * 80)
-    log("Check 3: Mean IDF")
-    log("=" * 80)
-
-    # 加载商品文本
-    log("  计算IDF...")
-    STOPWORDS = set(['i', 'me', 'my', 'we', 'our', 'you', 'the', 'a', 'an', 'and', 'but', 'if', 'or',
-                     'of', 'at', 'by', 'for', 'with', 'is', 'are', 'was', 'were', 'be', 'been',
-                     'do', 'does', 'did', 'will', 'would', 'that', 'which', 'who', 'this', 'these',
-                     'it', 'its', 'to', 'in', 'on', 'as', 'from'])
-
-    word_doc_freq = Counter()
-    total_docs = 0
-    with gzip.open(META_FILE, 'rt', encoding='utf-8') as f:
-        for line in f:
-            item = json.loads(line)
-            title = item.get('title', '') or ''
-            words = set(title.lower().split())
-            for w in words:
-                if w not in STOPWORDS:
-                    word_doc_freq[w] += 1
-            total_docs += 1
-
-    log(f"  语料库文档数: {total_docs}, 词汇量: {len(word_doc_freq)}")
-
-    def compute_query_idf(query):
-        words = query.lower().split()
-        non_stop = [w for w in words if w not in STOPWORDS]
-        if not non_stop:
-            return 0.0
-        idf_sum = 0.0
-        for w in non_stop:
-            df = word_doc_freq.get(w, 0)
-            idf_sum += np.log(total_docs / df) if df > 0 else np.log(total_docs + 1)
-        return idf_sum / len(non_stop)
-
-    results = {}
-    idf_groups = {g: [] for g in UNIQUE_GROUPS}
-
-    for group in UNIQUE_GROUPS:
-        idfs = [compute_query_idf(q['query']) for q in group_groups[group]]
-        idf_groups[group] = idfs
-        results[group] = {
-            'count': len(idfs),
-            'mean_idf': np.mean(idfs),
-            'std_idf': np.std(idfs),
-            'median_idf': np.median(idfs)
-        }
-
-    header = f"{GROUP_FIELD.upper():<10} {'N':<8} {'Mean IDF':<12} {'Std':<10} {'Median':<10}"
-    log(header)
-    log("-" * 80)
-    for group in UNIQUE_GROUPS:
-        r = results[group]
-        log(f"{GROUP_FIELD.upper()}{group}      {r['count']:<8} {r['mean_idf']:<12.4f} {r['std_idf']:<10.4f} {r['median_idf']:<10.4f}")
-
-    # Mann-Whitney U test
-    for c1, c2 in [(0, 2), (0, 3), (1, 2), (1, 3)]:
-        stat, p = stats.mannwhitneyu(idf_groups[c1], idf_groups[c2], alternative='two-sided')
-        sig = "**" if p < 0.05 else ""
-        log(f"\n  {GROUP_FIELD.upper()}{c1} vs {GROUP_FIELD.upper()}{c2}: U={stat:.1f}, p={p:.4f} {sig}")
-
-    if any(stats.mannwhitneyu(idf_groups[0], idf_groups[c], alternative='two-sided')[1] < 0.05 for c in [1, 2, 3]):
-        log("  结论: 各组IDF存在显著差异 (p < 0.05) ⚠️ IDF可能是混淆因素!")
-    else:
-        log("  结论: 各组IDF无显著差异 (p >= 0.05)")
-    return results
-
-def check4_oracle_random(group_groups):
-    """Check 4: Oracle-aware Random Retriever"""
-    log("\n" + "=" * 80)
-    log("Check 4: Oracle-aware Random Retriever")
-    log("=" * 80)
-
-    # 加载商品类目 (使用 'category' 字段，可能是list或string)
-    cat_to_asins = defaultdict(list)
-    asin_to_cat = {}
-    with gzip.open(META_FILE, 'rt', encoding='utf-8') as f:
-        for line in f:
-            item = json.loads(line)
+    ccomp_records = []
+    for item in ccomp_data:
+        if 'queries' in item:
+            user_id = item.get('user_id', '')
             asin = item.get('asin', '')
-            cat_raw = item.get('category', '')
-            # category可能是list或string
-            if isinstance(cat_raw, list):
-                cat = cat_raw[-1] if cat_raw else 'unknown'
-            elif isinstance(cat_raw, str):
-                cat = cat_raw
-            else:
-                cat = 'unknown'
-            if cat and cat != 'unknown':
-                cat_to_asins[cat].append(asin)
-                asin_to_cat[asin] = cat
+            for q in item['queries']:
+                level = q.get('ccomp', 0)
+                ccomp_levels.add(level)
+                query_text = q.get('filled_query', '') or q.get('generated_query', '') or q.get('query', '')
+                word_count = q.get('word_count', 0)
+                if query_text and asin:
+                    ccomp_records.append({
+                        'user_id': user_id,
+                        'asin': asin,
+                        'level': level,
+                        'query': query_text,
+                        'word_count': word_count,
+                    })
+        else:
+            user_id = item.get('user_id', '')
+            asin = item.get('asin', '')
+            level = item.get('target_ccomp', item.get('ccomp', 0))
+            ccomp_levels.add(level)
+            query_text = item.get('filled_query', '') or item.get('generated_query', '') or item.get('query', '')
+            word_count = item.get('word_count') or 0
+            if query_text and asin:
+                ccomp_records.append({
+                    'user_id': user_id,
+                    'asin': asin,
+                    'level': level,
+                    'query': query_text,
+                    'word_count': word_count,
+                })
 
-    log(f"  共有 {len(cat_to_asins)} 个类目")
+    UNIQUE_LEVELS = sorted(acl_levels | ccomp_levels)
+    acl_df = pd.DataFrame(acl_records)
+    ccomp_df = pd.DataFrame(ccomp_records)
 
-    results = {}
-    hit_groups = {g: [] for g in UNIQUE_GROUPS}
-    n_trials = 10
+    return acl_df, ccomp_df
 
-    for group in UNIQUE_GROUPS:
-        for q in group_groups[group]:
-            asin = q['asin']
-            if asin not in asin_to_cat:
-                continue
-            cat = asin_to_cat[asin]
-            same_cat = cat_to_asins.get(cat, [])
-            if len(same_cat) < 2:
-                hit_groups[group].append(0.0)
-                continue
-            hits = 0
-            for _ in range(n_trials):
-                sampled = np.random.choice(same_cat, size=min(10, len(same_cat)), replace=False)
-                hits += 1 if asin in sampled else 0
-            hit_groups[group].append(hits / n_trials)
 
-        if hit_groups[group]:
-            results[group] = {
-                'count': len(hit_groups[group]),
-                'mean_hit': np.mean(hit_groups[group]),
-                'std_hit': np.std(hit_groups[group])
-            }
-
-    header = f"{GROUP_FIELD.upper():<10} {'N':<8} {'Hit@10':<12} {'Std':<10}"
-    log(header)
-    log("-" * 80)
-    for group in UNIQUE_GROUPS:
-        r = results.get(group, {})
-        if r:
-            log(f"{GROUP_FIELD.upper()}{group}      {r['count']:<8} {r['mean_hit']:<12.4f} {r['std_hit']:<10.4f}")
-
-    # Kruskal-Wallis
-    stat, p_value = stats.kruskal(*[hit_groups[c] for c in UNIQUE_GROUPS])
-    log(f"\n  Kruskal-Wallis 检验: H={stat:.4f}, p={p_value:.4f}")
-    if p_value < 0.05:
-        log("  结论: 各组oracle random hit存在显著差异 (p < 0.05) ⚠️ ground truth产品可能天生更容易被找到!")
-    else:
-        log("  结论: 各组oracle random hit无显著差异 (p >= 0.05)")
-    return results
+def compute_query_idf_simple(query: str, word_idf: Dict[str, float]) -> float:
+    """计算查询的平均IDF"""
+    words = query.lower().split()
+    if not words:
+        return 0.0
+    idf_values = [word_idf.get(w, 5.0) for w in words]
+    return np.mean(idf_values)
 
 # ============ 评估指标计算 ============
 def compute_metrics(relevant_asin: str, retrieved_asins: List[str], k_values: List[int]) -> Dict:
@@ -536,7 +349,7 @@ def print_bootstrap_ci_table(all_results: List[Dict], k_values: List[int]):
 
     for r in all_results:
         retriever = r['retriever']
-        for ccomp in UNIQUE_GROUPS:
+        for ccomp in UNIQUE_LEVELS:
             ci = r['bootstrap_ci'].get(ccomp, {}).get('P@10', {})
             if ci:
                 row = f"{retriever:<12} {GROUP_FIELD.upper()}{ccomp}   {ci['mean']:.4f}     {ci['std']:.4f}     {ci['ci_lower']:.4f}      {ci['ci_upper']:.4f}"
@@ -600,6 +413,27 @@ def load_query_cache(retriever_name: str, query_type: str = 'correct', query_cat
     with open(cache_path, 'rb') as f:
         return pickle.load(f)
 
+
+def load_bm25_query_cache(query_type: str = 'correct', query_category: str = 'acl') -> Dict:
+    """加载 BM25 查询缓存
+
+    Args:
+        query_type: 查询类型 ('correct' 或 'noisy')
+        query_category: 查询类别 ('acl' 或 'ccomp')
+
+    Returns:
+        Dict: 查询缓存，key 为 query 字符串，value 为检索结果 [(asin, score), ...]
+    """
+    cache_path = os.path.join(
+        QUERY_CACHE_BASE_DIR,
+        f'{query_category}_{query_type}_query',
+        f'bm25__{query_category}_{query_type}_cache.pkl'
+    )
+    if not os.path.exists(cache_path):
+        return None
+    with open(cache_path, 'rb') as f:
+        return pickle.load(f)
+
 def load_user_queries(query_type: str = 'correct', query_category: str = 'acl') -> Tuple[Dict[str, List[Dict]], Dict[str, int], List[Tuple[int, float, float]]]:
     """加载用户查询，每个查询项包含word_count和group_ratio（POS ratio代理）
 
@@ -607,7 +441,7 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl') 
         query_type: 查询类型 ('correct' 使用 filled_query, 'noisy' 使用 noisy_query)
         query_category: 查询类别 ('acl' 或 'ccomp')
     """
-    global GROUP_FIELD, UNIQUE_GROUPS
+    global GROUP_FIELD, UNIQUE_LEVELS
 
     # 根据 query_category 选择查询文件
     queries_file = ACL_QUERIES_FILE if query_category == 'acl' else CCOMP_QUERIES_FILE
@@ -631,14 +465,15 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl') 
         else:
             gv = item.get(f'target_{GROUP_FIELD}', item.get(GROUP_FIELD, 0))
             group_values.add(gv)
-    UNIQUE_GROUPS = sorted(group_values)
+    UNIQUE_LEVELS = sorted(group_values)
 
     # 根据 query_type 确定查询文本字段
     # correct: correct_query (ground truth) / filled_query / generated_query / query
     # noisy: noisy_query
     def get_query_text(q):
         if query_type == 'noisy':
-            return q.get('noisy_query', '') or q.get('query', '')
+            # noisy 模式只返回有明确 noisy_query 字段的查询
+            return q.get('noisy_query', '')
         else:
             # 对于 ground truth (acl=0), 使用 correct_query
             # 对于其他版本, 使用 filled_query
@@ -826,7 +661,7 @@ class BM25Searcher:
 
 # ============ 评估 ============
 def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = 'correct', query_category: str = 'acl') -> Dict:
-    global GROUP_FIELD, UNIQUE_GROUPS
+    global GROUP_FIELD, UNIQUE_LEVELS
     # 确保 GROUP_FIELD 与 query_category 一致
     GROUP_FIELD = query_category
     # 清理 CUDA 缓存，避免 cuBLAS 上下文冲突
@@ -845,7 +680,7 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_gr
     matched_users = [uid for uid in user_queries.keys() if uid in query_cache]
     log(f"  匹配用户: {len(matched_users)}")
 
-    group_groups = {g: [] for g in UNIQUE_GROUPS}
+    group_groups = {g: [] for g in UNIQUE_LEVELS}
     all_metrics = []
     eval_start = time.time()
 
@@ -955,7 +790,7 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_gr
 
     group_metrics = {}
     group_counts = {}
-    for group in UNIQUE_GROUPS:
+    for group in UNIQUE_LEVELS:
         if group_groups[group]:
             group_metrics[group] = compute_average_metrics(group_groups[group], k_values)
             group_counts[group] = len(group_groups[group])
@@ -1019,7 +854,7 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_gr
     }
 
 def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = 'correct', query_category: str = 'acl') -> Dict:
-    global GROUP_FIELD, UNIQUE_GROUPS
+    global GROUP_FIELD, UNIQUE_LEVELS
     # 确保 GROUP_FIELD 与 query_category 一致
     GROUP_FIELD = query_category
     log(f"\n{'='*60}")
@@ -1061,15 +896,35 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: L
 
     log(f"  总查询数: {len(all_query_texts)}")
 
-    # 批量搜索
-    log(f"  开始批量搜索...")
-    batch_start = time.time()
-    all_results = searcher.search_batch(all_query_texts, top_k=max(k_values))
-    batch_time = time.time() - batch_start
-    log(f"  批量搜索完成，耗时: {batch_time:.1f}秒")
+    # 尝试加载查询缓存
+    log(f"  尝试加载查询缓存...")
+    query_cache = load_bm25_query_cache(query_type, query_category)
+
+    if query_cache is not None:
+        # 使用查询缓存，直接查表获取结果
+        log(f"  使用查询缓存 (共 {len(query_cache)} 条记录)...")
+        cache_hit_start = time.time()
+        all_results = []
+        cache_hits = 0
+        for query_text in all_query_texts:
+            if query_text in query_cache:
+                all_results.append(query_cache[query_text])
+                cache_hits += 1
+            else:
+                # 缓存未命中，在线计算
+                all_results.append(searcher.bm25.search(query_text, top_k=max(k_values)))
+        cache_time = time.time() - cache_hit_start
+        log(f"  缓存查找完成: {cache_hits}/{len(all_query_texts)} 命中, 耗时: {cache_time:.1f}秒")
+    else:
+        # 无缓存，在线搜索
+        log(f"  开始批量搜索...")
+        batch_start = time.time()
+        all_results = searcher.search_batch(all_query_texts, top_k=max(k_values))
+        batch_time = time.time() - batch_start
+        log(f"  批量搜索完成，耗时: {batch_time:.1f}秒")
 
     # 分组统计
-    group_groups = {g: [] for g in UNIQUE_GROUPS}
+    group_groups = {g: [] for g in UNIQUE_LEVELS}
     all_metrics = []
 
     word_bins = [(0, 15), (15, 20), (20, 25), (25, 30), (30, float('inf'))]
@@ -1142,7 +997,7 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: L
 
     group_metrics = {}
     group_counts = {}
-    for group in UNIQUE_GROUPS:
+    for group in UNIQUE_LEVELS:
         if group_groups[group]:
             group_metrics[group] = compute_average_metrics(group_groups[group], k_values)
             group_counts[group] = len(group_groups[group])
@@ -1199,89 +1054,6 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: L
     }
 
 # ============ 表格打印 ============
-def print_overall_table(all_results: List[Dict], k_values: List[int]):
-    header = f"{'检索器':<10} {'类型':<8} {'Dim':<5}"
-    for k in k_values:
-        header += f" {'P@'+str(k):<12}"
-    for k in k_values:
-        header += f" {'N@'+str(k):<12}"
-    header += f" {'时间(s)':<10}"
-
-    log("\n" + "=" * 100)
-    log(f"总体评估结果{CATEGORY_NAME}")
-    log("=" * 100)
-    log(header)
-    log("-" * 100)
-
-    for r in all_results:
-        m = r['metrics']
-        row = f"{r['retriever']:<10} {r['type']:<8} {r['dim']:<5}"
-        for k in k_values:
-            row += f" {m[f'P@{k}']:.4f}     "
-        for k in k_values:
-            row += f" {m[f'N@{k}']:.4f}     "
-        row += f" {r['eval_time_seconds']:.2f}"
-        log(row)
-
-def print_group_table(all_results: List[Dict], k_values: List[int]):
-    log("\n" + "=" * 120)
-    log(f"{GROUP_FIELD.upper()} 分组评估结果{CATEGORY_NAME}")
-    log("=" * 120)
-
-    for group in UNIQUE_GROUPS:
-        log(f"\n--- {GROUP_FIELD.upper()}={group} ---")
-        header = f"{'检索器':<10} {'类型':<8}"
-        for k in k_values:
-            header += f" {'P@'+str(k):<12}"
-        header += f" {'用户数':<8}"
-        log(header)
-        log("-" * 120)
-
-        for r in all_results:
-            m = r['group_metrics'].get(group, {})
-            count = r['group_counts'].get(group, 0)
-            row = f"{r['retriever']:<10} {r['type']:<8}"
-            for k in k_values:
-                row += f" {m.get(f'P@{k}', 0.0):.4f}     "
-            row += f" {count:<8}"
-            log(row)
-
-def print_cross_tab(all_results: List[Dict], metric: str, query_type: str = ''):
-    suffix = f" [{query_type.upper()} 版本]" if query_type else ""
-    log(f"\n{'='*80}")
-    log(f"交叉对比表{CATEGORY_NAME}: {metric}{suffix}")
-    log(f"{'='*80}")
-
-    header = f"{'检索器':<12}"
-    for group in UNIQUE_GROUPS:
-        header += f" {GROUP_FIELD.upper()+str(group):<12}"
-    header += f" {'平均':<10}"
-    log(header)
-    log("-" * 80)
-
-    totals = {0: 0, 1: 0, 2: 0, 3: 0, 'count': 0}
-    for r in all_results:
-        row = f"{r['retriever']:<12}"
-        row_sum = 0
-        row_count = 0
-        for group in UNIQUE_GROUPS:
-            val = r['group_metrics'].get(group, {}).get(metric, 0.0)
-            row += f" {val:.4f}     "
-            row_sum += val
-            totals[group] += val
-            row_count += 1
-        row_avg = row_sum / row_count if row_count > 0 else 0.0
-        totals['count'] += 1
-        row += f" {row_avg:.4f}"
-        log(row)
-
-    if totals['count'] > 0:
-        avg_row = f"{'平均':<12}"
-        for group in UNIQUE_GROUPS:
-            avg_val = totals[group] / totals['count']
-            avg_row += f" {avg_val:.4f}     "
-        log("-" * 80)
-        log(avg_row)
 
 
 def print_summary_table_wide(all_results: List[Dict], query_type: str = 'CORRECT'):
@@ -1290,12 +1062,13 @@ def print_summary_table_wide(all_results: List[Dict], query_type: str = 'CORRECT
     格式：
     检索器 | P@1_ACL0 | P@1_ACL1 | ... | P@10_ACL3 | 平均
     """
+    global GROUP_FIELD
     log(f"\n{'='*100}")
     log(f"汇总表（宽格式）| {query_type} | 每行一个检索器，列为 (指标×分组)")
     log(f"{'='*100}")
 
     metrics = ['P@1', 'P@3', 'P@5', 'P@10', 'N@10', 'MR@10', 'H@10']
-    groups = [f"{GROUP_FIELD.upper()}{g}" for g in UNIQUE_GROUPS]
+    groups = [f"{GROUP_FIELD.upper()}{g}" for g in UNIQUE_LEVELS]
 
     # 构建表头 - 使用固定宽度列（每列12字符，右对齐）
     COL_W = 12
@@ -1322,7 +1095,7 @@ def print_summary_table_wide(all_results: List[Dict], query_type: str = 'CORRECT
 
         for m in metrics:
             metric_vals = []
-            for group in UNIQUE_GROUPS:
+            for group in UNIQUE_LEVELS:
                 val = r['group_metrics'].get(group, {}).get(m, 0.0)
                 row += f" {val:>{COL_W}.4f}"
                 metric_vals.append(val)
@@ -1338,464 +1111,388 @@ def print_summary_table_wide(all_results: List[Dict], query_type: str = 'CORRECT
     log("-" * 100)
 
 
-def print_summary_table_long(all_results: List[Dict], query_type: str = 'CORRECT'):
-    """长格式汇总表：每行是 (检索器, 指标, 分组) 的一个单元格值
+# ============ 实验 1: Paired t-test on ACL_k − CCOMP_k ============
+def run_paired_ttest_analysis(all_results_by_category_and_type: Dict, word_idf: Dict[str, float]):
+    """实验 1: Paired t-test on ACL_k − CCOMP_k
 
-    格式：
-    检索器 | 指标 | CCOMP0 | CCOMP1 | CCOMP2 | CCOMP3 | 平均
+    对每个 (retriever, level, domain) 跑配对 t-test
+    输出格式: Retriever | Level | Domain | Mean Diff | 95% CI | p-value
     """
-    log(f"\n{'='*100}")
-    log(f"汇总表（长格式）| {query_type} | 每行一个指标，列为各分组")
-    log(f"{'='*100}")
+    log("\n" + "=" * 100)
+    log("实验 1: Paired t-test on ACL_k − CCOMP_k (P@10)")
+    log("=" * 100)
+    log("按 (user_id, asin, level) 配对，计算 diff = P@10(ACL_k) - P@10(CCOMP_k)")
+    log("")
 
-    header = f"{'指标':<10}"
-    for ccomp in UNIQUE_GROUPS:
-        header += f" {GROUP_FIELD.upper()+str(ccomp):<12}"
-    header += f" {'平均':<12}"
-    log(header)
-    log("-" * 80)
+    results_table = []
 
-    metrics = ['P@1', 'P@3', 'P@5', 'P@10', 'N@10', 'MR@10', 'H@10']
-    retrievers = sorted(set(r['retriever'] for r in all_results))
-
-    for metric in metrics:
-        row = f"{metric:<10}"
-        metric_group_vals = []
-
-        for group in UNIQUE_GROUPS:
-            group_vals = []
-            for r in all_results:
-                val = r['group_metrics'].get(group, {}).get(metric, 0.0)
-                group_vals.append(val)
-            group_avg = sum(group_vals) / len(group_vals) if group_vals else 0.0
-            row += f" {group_avg:.4f}      "
-            metric_group_vals.append(group_avg)
-
-        overall_avg = sum(metric_group_vals) / len(metric_group_vals) if metric_group_vals else 0.0
-        row += f" {overall_avg:.4f}      "
-        log(row)
-
-    # 添加每个检索器的详细数据
-    log(f"\n{'='*100}")
-    log(f"检索器详细数据 | {query_type}")
-    log(f"{'='*100}")
-
-    for retriever in retrievers:
-        r = next((x for x in all_results if x['retriever'] == retriever), None)
-        if not r:
+    for (category, qt), results in all_results_by_category_and_type.items():
+        if qt != 'correct':  # 只用 correct 查询
             continue
 
-        log(f"\n{retriever}:")
-        sub_header = f"{'指标':<10}"
-        for group in UNIQUE_GROUPS:
-            sub_header += f" {GROUP_FIELD.upper()+str(group):<12}"
-        sub_header += f" {'平均':<12}"
-        log(sub_header)
-        log("-" * 70)
+        domain = category  # 'acl' 或 'ccomp'
 
-        for metric in metrics:
-            row = f"{metric:<10}"
-            metric_vals = []
-            for group in UNIQUE_GROUPS:
-                val = r['group_metrics'].get(group, {}).get(metric, 0.0)
-                row += f" {val:.4f}      "
-                metric_vals.append(val)
-            metric_avg = sum(metric_vals) / len(metric_vals) if metric_vals else 0.0
-            row += f" {metric_avg:.4f}      "
-            log(row)
+        for r in results:
+            retriever = r['retriever']
+            query_records = r.get('all_query_records', [])
 
-
-# ============ 分层分析：IDF × CCOMP ============
-def run_ols_group_analysis(all_results: List[Dict]):
-    """OLS回归分析: 控制IDF、查询长度、词汇复杂度后，检验acl/ccomp效应是否独立"""
-    global GROUP_FIELD
-    log("\n" + "=" * 80)
-    log(f"6C. OLS回归分析: {GROUP_FIELD.upper()}效应是否独立于IDF等混淆因素")
-    log("=" * 80)
-    log("目的: 在控制 mean_idf + query_length + group_ratio 后，检验 group_high 的净效应")
-    log("")
-
-    # 合并所有检索器的 query records
-    all_records = []
-    for r in all_results:
-        retriever = r['retriever']
-        for rec in r.get('all_query_records', []):
-            rec_copy = rec.copy()
-            rec_copy['retriever'] = retriever
-            all_records.append(rec_copy)
-
-    if not all_records:
-        log("  (无 query records 数据，跳过 OLS 分析)")
-        return
-
-    df = pd.DataFrame(all_records)
-
-    # 检查 GROUP_FIELD 是否存在于 DataFrame 中
-    if GROUP_FIELD not in df.columns:
-        log(f"  (分组字段 '{GROUP_FIELD}' 不存在于数据中，跳过 OLS 分析)")
-        log(f"  可用列: {list(df.columns)}")
-        return
-
-    # 动态阈值：使用中位数分组
-    threshold = UNIQUE_GROUPS[len(UNIQUE_GROUPS) // 2] if UNIQUE_GROUPS else 2
-    df['group_high'] = (df[GROUP_FIELD] >= threshold).astype(int)
-    log(f"  分组字段: {GROUP_FIELD}, 高低分界阈值: {threshold}")
-    log(f"  有效分组: {UNIQUE_GROUPS}")
-
-    log(f"  总样本数: {len(df)} queries")
-    log(f"  group_high=1: {df['group_high'].sum()}, group_high=0: {(df['group_high']==0).sum()}")
-    log(f"  检索器数: {df['retriever'].nunique()}")
-    log("")
-
-    # 分检索器运行 OLS，收集结果
-    ols_table = []
-    for retriever in sorted(df['retriever'].unique()):
-        df_r = df[df['retriever'] == retriever].copy()
-        formula = f'p_at10 ~ group_high + mean_idf + query_length + {GROUP_FIELD}_ratio'
-
-        try:
-            df_r_clean = df_r[['p_at10', 'group_high', 'mean_idf', 'query_length', f'{GROUP_FIELD}_ratio']].dropna()
-            if len(df_r_clean) < 10:
-                ols_table.append({'retriever': retriever, 'n': len(df_r_clean), 'r2': float('nan'),
-                                 'coef': float('nan'), 't': float('nan'), 'p': float('nan'), 'sig': ''})
+            if not query_records:
                 continue
 
-            model = smf.ols(formula, data=df_r_clean).fit()
-            p_val = model.pvalues.get('group_high', float('nan'))
-            coef = model.params.get('group_high', float('nan'))
-            t_val = model.tvalues.get('group_high', float('nan'))
-            sig = "***" if not np.isnan(p_val) and p_val < 0.001 else \
-                  "**"  if not np.isnan(p_val) and p_val < 0.01  else \
-                  "*"   if not np.isnan(p_val) and p_val < 0.05  else ""
-            ols_table.append({
+            # 按 level 分组
+            level_groups = defaultdict(list)
+            for rec in query_records:
+                level = rec.get('acl', rec.get('ccomp', 0))
+                level_groups[level].append(rec)
+
+            for level, records in level_groups.items():
+                # 同一 retriever 下，按 (user_id, asin) 配对
+                # 由于我们是在同一个结果文件里，需要找对应的 ACL 和 CCOMP 记录
+                # 这里我们比较同一 level 下 ACL vs CCOMP 的 P@10
+                pass  # 需要 ACL 和 CCOMP 分别的结果来配对
+
+    # 重新组织数据：分别收集 ACL 和 CCOMP 的结果
+    acl_results_by_retriever = {}  # {retriever: {level: {key: p10}}}
+    ccomp_results_by_retriever = {}
+
+    for (category, qt), results in all_results_by_category_and_type.items():
+        if qt != 'correct':
+            continue
+
+        is_acl = (category == 'acl')
+
+        for r in results:
+            retriever = r['retriever']
+
+            if is_acl:
+                if retriever not in acl_results_by_retriever:
+                    acl_results_by_retriever[retriever] = defaultdict(dict)
+                target_dict = acl_results_by_retriever[retriever]
+            else:
+                if retriever not in ccomp_results_by_retriever:
+                    ccomp_results_by_retriever[retriever] = defaultdict(dict)
+                target_dict = ccomp_results_by_retriever[retriever]
+
+            for rec in r.get('all_query_records', []):
+                # ACL 查询的 level 字段是 'acl'，CCOMP 是 'ccomp'
+                if is_acl:
+                    level = rec.get('acl', 0)
+                else:
+                    level = rec.get('ccomp', 0)
+                key = (rec.get('user_id', ''), rec.get('asin', ''))
+                target_dict[level][key] = rec.get('p_at10', 0.0)
+
+    # 对每个 (retriever, level) 跑配对 t-test
+    log(f"\n{'Retriever':<12} {'Level':<8} {'N_pairs':<10} {'Mean_Diff':<12} {'95% CI':<18} {'p-value':<12} {'Sig':<6}")
+    log("-" * 100)
+
+    all_results = []
+
+    for retriever in sorted(set(list(acl_results_by_retriever.keys()) + list(ccomp_results_by_retriever.keys()))):
+        acl_levels = acl_results_by_retriever.get(retriever, {})
+        ccomp_levels = ccomp_results_by_retriever.get(retriever, {})
+
+        all_levels = sorted(set(list(acl_levels.keys()) + list(ccomp_levels.keys())))
+
+        for level in all_levels:
+            acl_dict = acl_levels.get(level, {})
+            ccomp_dict = ccomp_levels.get(level, {})
+
+            # 找共同 key
+            common_keys = set(acl_dict.keys()) & set(ccomp_dict.keys())
+
+            if len(common_keys) < 3:
+                continue
+
+            diffs = [acl_dict[k] - ccomp_dict[k] for k in common_keys]
+            mean_diff = np.mean(diffs)
+            std_diff = np.std(diffs, ddof=1)
+
+            # Bootstrap 95% CI
+            np.random.seed(42)
+            n_bootstrap = 1000
+            boot_means = []
+            for _ in range(n_bootstrap):
+                sample = np.random.choice(diffs, size=len(diffs), replace=True)
+                boot_means.append(np.mean(sample))
+            ci_lower = np.percentile(boot_means, 2.5)
+            ci_upper = np.percentile(boot_means, 97.5)
+
+            # Paired t-test against 0
+            t_stat, p_value = stats.ttest_1samp(diffs, 0)
+
+            sig = "***" if p_value < 0.001 else "**" if p_value < 0.01 else "*" if p_value < 0.05 else ""
+
+            mean_str = f"{mean_diff:+.4f}"
+            ci_str = f"[{ci_lower:+.2f}, {ci_upper:+.2f}]"
+            p_str = f"{p_value:.3e}" if p_value < 0.001 else f"{p_value:.4f}"
+
+            log(f"{retriever:<12} {level:<8} {len(common_keys):<10} {mean_str:<12} {ci_str:<18} {p_str:<12} {sig:<6}")
+
+            all_results.append({
                 'retriever': retriever,
-                'n': len(df_r_clean),
-                'r2': model.rsquared,
-                'coef': coef,
-                't': t_val,
-                'p': p_val,
+                'level': level,
+                'n_pairs': len(common_keys),
+                'mean_diff': mean_diff,
+                'ci_lower': ci_lower,
+                'ci_upper': ci_upper,
+                'p_value': p_value,
+                't_stat': t_stat,
                 'sig': sig
             })
-        except Exception as e:
-            ols_table.append({'retriever': retriever, 'n': 0, 'r2': float('nan'),
-                             'coef': float('nan'), 't': float('nan'), 'p': float('nan'), 'sig': f'ERR:{e}'})
 
-    # 汇总 OLS
-    formula_pooled = f'p_at10 ~ group_high + mean_idf + query_length + {GROUP_FIELD}_ratio + C(retriever)'
-    try:
-        df_clean = df[['p_at10', 'group_high', 'mean_idf', 'query_length', f'{GROUP_FIELD}_ratio', 'retriever']].dropna()
-        model_pooled = smf.ols(formula_pooled, data=df_clean).fit()
-        p_val = model_pooled.pvalues.get('group_high', float('nan'))
-        coef = model_pooled.params.get('group_high', float('nan'))
-        t_val = model_pooled.tvalues.get('group_high', float('nan'))
-        sig = "***" if not np.isnan(p_val) and p_val < 0.001 else \
-              "**"  if not np.isnan(p_val) and p_val < 0.01  else \
-              "*"   if not np.isnan(p_val) and p_val < 0.05  else ""
-        ols_table.append({
-            'retriever': 'Pooled',
-            'n': len(df_clean),
-            'r2': model_pooled.rsquared,
-            'coef': coef,
-            't': t_val,
-            'p': p_val,
-            'sig': sig
-        })
-    except Exception as e:
-        ols_table.append({'retriever': 'Pooled', 'n': 0, 'r2': float('nan'),
-                         'coef': float('nan'), 't': float('nan'), 'p': float('nan'), 'sig': f'ERR:{e}'})
+    # 汇总行
+    if all_results:
+        log("-" * 100)
+        pooled_diffs = [r['mean_diff'] * r['n_pairs'] for r in all_results]
+        total_n = sum(r['n_pairs'] for r in all_results)
+        pooled_mean = sum(pooled_diffs) / total_n if total_n > 0 else 0
 
-    # 打印 OLS 表格
-    log("")
-    header = f"{'Retriever':<12} {'N':<6} {'R2':<8} {'Coef':<10} {'t':<8} {'P>|t|':<10} {'Sig':<5}"
-    log(header)
-    log("-" * 70)
-    for row in ols_table:
-        r2_str = f"{row['r2']:.4f}" if not np.isnan(row['r2']) else "NaN"
-        coef_str = f"{row['coef']:.5f}" if not np.isnan(row['coef']) else "NaN"
-        t_str = f"{row['t']:.3f}" if not np.isnan(row['t']) else "NaN"
-        p_str = f"{row['p']:.4f}" if not np.isnan(row['p']) else "NaN"
-        log(f"{row['retriever']:<12} {row['n']:<6} {r2_str:<8} {coef_str:<10} {t_str:<8} {p_str:<10} {row['sig']:<5}")
-    log("")
+        # 简单的汇总结论
+        sig_count = sum(1 for r in all_results if r['sig'])
+        log(f"\n  汇总: {len(all_results)} 个 (retriever, level) 组合中，{sig_count} 个显著 (p<0.05)")
 
-# ============ Paired Difference 分析 ============
-def run_paired_difference_analysis(all_results: List[Dict]):
-    """Paired Difference 分析：比较两个极端版本（低 vs 高）的检索性能差异"""
-    global GROUP_FIELD
-    log("\n" + "=" * 80)
-    log(f"{GROUP_FIELD.upper()} Paired Difference 分析 (极端版本: {GROUP_FIELD}=0 vs {GROUP_FIELD}=max)")
-    log("=" * 80)
+    return all_results
 
-    # 收集所有 (user_id, retriever, group_value, hit10) 记录
-    records = []
-    for r in all_results:
-        retriever = r['retriever']
-        for rec in r.get('all_query_records', []):
-            records.append({
-                'user_id': rec.get('user_id', ''),
-                'retriever': retriever,
-                'group': rec.get(GROUP_FIELD, 0),
-                'hit10': rec.get('hit_at10', 0.0),
-            })
 
-    if not records:
-        log("  (无 query records 数据，跳过 Paired Difference 分析)")
-        return
+# ============ 实验 2: Query 长度和 IDF 的对称性验证 ============
+def run_symmetry_check(acl_df: pd.DataFrame, ccomp_df: pd.DataFrame, word_idf: Dict[str, float]):
+    """实验 2: 验证 ACL_k 和 CCOMP_k 的长度/IDF 对称性
 
-    df = pd.DataFrame(records)
-    n_retrievers = df['retriever'].nunique()
-    log(f"  总查询记录: {len(df)} ({n_retrievers}检索器 × {len(df)//n_retrievers}查询/检索器)")
+    对每对 (ACL_k, CCOMP_k) query，计算：
+    - len_diff = len_acl - len_ccomp
+    - idf_diff = idf_acl - idf_ccomp
 
-    # 获取所有分组值
-    all_groups = sorted(df['group'].unique())
-    if len(all_groups) < 2:
-        log("  分组不足，跳过 Paired Difference 分析")
-        return
-
-    group_low = all_groups[0]  # 最低版本
-    group_high = all_groups[-1]  # 最高版本
-    log(f"  最低版本: {GROUP_FIELD}={group_low}, 最高版本: {GROUP_FIELD}={group_high}")
-    log("")
-
-    # 构建 pivot 表：(user_id, retriever) × group_value = hit10
-    df_filtered = df[df['group'].isin([group_low, group_high])]
-    pivot = df_filtered.pivot_table(
-        index=['user_id', 'retriever'],
-        columns='group',
-        values='hit10'
-    ).reset_index()
-
-    if pivot.empty:
-        log("  (无法构建 pivot 表，跳过分析)")
-        return
-
-    # 确保有 user_id 列
-    if 'user_id' not in pivot.columns:
-        log("  (缺少 user_id 列，跳过分析)")
-        return
-
-    pivot.columns = ['user_id', 'retriever'] + [f'g{c}' for c in pivot.columns[2:]]
-    pivot['diff'] = pivot[f'g{group_high}'] - pivot[f'g{group_low}']
-
-    n_ret = len(pivot['retriever'].unique())
-    pairs_per_ret = len(pivot) // n_ret
-    log(f"  配对样本数: {len(pivot)} ({n_ret}检索器 × {pairs_per_ret}对/检索器，每对 = 同用户group3 vs group0)")
-
-    # Paired bootstrap per retriever
-    np.random.seed(42)
-    n_bootstrap = 10000
-    results = []
-
-    for retriever in sorted(pivot['retriever'].unique()):
-        df_r = pivot[pivot['retriever'] == retriever].copy()
-        diffs = df_r['diff'].dropna().values
-        n = len(diffs)
-
-        if n < 2:
-            results.append({
-                'retriever': retriever, 'n': n,
-                'mean_diff': float('nan'), 'ci_low': float('nan'), 'ci_high': float('nan'),
-                't': float('nan'), 'p': float('nan'), 'sig': ''
-            })
-            continue
-
-        # Paired t-test
-        from scipy.stats import ttest_1samp
-        t, p = ttest_1samp(diffs, 0)
-
-        # Bootstrap CI
-        boot_means = []
-        for _ in range(n_bootstrap):
-            resample = np.random.choice(diffs, size=n, replace=True)
-            boot_means.append(resample.mean())
-        ci_low, ci_high = np.percentile(boot_means, [2.5, 97.5])
-
-        sig = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else ""
-        results.append({
-            'retriever': retriever, 'n': n,
-            'mean_diff': diffs.mean(), 'ci_low': ci_low, 'ci_high': ci_high,
-            't': t, 'p': p, 'sig': sig
-        })
-
-    # 打印结果表格
-    log("")
-    header = f"{'Retriever':<12} {'N':<6} {'MeanDiff':<10} {'95% CI':<18} {'t':<8} {'P>|t|':<10} {'Sig':<5}"
-    log(header)
-    log("-" * 80)
-    for row in results:
-        mean_str = f"{row['mean_diff']:.4f}" if not np.isnan(row['mean_diff']) else "NaN"
-        ci_str = f"[{row['ci_low']:.4f}, {row['ci_high']:.4f}]" if not np.isnan(row['ci_low']) else "[NaN, NaN]"
-        t_str = f"{row['t']:.3f}" if not np.isnan(row['t']) else "NaN"
-        p_str = f"{row['p']:.4f}" if not np.isnan(row['p']) else "NaN"
-        log(f"{row['retriever']:<12} {row['n']:<6} {mean_str:<10} {ci_str:<18} {t_str:<8} {p_str:<10} {row['sig']:<5}")
-    log("")
-
-    # 汇总：所有检索器合并
-    all_diffs = pivot['diff'].dropna().values
-    if len(all_diffs) >= 2:
-        t_all, p_all = ttest_1samp(all_diffs, 0)
-        boot_means = []
-        for _ in range(n_bootstrap):
-            resample = np.random.choice(all_diffs, size=len(all_diffs), replace=True)
-            boot_means.append(resample.mean())
-        ci_low_all, ci_high_all = np.percentile(boot_means, [2.5, 97.5])
-        sig_all = "***" if p_all < 0.001 else "**" if p_all < 0.01 else "*" if p_all < 0.05 else ""
-        log("-" * 80)
-        mean_all_str = f"{all_diffs.mean():.4f}"
-        ci_all_str = f"[{ci_low_all:.4f}, {ci_high_all:.4f}]"
-        t_all_str = f"{t_all:.3f}"
-        p_all_str = f"{p_all:.4f}"
-        log(f"{'Pooled':<12} {len(all_diffs):<6} {mean_all_str:<10} {ci_all_str:<18} {t_all_str:<8} {p_all_str:<10} {sig_all:<5}")
-        log("")
-
-# ============ Paired OLS 回归：ACL/CCOMP 纯效应分析 ============
-def run_group_pure_effect_regression(all_results: List[Dict]):
-    """Paired OLS 回归：控制长度差和 IDF 差后，分析 acl/ccomp 的纯效应
-
-    对每个用户计算：
-    - diff_p10 = acl=3 的 P@10 - acl/ccomp=0 的 P@10
-    - diff_length = acl=3 的长度 - acl/ccomp=0 的长度
-    - diff_idf = acl=3 的 IDF - acl/ccomp=0 的 IDF
-
-    然后运行 OLS: diff_p10 ~ diff_length + diff_idf
-    - 截距 = 控制长度和 IDF 差异后的 acl/ccomp 纯效应
-    - diff_length 系数 = 长度每多 1 词，P@10 变化多少
-    - diff_idf 系数 = IDF 每多 1，P@10 变化多少
+    期望: mean len_diff ≈ 0, mean idf_diff ≈ 0
     """
-    global GROUP_FIELD
-    log("\n" + "=" * 80)
-    log(f"{GROUP_FIELD.upper()} 纯效应回归分析 (控制 diff_length + diff_idf)")
-    log("=" * 80)
-    log("模型: diff_p10 ~ diff_length + diff_idf")
-    log("  • 截距 = 控制长度差和IDF差后的 group 纯效应")
-    log("  • diff_length 系数 = 长度每多1词，P@10 变化多少")
-    log("  • diff_idf 系数 = IDF每多1，P@10 变化多少")
+    log("\n" + "=" * 100)
+    log("实验 2: Query 长度和 IDF 的对称性验证")
+    log("=" * 100)
+    log("目的: 验证 ACL_k 和 CCOMP_k 长度/IDF 是否可比（无系统性偏斜）")
     log("")
 
-    # 收集所有 (user_id, retriever, group, p_at10, query_length, mean_idf) 记录
-    records = []
-    for r in all_results:
-        retriever = r['retriever']
-        for rec in r.get('all_query_records', []):
-            records.append({
-                'user_id': rec.get('user_id', ''),
-                'retriever': retriever,
-                'group': rec.get(GROUP_FIELD, 0),
-                'p_at10': rec.get('p_at10', 0.0),
-                'query_length': rec.get('query_length', 0.0),
-                'mean_idf': rec.get('mean_idf', 0.0),
-            })
+    # 计算 IDF
+    log("  计算查询 IDF...")
+    acl_df['mean_idf'] = acl_df['query'].apply(lambda q: compute_query_idf_simple(q, word_idf))
+    ccomp_df['mean_idf'] = ccomp_df['query'].apply(lambda q: compute_query_idf_simple(q, word_idf))
 
-    if not records:
-        log("  (无 query records 数据，跳过纯效应回归分析)")
-        return
+    # 配对: 按 (user_id, asin, level)
+    merged = pd.merge(
+        acl_df, ccomp_df,
+        on=['user_id', 'asin', 'level'],
+        suffixes=('_acl', '_ccomp')
+    )
 
-    df = pd.DataFrame(records)
-    n_retrievers = df['retriever'].nunique()
-    log(f"  总查询记录: {len(df)} ({n_retrievers} 检索器)")
+    if merged.empty:
+        log("  警告: 无法配对 ACL 和 CCOMP 查询，跳过对称性检验")
+        return None
 
-    # 获取分组边界
-    all_groups = sorted(df['group'].unique())
-    if len(all_groups) < 2:
-        log("  分组不足，跳过纯效应回归分析")
-        return
-
-    group_low = all_groups[0]   # acl=0
-    group_high = all_groups[-1]  # acl=max
-    log(f"  极端版本: {GROUP_FIELD}={group_low} (低) vs {GROUP_FIELD}={group_high} (高)")
+    log(f"  配对数: {len(merged)}")
     log("")
-
-    # 构建配对数据：(user_id, retriever) 配对
-    df_low = df[df['group'] == group_low][['user_id', 'retriever', 'p_at10', 'query_length', 'mean_idf']].copy()
-    df_high = df[df['group'] == group_high][['user_id', 'retriever', 'p_at10', 'query_length', 'mean_idf']].copy()
-
-    df_low.columns = ['user_id', 'retriever', 'p_at10_low', 'length_low', 'idf_low']
-    df_high.columns = ['user_id', 'retriever', 'p_at10_high', 'length_high', 'idf_high']
-
-    paired = pd.merge(df_low, df_high, on=['user_id', 'retriever'], how='inner')
-    if paired.empty:
-        log("  (无法配对，跳过纯效应回归分析)")
-        return
 
     # 计算差值
-    paired['diff_p10'] = paired['p_at10_high'] - paired['p_at10_low']
-    paired['diff_length'] = paired['length_high'] - paired['length_low']
-    paired['diff_idf'] = paired['idf_high'] - paired['idf_low']
+    merged['len_diff'] = merged['word_count_acl'] - merged['word_count_ccomp']
+    merged['idf_diff'] = merged['mean_idf_acl'] - merged['mean_idf_ccomp']
 
-    n_pairs = len(paired)
-    n_ret = len(paired['retriever'].unique())
-    pairs_per_ret = n_pairs // n_ret if n_ret > 0 else n_pairs
-    log(f"  配对样本数: {n_pairs} ({n_ret} 检索器 × {pairs_per_ret} 对/检索器)")
-    log(f"  diff_p10: mean={paired['diff_p10'].mean():.4f}, std={paired['diff_p10'].std():.4f}")
-    log(f"  diff_length: mean={paired['diff_length'].mean():.2f}, std={paired['diff_length'].std():.2f}")
-    log(f"  diff_idf: mean={paired['diff_idf'].mean():.4f}, std={paired['diff_idf'].std():.4f}")
-    log("")
+    # 按 level 报告
+    log(f"{'Level':<8} {'N':<10} {'Mean_len_diff':<14} {'Std_len':<10} {'Mean_idf_diff':<14} {'Std_idf':<10}")
+    log("-" * 80)
 
-    # 分检索器运行 OLS
-    ols_table = []
-    formula = 'diff_p10 ~ diff_length + diff_idf'
+    symmetry_results = []
+    for level in sorted(merged['level'].unique()):
+        subset = merged[merged['level'] == level]
+        n = len(subset)
 
-    for retriever in sorted(paired['retriever'].unique()):
-        df_r = paired[paired['retriever'] == retriever].copy()
-        df_r_clean = df_r[['diff_p10', 'diff_length', 'diff_idf']].dropna()
+        mean_len_diff = subset['len_diff'].mean()
+        std_len_diff = subset['len_diff'].std()
+        mean_idf_diff = subset['idf_diff'].mean()
+        std_idf_diff = subset['idf_diff'].std()
 
-        if len(df_r_clean) < 10:
-            ols_table.append({
-                'retriever': retriever, 'n': len(df_r_clean),
-                'r2': float('nan'), 'intercept': float('nan'), 'intercept_p': float('nan'),
-                'coef_length': float('nan'), 'coef_length_p': float('nan'),
-                'coef_idf': float('nan'), 'coef_idf_p': float('nan'),
-            })
-            continue
+        log(f"{level:<8} {n:<10} {mean_len_diff:+14.2f} {std_len_diff:<10.2f} {mean_idf_diff:+14.4f} {std_idf_diff:<10.4f}")
 
-        model = smf.ols(formula, data=df_r_clean).fit()
-
-        ols_table.append({
-            'retriever': retriever,
-            'n': len(df_r_clean),
-            'r2': model.rsquared,
-            'intercept': model.params.get('Intercept', float('nan')),
-            'intercept_p': model.pvalues.get('Intercept', float('nan')),
-            'coef_length': model.params.get('diff_length', float('nan')),
-            'coef_length_p': model.pvalues.get('diff_length', float('nan')),
-            'coef_idf': model.params.get('diff_idf', float('nan')),
-            'coef_idf_p': model.pvalues.get('diff_idf', float('nan')),
+        symmetry_results.append({
+            'level': level,
+            'n': n,
+            'mean_len_diff': mean_len_diff,
+            'std_len_diff': std_len_diff,
+            'mean_idf_diff': mean_idf_diff,
+            'std_idf_diff': std_idf_diff
         })
 
-    # 汇总：所有检索器合并
-    df_all_clean = paired[['diff_p10', 'diff_length', 'diff_idf']].dropna()
-    if len(df_all_clean) >= 10:
-        model_pooled = smf.ols(formula, data=df_all_clean).fit()
-        ols_table.append({
-            'retriever': 'Pooled',
-            'n': len(df_all_clean),
-            'r2': model_pooled.rsquared,
-            'intercept': model_pooled.params.get('Intercept', float('nan')),
-            'intercept_p': model_pooled.pvalues.get('Intercept', float('nan')),
-            'coef_length': model_pooled.params.get('diff_length', float('nan')),
-            'coef_length_p': model_pooled.pvalues.get('diff_length', float('nan')),
-            'coef_idf': model_pooled.params.get('diff_idf', float('nan')),
-            'coef_idf_p': model_pooled.pvalues.get('diff_idf', float('nan')),
-        })
+    # 总体对称性
+    log("-" * 80)
+    overall_len_diff = merged['len_diff'].mean()
+    overall_std_len = merged['len_diff'].std()
+    overall_idf_diff = merged['idf_diff'].mean()
+    overall_std_idf = merged['idf_diff'].std()
+    log(f"{'Overall':<8} {len(merged):<10} {overall_len_diff:+14.2f} {overall_std_len:<10.2f} {overall_idf_diff:+14.4f} {overall_std_idf:<10.4f}")
 
-    # 打印 OLS 表格
-    header = f"{'Retriever':<10} {'N':<6} {'R2':<8} {'Intercept':<12} {'P>|t|':<10} {'Coef_len':<10} {'P>|t|':<10} {'Coef_idf':<10} {'P>|t|':<10}"
-    log(header)
-    log("-" * 110)
-    for row in ols_table:
-        r2_str = f"{row['r2']:.4f}" if not np.isnan(row['r2']) else "NaN"
-        int_str = f"{row['intercept']:.5f}" if not np.isnan(row['intercept']) else "NaN"
-        int_p_str = f"{row['intercept_p']:.4f}" if not np.isnan(row['intercept_p']) else "NaN"
-        len_str = f"{row['coef_length']:.5f}" if not np.isnan(row['coef_length']) else "NaN"
-        len_p_str = f"{row['coef_length_p']:.4f}" if not np.isnan(row['coef_length_p']) else "NaN"
-        idf_str = f"{row['coef_idf']:.5f}" if not np.isnan(row['coef_idf']) else "NaN"
-        idf_p_str = f"{row['coef_idf_p']:.4f}" if not np.isnan(row['coef_idf_p']) else "NaN"
-        log(f"{row['retriever']:<10} {row['n']:<6} {r2_str:<8} {int_str:<12} {int_p_str:<10} {len_str:<10} {len_p_str:<10} {idf_str:<10} {idf_p_str:<10}")
     log("")
     log("  解读:")
-    log(f"  • Intercept = 控制 diff_length 和 diff_idf 后，{GROUP_FIELD} 从低到高的 P@10 纯效应")
-    log("  • Coef_len = 长度每多 1 词，diff_p10 变化多少")
-    log("  • Coef_idf = IDF 每多 1，diff_p10 变化多少")
+    log("  • |Mean len_diff| < 0.5 词 → 长度基本对称 ✓")
+    log("  • |Mean idf_diff| < 0.1 → IDF 基本对称 ✓")
+    if abs(overall_len_diff) > 1.0:
+        log(f"  ⚠️ 警告: ACL 平均比 CCOMP 长 {overall_len_diff:.1f} 词，存在长度 confound!")
+    if abs(overall_idf_diff) > 0.2:
+        log("  ⚠️ 警告: ACL 和 CCOMP 的 IDF 分布存在系统性差异!")
+
+    return symmetry_results
+
+
+# ============ 实验 3: OLS 控制 len_diff + idf_diff ============
+def run_controlled_ols_analysis(all_results_by_category_and_type: Dict, word_idf: Dict[str, float]):
+    """实验 3: OLS 控制 len_diff + idf_diff 后的纯方向偏好效应
+
+    如果实验 2 发现 ACL 和 CCOMP 长度/IDF 不完全对称，
+    运行 OLS: diff_p10 ~ len_diff + idf_diff
+    截距 = 控制长度和 IDF 后的"纯方向偏好"
+    """
+    log("\n" + "=" * 100)
+    log("实验 3: OLS 控制 len_diff + idf_diff 后的纯方向偏好 (P@10)")
+    log("=" * 100)
+    log("模型: diff_p10 ~ len_diff + idf_diff")
+    log("  • 截距 = 控制 len_diff 和 idf_diff 后的纯 ACL-CCOMP 方向偏好")
+    log("  • len_diff 系数 = 长度每多 1 词，diff_p10 变化多少")
+    log("  • idf_diff 系数 = IDF 每多 1，diff_p10 变化多少")
     log("")
+
+    # 重新组织数据：分别收集 ACL 和 CCOMP 的结果
+    acl_results_by_retriever = {}
+    ccomp_results_by_retriever = {}
+
+    for (category, qt), results in all_results_by_category_and_type.items():
+        if qt != 'correct':
+            continue
+
+        is_acl = (category == 'acl')
+
+        for r in results:
+            retriever = r['retriever']
+
+            if is_acl:
+                if retriever not in acl_results_by_retriever:
+                    acl_results_by_retriever[retriever] = defaultdict(dict)
+                target_dict = acl_results_by_retriever[retriever]
+            else:
+                if retriever not in ccomp_results_by_retriever:
+                    ccomp_results_by_retriever[retriever] = defaultdict(dict)
+                target_dict = ccomp_results_by_retriever[retriever]
+
+            for rec in r.get('all_query_records', []):
+                if is_acl:
+                    level = rec.get('acl', 0)
+                else:
+                    level = rec.get('ccomp', 0)
+                key = (rec.get('user_id', ''), rec.get('asin', ''))
+                target_dict[level][key] = {
+                    'p_at10': rec.get('p_at10', 0.0),
+                    'query_length': rec.get('query_length', 0.0),
+                    'mean_idf': rec.get('mean_idf', 0.0),
+                    'query': rec.get('query', '') if 'query' in rec else ''
+                }
+
+    # 配对并构建 OLS 数据
+    ols_records = []
+
+    for retriever in sorted(set(list(acl_results_by_retriever.keys()) + list(ccomp_results_by_retriever.keys()))):
+        acl_levels = acl_results_by_retriever.get(retriever, {})
+        ccomp_levels = ccomp_results_by_retriever.get(retriever, {})
+
+        all_levels = sorted(set(list(acl_levels.keys()) + list(ccomp_levels.keys())))
+
+        for level in all_levels:
+            acl_dict = acl_levels.get(level, {})
+            ccomp_dict = ccomp_levels.get(level, {})
+
+            common_keys = set(acl_dict.keys()) & set(ccomp_dict.keys())
+
+            if len(common_keys) < 3:
+                continue
+
+            for key in common_keys:
+                acl_rec = acl_dict[key]
+                ccomp_rec = ccomp_dict[key]
+
+                ols_records.append({
+                    'retriever': retriever,
+                    'level': level,
+                    'diff_p10': acl_rec['p_at10'] - ccomp_rec['p_at10'],
+                    'len_acl': acl_rec['query_length'],
+                    'len_ccomp': ccomp_rec['query_length'],
+                    'idf_acl': acl_rec['mean_idf'],
+                    'idf_ccomp': ccomp_rec['mean_idf'],
+                    'len_diff': acl_rec['query_length'] - ccomp_rec['query_length'],
+                    'idf_diff': acl_rec['mean_idf'] - ccomp_rec['mean_idf'],
+                })
+
+    if not ols_records:
+        log("  警告: 没有足够的配对数据，跳过 OLS 分析")
+        return None
+
+    df = pd.DataFrame(ols_records)
+    log(f"  总配对数: {len(df)}")
+
+    # 分 (retriever, level) 跑 OLS
+    log(f"\n{'Retriever':<12} {'Level':<8} {'N':<8} {'R2':<8} {'Intercept':<12} {'P>|t|':<10} {'Coef_len':<10} {'P>|t|':<10} {'Coef_idf':<10} {'P>|t|':<10}")
+    log("-" * 120)
+
+    ols_results = []
+
+    for retriever in sorted(df['retriever'].unique()):
+        for level in sorted(df['level'].unique()):
+            subset = df[(df['retriever'] == retriever) & (df['level'] == level)].copy()
+
+            if len(subset) < 10:
+                continue
+
+            # OLS: diff_p10 ~ len_diff + idf_diff
+            formula = 'diff_p10 ~ len_diff + idf_diff'
+            try:
+                model = smf.ols(formula, data=subset).fit()
+
+                intercept = model.params.get('Intercept', float('nan'))
+                intercept_p = model.pvalues.get('Intercept', float('nan'))
+                coef_len = model.params.get('len_diff', float('nan'))
+                coef_len_p = model.pvalues.get('len_diff', float('nan'))
+                coef_idf = model.params.get('idf_diff', float('nan'))
+                coef_idf_p = model.pvalues.get('idf_diff', float('nan'))
+
+                sig_int = "***" if intercept_p < 0.001 else "**" if intercept_p < 0.01 else "*" if intercept_p < 0.05 else ""
+
+                int_str = f"{intercept:+.5f}" if not np.isnan(intercept) else "NaN"
+                int_p_str = f"{intercept_p:.3e}" if intercept_p < 0.001 else f"{intercept_p:.4f}" if not np.isnan(intercept_p) else "NaN"
+                len_str = f"{coef_len:+.5f}" if not np.isnan(coef_len) else "NaN"
+                len_p_str = f"{coef_len_p:.4f}" if not np.isnan(coef_len_p) else "NaN"
+                idf_str = f"{coef_idf:+.5f}" if not np.isnan(coef_idf) else "NaN"
+                idf_p_str = f"{coef_idf_p:.4f}" if not np.isnan(coef_idf_p) else "NaN"
+
+                log(f"{retriever:<12} {level:<8} {len(subset):<8} {model.rsquared:<8.4f} {int_str:<12} {int_p_str:<10} {len_str:<10} {len_p_str:<10} {idf_str:<10} {idf_p_str:<10}")
+
+                ols_results.append({
+                    'retriever': retriever,
+                    'level': level,
+                    'n': len(subset),
+                    'r2': model.rsquared,
+                    'intercept': intercept,
+                    'intercept_p': intercept_p,
+                    'coef_len': coef_len,
+                    'coef_len_p': coef_len_p,
+                    'coef_idf': coef_idf,
+                    'coef_idf_p': coef_idf_p,
+                    'sig_int': sig_int
+                })
+            except Exception as e:
+                log(f"{retriever:<12} {level:<8} {len(subset):<8} ERR: {e}")
+
+    # 汇总: 所有 (retriever, level) 合并
+    if ols_results:
+        log("-" * 120)
+        log("\n  解读:")
+        log("  • Intercept = 控制 len_diff 和 idf_diff 后，ACL - CCOMP 的 P@10 纯效应")
+        log("  • 如果 Intercept 显著为正 → 用户对 ACL 风格有明显偏好")
+        log("  • 如果 Intercept 接近 0 → ACL/CCOMP 偏好差异来自长度/IDF confounds")
+
+    return ols_results
 
 
 # ============ 主流程 ============
@@ -2023,18 +1720,6 @@ def main():
         if all_results_by_type.get('noisy') and all_results_by_type.get('correct'):
             print_query_type_comparison(all_results_by_type, k_values, CATEGORY_NAME)
 
-        # 该类别的 OLS回归分析 (CORRECT 版本)
-        if all_results_by_type.get('correct'):
-            run_ols_group_analysis(all_results_by_type['correct'])
-
-        # 该类别的 Paired Difference 分析 (CORRECT 版本)
-        if all_results_by_type.get('correct'):
-            run_paired_difference_analysis(all_results_by_type['correct'])
-
-        # 该类别的纯效应回归 (CORRECT 版本)
-        if all_results_by_type.get('correct'):
-            run_group_pure_effect_regression(all_results_by_type['correct'])
-
     # ========== 全局 CORRECT vs NOISY 配对比较 (所有类别) ==========
     # 打印一个综合的 CORRECT vs NOISY 对比表
     log("\n" + "=" * 100)
@@ -2049,16 +1734,28 @@ def main():
             r_copy['query_category'] = category
             all_results_combined.append(r_copy)
 
+    # =========================================================
+    # ========== 新增三个核心实验 ==========
+    # =========================================================
+
+    # 加载配对数据用于实验 2
+    log("\n加载 ACL/CCOMP 配对数据用于对称性检验...")
+    acl_df, ccomp_df = load_paired_queries('acl')
+
+    # 实验 1: Paired t-test on ACL_k − CCOMP_k (最核心)
+    pttest_results = run_paired_ttest_analysis(all_results_by_category_and_type, word_idf)
+
+    # 实验 2: Query 长度和 IDF 的对称性验证
+    symmetry_results = run_symmetry_check(acl_df, ccomp_df, word_idf)
+
+    # 实验 3: OLS 控制 len_diff + idf_diff 后的纯方向偏好
+    ols_results = run_controlled_ols_analysis(all_results_by_category_and_type, word_idf)
+
     if all_results_combined:
         # 计算并打印 Bootstrap CI
         log("\n计算 Bootstrap CI (n=1000, CI=95%)...")
         for r in all_results_combined:
             r['bootstrap_ci'] = {}
-            for group in UNIQUE_GROUPS:
-                if r['raw_metrics_per_group'].get(group):
-                    r['bootstrap_ci'][group] = compute_bootstrap_ci(
-                        r['raw_metrics_per_group'][group], k_values, n_bootstrap=1000, ci=0.95
-                    )
             if r.get('all_raw_metrics'):
                 r['bootstrap_ci']['overall'] = compute_bootstrap_ci(
                     r['all_raw_metrics'], k_values, n_bootstrap=1000, ci=0.95
@@ -2093,7 +1790,10 @@ def main():
             'query_types': QUERY_TYPES,
             'query_categories': QUERY_CATEGORIES,
             'results_by_category_and_type': sanitize_for_json(all_results_by_category_and_type),
-            'all_results_combined': sanitize_for_json(all_results_combined)
+            'all_results_combined': sanitize_for_json(all_results_combined),
+            'experiment1_paired_ttest': sanitize_for_json(pttest_results) if pttest_results else None,
+            'experiment2_symmetry_check': sanitize_for_json(symmetry_results) if symmetry_results else None,
+            'experiment3_controlled_ols': sanitize_for_json(ols_results) if ols_results else None,
         }, f, indent=2, default=str)
     log(f"\n结果已保存到: {output_file}")
 

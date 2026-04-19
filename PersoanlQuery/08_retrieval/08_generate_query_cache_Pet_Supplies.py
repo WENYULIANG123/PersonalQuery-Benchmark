@@ -39,7 +39,7 @@ sys.path.insert(0, str(personquery_root))
 
 from utils.retrievers import (
     E5Retriever, BGERetriever,
-    STARRetriever, MiniLMRetriever, GritLMRetriever
+    STARRetriever, MiniLMRetriever, GritLMRetriever, BM25
 )
 
 STAGE9_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/09_targeted_noisy_query"
@@ -48,6 +48,7 @@ STAGE6_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query"
 ACL_QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Pet_Supplies/acl_query.json"
 CCOMP_QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Pet_Supplies/ccomp_query.json"
 CACHE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/query_cache_Pet_Supplies"
+BM25_RETRIEVER_CACHE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/retriever_Pet_Supplies_cache"
 
 AVAILABLE_RETRIEVERS = {
     'GRITLM': GritLMRetriever,  # 优先处理 GRITLM
@@ -55,7 +56,7 @@ AVAILABLE_RETRIEVERS = {
     'E5': E5Retriever,
     'MiniLM': MiniLMRetriever,
     'STAR': STARRetriever,
-    'BM25': None,  # BM25 不需要预计算查询嵌入
+    'BM25': None,  # BM25 单独处理
 }
 
 def log_with_timestamp(msg: str):
@@ -84,6 +85,140 @@ def find_all_users() -> Set[str]:
                     users.add(user_id)
 
     return users
+
+
+def load_bm25_retriever():
+    """加载 BM25 检索器（从预构建的索引缓存）"""
+    bm25_path = None
+    for f in os.listdir(BM25_RETRIEVER_CACHE_DIR):
+        if f.startswith('bm25_') and f.endswith('.pkl'):
+            bm25_path = os.path.join(BM25_RETRIEVER_CACHE_DIR, f)
+            break
+    if bm25_path is None:
+        raise FileNotFoundError(f"BM25 retriever cache not found in {BM25_RETRIEVER_CACHE_DIR}")
+
+    log_with_timestamp(f"  加载 BM25 索引: {os.path.getsize(bm25_path)/1024/1024:.1f} MB")
+    with open(bm25_path, 'rb') as f:
+        bm25 = pickle.load(f)
+    return bm25
+
+
+def generate_bm25_query_cache_for_mode(queries: List[Dict], mode: str, top_k: int = 100) -> Dict[str, List]:
+    """为单个模式生成 BM25 查询缓存
+
+    Args:
+        queries: 查询列表
+        mode: 查询模式 (acl_correct, acl_noisy, ccomp_correct, ccomp_noisy)
+        top_k: 预计算 top-k 结果
+
+    Returns:
+        Dict: 查询缓存，key=query文本, value=[(asin, score), ...]
+    """
+    log_with_timestamp(f"  开始生成 BM25 查询缓存 ({mode})...")
+
+    # 加载 BM25 检索器
+    bm25 = load_bm25_retriever()
+
+    cache = {}
+    for i, q in enumerate(queries):
+        query_text = q.get('query', '')
+        if not query_text or query_text in cache:
+            continue
+
+        try:
+            results = bm25.search(query_text, top_k=top_k)
+            cache[query_text] = results
+        except Exception as e:
+            log_with_timestamp(f"    ⚠️  BM25 搜索失败: {query_text[:40]}... - {e}")
+
+        if (i + 1) % 100 == 0:
+            log_with_timestamp(f"    进度: {i+1}/{len(queries)}")
+
+    log_with_timestamp(f"  ✓ BM25 查询缓存生成完成: {len(cache)} 条")
+    return cache
+
+
+def save_bm25_query_cache(cache: Dict, mode: str):
+    """保存 BM25 查询缓存到文件
+
+    Args:
+        cache: 查询缓存
+        mode: 查询模式 (acl_correct, acl_noisy, ccomp_correct, ccomp_noisy)
+    """
+    subdir = get_cache_subdir(mode)
+    cache_file = os.path.join(subdir, f"bm25__{mode}_cache.pkl")
+
+    with open(cache_file, 'wb') as f:
+        pickle.dump(cache, f)
+
+    file_size_mb = os.path.getsize(cache_file) / (1024 * 1024)
+    log_with_timestamp(f"  ✓ BM25 查询缓存已保存: {cache_file}")
+    log_with_timestamp(f"    - 查询数: {len(cache)}")
+    log_with_timestamp(f"    - 文件大小: {file_size_mb:.2f} MB")
+
+
+def generate_bm25_cache_from_persona_source():
+    """为 BM25 生成所有查询缓存 (ACL + CCOMP - correct + noisy)"""
+    # 加载 ACL 查询
+    acl_correct, acl_noisy = load_acl_queries()
+    # 加载 CCOMP 查询
+    ccomp_correct, ccomp_noisy = load_ccomp_queries()
+
+    if not acl_correct and not acl_noisy and not ccomp_correct and not ccomp_noisy:
+        log_with_timestamp("⚠️  没有从 acl_query.json 或 ccomp_query.json 加载到任何查询")
+        return {'total_cached': 0}
+
+    log_with_timestamp("=" * 80)
+    log_with_timestamp("🚀 开始生成 BM25 查询缓存 (ACL + CCOMP - correct + noisy)")
+    log_with_timestamp("=" * 80)
+
+    # 统计
+    acl_correct_count = len(acl_correct)
+    acl_noisy_count = len(acl_noisy)
+    ccomp_correct_count = len(ccomp_correct)
+    ccomp_noisy_count = len(ccomp_noisy)
+
+    log_with_timestamp(f"")
+    log_with_timestamp(f"📋 任务配置:")
+    log_with_timestamp(f"  • ACL correct 查询: {acl_correct_count} 条")
+    log_with_timestamp(f"  • ACL noisy 查询: {acl_noisy_count} 条")
+    log_with_timestamp(f"  • CCOMP correct 查询: {ccomp_correct_count} 条")
+    log_with_timestamp(f"  • CCOMP noisy 查询: {ccomp_noisy_count} 条")
+    log_with_timestamp(f"  • 缓存目录: {CACHE_DIR}")
+    log_with_timestamp(f"")
+
+    start_time = time.time()
+    total_cached = 0
+
+    # 定义所有查询类型和模式
+    query_modes = [
+        (acl_correct, 'acl_correct'),
+        (acl_noisy, 'acl_noisy'),
+        (ccomp_correct, 'ccomp_correct'),
+        (ccomp_noisy, 'ccomp_noisy'),
+    ]
+
+    for queries, mode in query_modes:
+        if queries:
+            cache = generate_bm25_query_cache_for_mode(queries, mode, top_k=100)
+            save_bm25_query_cache(cache, mode)
+            total_cached += len(cache)
+        else:
+            log_with_timestamp(f"  (无 {mode} 查询，跳过)")
+
+    elapsed = time.time() - start_time
+
+    log_with_timestamp("")
+    log_with_timestamp("=" * 80)
+    log_with_timestamp("✅ BM25 查询缓存生成完成!")
+    log_with_timestamp("=" * 80)
+    log_with_timestamp(f"")
+    log_with_timestamp(f"⏱️  执行统计:")
+    log_with_timestamp(f"  • 总耗时: {elapsed:.1f} 秒 ({elapsed/60:.1f} 分钟)")
+    log_with_timestamp(f"  • 缓存查询总数: {total_cached}")
+    log_with_timestamp(f"")
+
+    return {'total_cached': total_cached}
 
 
 def load_acl_queries() -> Tuple[List[Dict], List[Dict]]:
@@ -890,6 +1025,8 @@ def main():
     CLEAR_CACHE_BEFORE = True
     # 数据源：persona_generated_queries.json
     PERSONA_SOURCE = True
+    # 是否生成 BM25 查询缓存
+    GENERATE_BM25_CACHE = True
     # =================================================
 
     # 打印环境变量
@@ -898,10 +1035,23 @@ def main():
 
     if PERSONA_SOURCE:
         log_with_timestamp("📋 使用 persona_generated_queries.json 作为数据源")
+
+        # 先初始化缓存目录
+        if CLEAR_CACHE_BEFORE:
+            clear_cache()
+        initialize_cache_dir()
+
+        # 生成密集检索器查询缓存
         stats = generate_cache_from_persona_source(
             retriever_names=RETRIEVER_NAMES,
-            clear_cache_before=CLEAR_CACHE_BEFORE,
+            clear_cache_before=False,  # 目录已初始化
         )
+
+        # 生成 BM25 查询缓存
+        if GENERATE_BM25_CACHE:
+            log_with_timestamp("")
+            bm25_stats = generate_bm25_cache_from_persona_source()
+            log_with_timestamp(f"✓ BM25 查询缓存生成完成: {bm25_stats['total_cached']} 条")
         return
 
     # 默认旧逻辑（保留但不使用）
