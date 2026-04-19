@@ -1146,6 +1146,10 @@ class GritLMRetriever:
     Uses the official gritlm package for encoding with proper instruction prefixes.
     Reference: STaRK implementation (https://github.com/snap-stanford/STaRK)
               https://github.com/allenai/gritlm
+
+    Standard GritLM instruction format:
+    - Query: "<|user|>\nGiven a product search query, retrieve relevant product descriptions.\n<|embed|>\n"
+    - Document: "<|user|>\nGiven a product description, retrieve relevant web search queries.\n<|embed|>\n"
     """
     def __init__(self, model_name: str = "GritLM/GritLM-7B"):
         self.model_name = model_name
@@ -1155,18 +1159,20 @@ class GritLMRetriever:
         self.doc_ids = []
         self.all_metadata = None
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # STaRK 格式：与 gritlm 包一致，当 instruction 为空时不加 <|user|> 前缀
-        self.instruction = ""  # 空字符串，使用 "<|embed|>\n" 格式
+        # 标准 GritLM instruction 格式
+        self.query_instruction = "Given a product search query, retrieve relevant product descriptions."
+        self.doc_instruction = "Given a product description, retrieve relevant web search queries."
         # Pooling method (与 gritlm 包一致)
         self.pooling_method = 'mean'
         self.normalized = True
 
-    def _get_instruction(self) -> str:
-        """与 STaRK/gritlm 包一致的 instruction 格式"""
-        if self.instruction:
-            return "<|user|>\n" + self.instruction + "\n<|embed|>\n"
-        else:
-            return "<|embed|>\n"
+    def _get_query_instruction(self) -> str:
+        """获取查询指令格式"""
+        return f"<|user|>\n{self.query_instruction}\n<|embed|>\n"
+
+    def _get_doc_instruction(self) -> str:
+        """获取文档指令格式"""
+        return f"<|user|>\n{self.doc_instruction}\n<|embed|>\n"
 
     def _get_model(self):
         if self.model is None:
@@ -1187,12 +1193,11 @@ class GritLMRetriever:
         return self.model
 
     def _encode_text(self, text: str, max_length: int = 512) -> torch.Tensor:
-        """Encode text using GritLM with instruction prefix (STaRK format)."""
+        """Encode text using GritLM with standard query instruction prefix."""
         model = self._get_model()
-        # 与 STaRK/gritlm 包一致的 instruction 格式
         embedding = model.encode_queries(
             [text],
-            instruction=self._get_instruction(),
+            instruction=self._get_query_instruction(),
             max_length=max_length,
         )
         return torch.from_numpy(embedding[0])
@@ -1217,7 +1222,7 @@ class GritLMRetriever:
             batch_texts = texts[start_index:start_index + batch_size]
             batch_embeddings = model.encode_corpus(
                 batch_texts,
-                instruction=self._get_instruction(),
+                instruction=self._get_doc_instruction(),
                 max_length=512,
             )
             all_embeddings.append(torch.from_numpy(batch_embeddings))
