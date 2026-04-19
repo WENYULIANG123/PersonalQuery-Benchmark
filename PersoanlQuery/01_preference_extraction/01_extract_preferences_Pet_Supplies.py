@@ -775,6 +775,133 @@ def extract_domain_specific_pet(item: Dict) -> Dict[str, Any]:
     return a6_fields
 
 
+def extract_extended_attributes(item: Dict, description: str, feature: List) -> Dict[str, List[str]]:
+    """
+    提取 A7-A17 扩展属性槽位
+    A7: Material, A8: Safety, A9: Durability, A10: Ease_of_use,
+    A11: Temperature_resistance, A12: Surface, A13: Reusability,
+    A14: Size, A15: Weight, A16: Compatibility, A17: Flavor
+    """
+    details = item.get('details', {})
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except Exception:
+            details = {}
+
+    result = {
+        'A7_material': [],
+        'A8_safety': [],
+        'A9_durability': [],
+        'A10_ease_of_use': [],
+        'A11_temperature_resistance': [],
+        'A12_surface': [],
+        'A13_reusability': [],
+        'A14_size': [],
+        'A15_weight': [],
+        'A16_compatibility': [],
+        'A17_flavor': [],
+    }
+
+    # A7: Material - 从 details.Material 提取
+    material = details.get('Material', '')
+    if material:
+        result['A7_material'] = [str(material).strip()]
+
+    # A8: Safety - 从 description 提取安全相关关键词
+    safety_keywords = ['safe', 'safety', 'non-toxic', 'nontoxic', 'hypoallergenic', 'bpa-free', 'bpa free',
+                       'lead-free', 'lead free', 'phthalate-free', 'flame-retardant', 'eco-friendly',
+                       'organic', 'natural', 'chemical-free', 'chemical free', 'Toxic free', 'toxin-free']
+    desc_lower = description.lower() if description else ''
+    found_safety = []
+    for kw in safety_keywords:
+        if kw in desc_lower:
+            found_safety.append(kw.replace('-', ' ').title())
+    if found_safety:
+        result['A8_safety'] = list(dict.fromkeys(found_safety))
+
+    # A9: Durability - 从 description 提取耐用性关键词
+    durability_keywords = ['durable', 'durability', 'long-lasting', 'long lasting', 'heavy duty', 'sturdy',
+                          'strong', 'reinforced', 'robust', 'solid', 'high quality', 'premium']
+    found_durability = []
+    for kw in durability_keywords:
+        if kw in desc_lower:
+            found_durability.append(kw.replace('-', ' ').title())
+    if found_durability:
+        result['A9_durability'] = list(dict.fromkeys(found_durability))
+
+    # A10: Ease of use - 从 description 提取易用性关键词
+    ease_keywords = ['easy', 'easy to use', 'simple', 'convenient', 'user-friendly', 'intuitive',
+                    'effortless', 'quick', 'hassle-free', 'ready to use', 'pre-assembled', 'easy to clean']
+    found_ease = []
+    for kw in ease_keywords:
+        if kw in desc_lower:
+            found_ease.append(kw.replace('-', ' ').title())
+    if found_ease:
+        result['A10_ease_of_use'] = list(dict.fromkeys(found_ease))
+
+    # A11: Temperature resistance - 从 description/details 提取耐温性
+    temp_keywords = ['heat resistant', 'heat-resistant', 'cold resistant', 'cold-resistant', 'waterproof',
+                    'weatherproof', 'uv resistant', 'fade-resistant', 'heat tolerance']
+    found_temp = []
+    for kw in temp_keywords:
+        if kw in desc_lower:
+            found_temp.append(kw.replace('-', ' ').title())
+    if found_temp:
+        result['A11_temperature_resistance'] = list(dict.fromkeys(found_temp))
+
+    # A12: Surface - 表面特性（已部分在 A4_appearance，这里补充）
+    surface_keywords = ['smooth', 'textured', 'anti-slip', 'non-slip', 'rubberized', 'padded', 'mesh']
+    found_surface = []
+    for kw in surface_keywords:
+        if kw in desc_lower:
+            found_surface.append(kw.replace('-', ' ').title())
+    if found_surface:
+        result['A12_surface'] = list(dict.fromkeys(found_surface))
+
+    # A13: Reusability - 从 description 提取可重复使用性
+    reuse_keywords = ['reusable', 'washable', 'disposable', 'one-time use', 'multi-use', 'refillable',
+                      'recyclable', 'eco-friendly', 'sustainable', 'biodegradable']
+    found_reuse = []
+    for kw in reuse_keywords:
+        if kw in desc_lower:
+            found_reuse.append(kw.replace('-', ' ').title())
+    if found_reuse:
+        result['A13_reusability'] = list(dict.fromkeys(found_reuse))
+
+    # A14: Size - 从 details.Size 等提取
+    size_fields = ['Size', 'Item Dimensions LxWxH', 'Package Dimensions', 'Product Dimensions']
+    found_size = []
+    for field in size_fields:
+        val = details.get(field, '')
+        if val:
+            found_size.append(str(val).strip())
+    if found_size:
+        result['A14_size'] = found_size[:3]
+
+    # A15: Weight - 从 details.Item Weight 提取
+    weight = details.get('Item Weight', '')
+    if weight:
+        result['A15_weight'] = [str(weight).strip()]
+
+    # A16: Compatibility - 从 Target Species, Breed Recommendation, Target Audience 提取
+    compat_fields = ['Target Species', 'Breed Recommendation', 'Target Audience', 'Sport']
+    found_compat = []
+    for field in compat_fields:
+        val = details.get(field, '')
+        if val:
+            found_compat.append(str(val).strip())
+    if found_compat:
+        result['A16_compatibility'] = found_compat[:3]
+
+    # A17: Flavor - 从 details.Flavor 提取
+    flavor = details.get('Flavor', '')
+    if flavor:
+        result['A17_flavor'] = [str(flavor).strip()]
+
+    return result
+
+
 def extract_attributes(item: Dict) -> Dict:
     """从商品元数据提取多个槽位"""
     # 支持 2018 格式 (asin, brand, category) 和 2023 格式 (parent_asin, details.Brand, categories)
@@ -831,6 +958,9 @@ def extract_attributes(item: Dict) -> Dict:
     # 提取 Pet Supplies 领域特定属性
     domain_specific = extract_domain_specific_pet(item)
 
+    # 提取 A7-A17 扩展属性
+    extended = extract_extended_attributes(item, description, feature)
+
     return {
         'asin': asin,
         'A1_product_type': extract_product_type(category),
@@ -839,6 +969,18 @@ def extract_attributes(item: Dict) -> Dict:
         'A4_appearance': structured.get('A4_appearance', []),
         'A5_use_case': extract_use_case(title, description, feature),
         'A6_detailed': domain_specific,
+        'A7_material': extended['A7_material'],
+        'A8_safety': extended['A8_safety'],
+        'A9_durability': extended['A9_durability'],
+        'A10_ease_of_use': extended['A10_ease_of_use'],
+        'A11_temperature_resistance': extended['A11_temperature_resistance'],
+        'A12_surface': extended['A12_surface'],
+        'A13_reusability': extended['A13_reusability'],
+        'A14_size': extended['A14_size'],
+        'A15_weight': extended['A15_weight'],
+        'A16_compatibility': extended['A16_compatibility'],
+        'A17_flavor': extended['A17_flavor'],
+        'A18_quality': structured.get('A18_quality', []),
     }
 
 

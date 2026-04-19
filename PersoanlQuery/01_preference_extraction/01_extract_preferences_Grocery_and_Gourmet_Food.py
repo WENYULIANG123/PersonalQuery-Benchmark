@@ -775,6 +775,132 @@ def extract_domain_specific_grocery(item: Dict) -> Dict[str, Any]:
     return a6_fields
 
 
+def extract_extended_attributes(item: Dict, description: str, feature: List) -> Dict[str, List[str]]:
+    """
+    提取 A7-A17 扩展属性槽位
+    A7: Material, A8: Safety, A9: Durability, A10: Ease_of_use,
+    A11: Temperature_resistance, A12: Surface, A13: Reusability,
+    A14: Size, A15: Weight, A16: Compatibility, A17: Flavor
+    """
+    details = item.get('details', {})
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except Exception:
+            details = {}
+
+    result = {
+        'A7_material': [],
+        'A8_safety': [],
+        'A9_durability': [],
+        'A10_ease_of_use': [],
+        'A11_temperature_resistance': [],
+        'A12_surface': [],
+        'A13_reusability': [],
+        'A14_size': [],
+        'A15_weight': [],
+        'A16_compatibility': [],
+        'A17_flavor': [],
+    }
+
+    # A7: Material - 从 details.Material 提取
+    material = details.get('Material', '')
+    if material:
+        result['A7_material'] = [str(material).strip()]
+
+    # A8: Safety - 从 description 提取安全相关关键词（食品最重要的是有机、无添加等）
+    safety_keywords = ['organic', 'natural', 'non-gmo', 'non gmo', 'gluten-free', 'gluten free',
+                       'bpa-free', 'bpa free', 'preservative-free', 'preservative free',
+                       'additive-free', 'additive free', 'sugar-free', 'sugar free',
+                       'low sodium', 'no artificial', 'no msg', 'msg-free', 'vegan', 'vegetarian',
+                       'keto', 'paleo', 'dairy-free', 'dairy free', 'nut-free', 'nut free',
+                       'hypoallergenic', 'safe', 'safety', 'chemical-free', 'chemical free']
+    desc_lower = description.lower() if description else ''
+    found_safety = []
+    for kw in safety_keywords:
+        if kw in desc_lower:
+            found_safety.append(kw.replace('-', ' ').title())
+    if found_safety:
+        result['A8_safety'] = list(dict.fromkeys(found_safety))
+
+    # A9: Durability - 食品一般不讲耐久，但可以提取新鲜度、保质期相关
+    durability_keywords = ['fresh', 'long-lasting', 'shelf stable', 'preserved', 'durable',
+                          'high quality', 'premium', 'gourmet', 'premium quality']
+    found_durability = []
+    for kw in durability_keywords:
+        if kw in desc_lower:
+            found_durability.append(kw.replace('-', ' ').title())
+    if found_durability:
+        result['A9_durability'] = list(dict.fromkeys(found_durability))
+
+    # A10: Ease of use - 从 description 提取易用性关键词
+    ease_keywords = ['easy', 'easy to prepare', 'ready to eat', 'ready to drink', 'instant',
+                    'convenient', 'pre-portioned', 'portion control', 'single serve', 'on-the-go']
+    found_ease = []
+    for kw in ease_keywords:
+        if kw in desc_lower:
+            found_ease.append(kw.replace('-', ' ').title())
+    if found_ease:
+        result['A10_ease_of_use'] = list(dict.fromkeys(found_ease))
+
+    # A11: Temperature resistance - 食品储存条件
+    temp_keywords = ['refrigerate', 'room temperature', 'keep frozen', 'keep cool', 'shelf stable',
+                    'heat and serve', 'microwaveable', 'oven safe', 'freezer safe']
+    found_temp = []
+    for kw in temp_keywords:
+        if kw in desc_lower:
+            found_temp.append(kw.replace('-', ' ').title())
+    if found_temp:
+        result['A11_temperature_resistance'] = list(dict.fromkeys(found_temp))
+
+    # A12: Surface - 食品一般不适用，但可以留空或放 Package Type
+    package_type = details.get('Package Type', '')
+    if package_type:
+        result['A12_surface'] = [str(package_type).strip()]
+
+    # A13: Reusability - 食品一般是一次性的，但可以提取环保相关信息
+    reuse_keywords = ['recyclable packaging', 'sustainable', 'eco-friendly', 'biodegradable',
+                      'compostable', 'reusable container']
+    found_reuse = []
+    for kw in reuse_keywords:
+        if kw in desc_lower:
+            found_reuse.append(kw.replace('-', ' ').title())
+    if found_reuse:
+        result['A13_reusability'] = list(dict.fromkeys(found_reuse))
+
+    # A14: Size - 从 details.Size, Package Dimensions 等提取
+    size_fields = ['Size', 'Item Dimensions LxWxH', 'Package Dimensions', 'Product Dimensions', 'Unit Count']
+    found_size = []
+    for field in size_fields:
+        val = details.get(field, '')
+        if val:
+            found_size.append(str(val).strip())
+    if found_size:
+        result['A14_size'] = found_size[:3]
+
+    # A15: Weight - 从 details.Item Weight 提取
+    weight = details.get('Item Weight', '')
+    if weight:
+        result['A15_weight'] = [str(weight).strip()]
+
+    # A16: Compatibility - 从 Diet Type, Specialty 等提取
+    compat_fields = ['Diet Type', 'Specialty', 'Occasion', 'Sport', 'Caffeine Content']
+    found_compat = []
+    for field in compat_fields:
+        val = details.get(field, '')
+        if val:
+            found_compat.append(str(val).strip())
+    if found_compat:
+        result['A16_compatibility'] = found_compat[:3]
+
+    # A17: Flavor - 从 details.Flavor 提取（食品核心属性）
+    flavor = details.get('Flavor', '')
+    if flavor:
+        result['A17_flavor'] = [str(flavor).strip()]
+
+    return result
+
+
 def extract_attributes(item: Dict) -> Dict:
     """从商品元数据提取多个槽位"""
     # 支持 2018 格式 (asin, brand, category) 和 2023 格式 (parent_asin, details.Brand, categories)
@@ -831,6 +957,9 @@ def extract_attributes(item: Dict) -> Dict:
     # 提取 Grocery 领域特定属性
     domain_specific = extract_domain_specific_grocery(item)
 
+    # 提取 A7-A17 扩展属性
+    extended = extract_extended_attributes(item, description, feature)
+
     return {
         'asin': asin,
         'A1_product_type': extract_product_type(category),
@@ -839,6 +968,18 @@ def extract_attributes(item: Dict) -> Dict:
         'A4_appearance': structured.get('A4_appearance', []),
         'A5_use_case': extract_use_case(title, description, feature),
         'A6_detailed': domain_specific,
+        'A7_material': extended['A7_material'],
+        'A8_safety': extended['A8_safety'],
+        'A9_durability': extended['A9_durability'],
+        'A10_ease_of_use': extended['A10_ease_of_use'],
+        'A11_temperature_resistance': extended['A11_temperature_resistance'],
+        'A12_surface': extended['A12_surface'],
+        'A13_reusability': extended['A13_reusability'],
+        'A14_size': extended['A14_size'],
+        'A15_weight': extended['A15_weight'],
+        'A16_compatibility': extended['A16_compatibility'],
+        'A17_flavor': extended['A17_flavor'],
+        'A18_quality': structured.get('A18_quality', []),
     }
 
 
@@ -900,10 +1041,25 @@ def process_item(item: Dict) -> Optional[Dict]:
 
     attrs = extract_attributes(item)
 
-    # 只保留 A1_product_type、A3_price、A4_appearance、A5_use_case 都不为空
-    # 且 A6_detailed 至少包含2个属性值的商品
-    a6 = attrs.get('A6_detailed', {})
-    if not attrs.get('A1_product_type') or not attrs.get('A3_price') or not attrs.get('A4_appearance') or not attrs.get('A5_use_case') or not a6 or len(a6) < 2:
+    # 过滤条件：A1、A2、A3 都不为空，且 A4-A18 中至少有两个属性不为空
+    # A1: A1_product_type, A2: A2_brand, A3: A3_price
+    if not attrs.get('A1_product_type') or not attrs.get('A2_brand') or not attrs.get('A3_price'):
+        return None
+
+    # 统计 A4 到 A18 中非空的属性数量
+    non_empty_count = 0
+    for key in attrs:
+        if key.startswith('A') and len(key) >= 2 and key[1].isdigit():
+            # 从 'A1_product_type' 提取 '1'
+            slot_str = key.split('_')[0][1:]
+            if slot_str.isdigit():
+                slot_num = int(slot_str)
+                if 4 <= slot_num <= 18:
+                    val = attrs[key]
+                    if val and (isinstance(val, (list, dict)) and len(val) > 0 if isinstance(val, (list, dict)) else bool(val)):
+                        non_empty_count += 1
+
+    if non_empty_count < 2:
         return None
 
     return attrs
