@@ -49,8 +49,12 @@ BM25_RETRIEVER_CACHE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_qu
 STAGE9_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/09_targeted_noisy_query"
 STAGE7_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/07_iterative_refinement"
 STAGE6_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query"
+# Stage 6 query files (correct queries)
 PERSONA_GENERATED_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Arts_Crafts_and_Sewing/acl_query.json"
 CCOMP_QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Arts_Crafts_and_Sewing/ccomp_query.json"
+# Stage 7 noisy query files (from LLM injection)
+ACL_NOISY_QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/07_inject_noisy/Arts_Crafts_and_Sewing/acl_noisy_query.json"
+CCOMP_NOISY_QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/07_inject_noisy/Arts_Crafts_and_Sewing/ccomp_noisy_query.json"
 CACHE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/query_cache_Arts_Crafts_and_Sewing"
 
 AVAILABLE_RETRIEVERS = {
@@ -177,9 +181,7 @@ def find_all_users() -> Set[str]:
 def load_acl_queries() -> Tuple[List[Dict], List[Dict]]:
     """从 acl_query.json 加载所有查询，返回 (correct_queries, noisy_queries)
 
-    每个查询结构：
-    - correct_query / filled_query / query: 正确版本查询
-    - noisy_query: 含错误版本查询（仅 ground_truth 版本有）
+    noisy_queries 从 Stage 7 的 LLM 注入结果读取
     """
     if not os.path.exists(PERSONA_GENERATED_QUERIES_FILE):
         log_with_timestamp(f"⚠️  文件不存在: {PERSONA_GENERATED_QUERIES_FILE}")
@@ -215,27 +217,33 @@ def load_acl_queries() -> Tuple[List[Dict], List[Dict]]:
                     'query': correct_text,
                 })
 
-            # 含错误版本查询：仅 ground_truth 版本有
-            noisy_text = q.get('noisy_query', '')
-            if noisy_text:
-                noisy_queries.append({
-                    'user_id': user_id,
-                    'asin': asin,
-                    'acl': q.get('acl', 0),
-                    'is_ground_truth': q.get('is_ground_truth', True),
-                    'query': noisy_text,
-                })
+    # 从 Stage 7 noisy query 文件加载 noisy queries
+    if os.path.exists(ACL_NOISY_QUERY_FILE):
+        with open(ACL_NOISY_QUERY_FILE, 'r', encoding='utf-8') as f:
+            noisy_data = json.load(f)
+        if isinstance(noisy_data, list):
+            for item in noisy_data:
+                noisy_text = item.get('noisy_query', '')
+                if noisy_text:
+                    noisy_queries.append({
+                        'user_id': item.get('user_id', ''),
+                        'asin': item.get('asin', ''),
+                        'acl': item.get('acl', 0),
+                        'is_ground_truth': True,
+                        'query': noisy_text,
+                    })
+        log_with_timestamp(f"✓ 从 {ACL_NOISY_QUERY_FILE} 加载了 {len(noisy_queries)} 条 noisy 查询 (ACL)")
+    else:
+        log_with_timestamp(f"⚠️  Stage 7 noisy query 文件不存在: {ACL_NOISY_QUERY_FILE}")
 
-    log_with_timestamp(f"✓ 从 {PERSONA_GENERATED_QUERIES_FILE} 加载了 {len(correct_queries)} 条 correct 查询, {len(noisy_queries)} 条 noisy 查询 (ACL)")
+    log_with_timestamp(f"✓ 从 {PERSONA_GENERATED_QUERIES_FILE} 加载了 {len(correct_queries)} 条 correct 查询")
     return correct_queries, noisy_queries
 
 
 def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
     """从 ccomp_query.json 加载所有查询，返回 (correct_queries, noisy_queries)
 
-    每个查询结构：
-    - correct_query / filled_query / query: 正确版本查询
-    - noisy_query: 含错误版本查询（仅 ground_truth 版本有）
+    noisy_queries 从 Stage 7 的 LLM 注入结果读取
     """
     if not os.path.exists(CCOMP_QUERY_FILE):
         log_with_timestamp(f"⚠️  文件不存在: {CCOMP_QUERY_FILE}")
@@ -271,18 +279,26 @@ def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
                     'query': correct_text,
                 })
 
-            # 含错误版本查询：仅 ground_truth 版本有
-            noisy_text = q.get('noisy_query', '')
-            if noisy_text:
-                noisy_queries.append({
-                    'user_id': user_id,
-                    'asin': asin,
-                    'ccomp': q.get('ccomp', 0),
-                    'is_ground_truth': q.get('is_ground_truth', True),
-                    'query': noisy_text,
-                })
+    # 从 Stage 7 noisy query 文件加载 noisy queries
+    if os.path.exists(CCOMP_NOISY_QUERY_FILE):
+        with open(CCOMP_NOISY_QUERY_FILE, 'r', encoding='utf-8') as f:
+            noisy_data = json.load(f)
+        if isinstance(noisy_data, list):
+            for item in noisy_data:
+                noisy_text = item.get('noisy_query', '')
+                if noisy_text:
+                    noisy_queries.append({
+                        'user_id': item.get('user_id', ''),
+                        'asin': item.get('asin', ''),
+                        'ccomp': item.get('ccomp', 0),
+                        'is_ground_truth': True,
+                        'query': noisy_text,
+                    })
+        log_with_timestamp(f"✓ 从 {CCOMP_NOISY_QUERY_FILE} 加载了 {len(noisy_queries)} 条 noisy 查询 (CCOMP)")
+    else:
+        log_with_timestamp(f"⚠️  Stage 7 noisy query 文件不存在: {CCOMP_NOISY_QUERY_FILE}")
 
-    log_with_timestamp(f"✓ 从 {CCOMP_QUERY_FILE} 加载了 {len(correct_queries)} 条 correct 查询, {len(noisy_queries)} 条 noisy 查询 (CCOMP)")
+    log_with_timestamp(f"✓ 从 {CCOMP_QUERY_FILE} 加载了 {len(correct_queries)} 条 correct 查询")
     return correct_queries, noisy_queries
 
 

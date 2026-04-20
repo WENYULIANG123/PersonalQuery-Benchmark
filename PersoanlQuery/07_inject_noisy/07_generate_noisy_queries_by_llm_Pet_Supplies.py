@@ -359,25 +359,43 @@ def main():
         response = call_llm(user_content, system_base=system_base)
         parsed = parse_noisy_response(response, query)
         if not parsed:
-            log(f"    [ERROR] ACL 用户 {uid[:20]} 解析失败")
-            return None
+            log(f"    [ERROR] ACL 用户 {uid[:20]} LLM调用或解析失败")
+            return {'uid': uid, 'status': 'llm_error', 'original_query': query}
+
+        # 检查是否成功注入错误
+        noisy_query = parsed['noisy_query']
+        injected_errors = parsed['injected_errors']
+
+        if noisy_query == query or not injected_errors:
+            return {
+                'uid': uid, 'asin': task['asin'], 'original_query': query,
+                'noisy_query': noisy_query, 'injected_errors': injected_errors,
+                'status': 'no_injection', 'user_errors': errors, 'user_data': task['user_data'],
+            }
+
         return {
             'uid': uid, 'asin': task['asin'], 'original_query': query,
-            'noisy_query': parsed['noisy_query'], 'injected_errors': parsed['injected_errors'],
-            'user_errors': errors, 'user_data': task['user_data'],
+            'noisy_query': noisy_query, 'injected_errors': injected_errors,
+            'status': 'success', 'user_errors': errors, 'user_data': task['user_data'],
         }
 
-    acl_results, failed_acl = [], []
+    log("\n=== 处理 ACL 查询 ===")
+    acl_results = []
+    acl_llm_errors = []
+    acl_no_injection = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(process_one_acl_task, t): t for t in acl_tasks}
         for future in as_completed(futures):
             r = future.result()
             if r:
-                acl_results.append(r)
-                log(f"  [ACL] {len(acl_results)}/{len(acl_tasks)} user={r['uid'][:20]}")
-            else:
-                failed_acl.append(futures[future]['uid'])
-    log(f"ACL 完成: 成功 {len(acl_results)}, 失败 {len(failed_acl)}")
+                if r['status'] == 'success':
+                    acl_results.append(r)
+                elif r['status'] == 'llm_error':
+                    acl_llm_errors.append(r['uid'])
+                elif r['status'] == 'no_injection':
+                    acl_no_injection.append(r['uid'])
+                log(f"  [ACL] 成功:{len(acl_results)} 无注入:{len(acl_no_injection)} LLM错误:{len(acl_llm_errors)} user={r['uid'][:20]}")
+    log(f"ACL 完成: 成功注入 {len(acl_results)}, 无注入 {len(acl_no_injection)}, LLM错误 {len(acl_llm_errors)}")
 
     # CCOMP
     log("\n=== 处理 CCOMP 查询 ===")
@@ -411,25 +429,43 @@ def main():
         response = call_llm(user_content, system_base=system_base)
         parsed = parse_noisy_response(response, query)
         if not parsed:
-            log(f"    [ERROR] CCOMP 用户 {uid[:20]} 解析失败")
-            return None
+            log(f"    [ERROR] CCOMP 用户 {uid[:20]} LLM调用或解析失败")
+            return {'uid': uid, 'status': 'llm_error', 'original_query': query}
+
+        # 检查是否成功注入错误
+        noisy_query = parsed['noisy_query']
+        injected_errors = parsed['injected_errors']
+
+        if noisy_query == query or not injected_errors:
+            return {
+                'uid': uid, 'asin': task['asin'], 'original_query': query,
+                'noisy_query': noisy_query, 'injected_errors': injected_errors,
+                'status': 'no_injection', 'user_errors': errors, 'user_data': task['user_data'],
+            }
+
         return {
             'uid': uid, 'asin': task['asin'], 'original_query': query,
-            'noisy_query': parsed['noisy_query'], 'injected_errors': parsed['injected_errors'],
-            'user_errors': errors, 'user_data': task['user_data'],
+            'noisy_query': noisy_query, 'injected_errors': injected_errors,
+            'status': 'success', 'user_errors': errors, 'user_data': task['user_data'],
         }
 
-    ccomp_results, failed_ccomp = [], []
+    log("\n=== 处理 CCOMP 查询 ===")
+    ccomp_results = []
+    ccomp_llm_errors = []
+    ccomp_no_injection = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(process_one_ccomp_task, t): t for t in ccomp_tasks}
         for future in as_completed(futures):
             r = future.result()
             if r:
-                ccomp_results.append(r)
-                log(f"  [CCOMP] {len(ccomp_results)}/{len(ccomp_tasks)} user={r['uid'][:20]}")
-            else:
-                failed_ccomp.append(futures[future]['uid'])
-    log(f"CCOMP 完成: 成功 {len(ccomp_results)}, 失败 {len(failed_ccomp)}")
+                if r['status'] == 'success':
+                    ccomp_results.append(r)
+                elif r['status'] == 'llm_error':
+                    ccomp_llm_errors.append(r['uid'])
+                elif r['status'] == 'no_injection':
+                    ccomp_no_injection.append(r['uid'])
+                log(f"  [CCOMP] 成功注入:{len(ccomp_results)} 无注入:{len(ccomp_no_injection)} LLM错误:{len(ccomp_llm_errors)} user={r['uid'][:20]}")
+    log(f"CCOMP 完成: 成功注入 {len(ccomp_results)}, 无注入 {len(ccomp_no_injection)}, LLM错误 {len(ccomp_llm_errors)}")
 
     # 保存结果
     os.makedirs(os.path.dirname(ACL_NOISY_OUTPUT_FILE), exist_ok=True)
@@ -468,8 +504,16 @@ def main():
         json.dump(ccomp_output, f, indent=2, ensure_ascii=False)
 
     log(f"\n{'='*60}")
-    log(f"ACL: 成功 {len(acl_results)}/{len(acl_tasks)}, 失败 {len(failed_acl)}")
-    log(f"CCOMP: 成功 {len(ccomp_results)}/{len(ccomp_tasks)}, 失败 {len(failed_ccomp)}")
+    log(f"==================== 统计结果 ====================")
+    log(f"ACL 任务总数: {len(acl_tasks)}")
+    log(f"  - 成功注入噪声: {len(acl_results)} ({len(acl_results)/len(acl_tasks)*100:.1f}%)")
+    log(f"  - 无注入(查询未变或错误为空): {len(acl_no_injection)} ({len(acl_no_injection)/len(acl_tasks)*100:.1f}%)")
+    log(f"  - LLM调用/解析失败: {len(acl_llm_errors)} ({len(acl_llm_errors)/len(acl_tasks)*100:.1f}%)")
+    log(f"CCOMP 任务总数: {len(ccomp_tasks)}")
+    log(f"  - 成功注入噪声: {len(ccomp_results)} ({len(ccomp_results)/len(ccomp_tasks)*100:.1f}%)")
+    log(f"  - 无注入(查询未变或错误为空): {len(ccomp_no_injection)} ({len(ccomp_no_injection)/len(ccomp_tasks)*100:.1f}%)")
+    log(f"  - LLM调用/解析失败: {len(ccomp_llm_errors)} ({len(ccomp_llm_errors)/len(ccomp_tasks)*100:.1f}%)")
+    log(f"===============================================")
     log(f"ACL 结果保存到: {ACL_NOISY_OUTPUT_FILE}")
     log(f"CCOMP 结果保存到: {CCOMP_NOISY_OUTPUT_FILE}")
 

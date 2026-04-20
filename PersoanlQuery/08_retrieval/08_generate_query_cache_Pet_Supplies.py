@@ -45,8 +45,13 @@ from utils.retrievers import (
 STAGE9_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/09_targeted_noisy_query"
 STAGE7_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/07_iterative_refinement"
 STAGE6_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query"
-ACL_QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Pet_Supplies/acl_query.json"
-CCOMP_QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Pet_Supplies/ccomp_query.json"
+# Stage 6 query files (correct queries) - 新格式使用统一的 query.json
+QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Pet_Supplies/query.json"
+ACL_QUERY_FILE = QUERY_FILE  # 兼容：ACL 和 CCOMP 共用同一文件
+CCOMP_QUERY_FILE = QUERY_FILE  # 兼容：ACL 和 CCOMP 共用同一文件
+# Stage 7 noisy query files (from LLM injection)
+ACL_NOISY_QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/07_inject_noisy/Pet_Supplies/acl_noisy_query.json"
+CCOMP_NOISY_QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/07_inject_noisy/Pet_Supplies/ccomp_noisy_query.json"
 CACHE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/query_cache_Pet_Supplies"
 BM25_RETRIEVER_CACHE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/retriever_Pet_Supplies_cache"
 
@@ -222,11 +227,10 @@ def generate_bm25_cache_from_persona_source():
 
 
 def load_acl_queries() -> Tuple[List[Dict], List[Dict]]:
-    """从 acl_query.json 加载所有查询，返回 (correct_queries, noisy_queries)
+    """从 query.json 加载所有 ACL 查询，返回 (correct_queries, noisy_queries)
 
-    每个查询结构：
-    - correct_query / filled_query: 正确版本查询
-    - noisy_query: 含错误版本查询（仅 ground_truth 版本有）
+    新格式：每个 item 直接包含 acl_query 字段
+    noisy_queries 从 Stage 7 的 LLM 注入结果读取
     """
     if not os.path.exists(ACL_QUERY_FILE):
         log_with_timestamp(f"⚠️  文件不存在: {ACL_QUERY_FILE}")
@@ -236,7 +240,7 @@ def load_acl_queries() -> Tuple[List[Dict], List[Dict]]:
         data = json.load(f)
 
     if not isinstance(data, list):
-        log_with_timestamp(f"⚠️  acl_query.json 格式错误：期望 list，实际 {type(data)}")
+        log_with_timestamp(f"⚠️  query.json 格式错误：期望 list，实际 {type(data)}")
         return [], []
 
     correct_queries = []
@@ -246,43 +250,56 @@ def load_acl_queries() -> Tuple[List[Dict], List[Dict]]:
         user_id = item.get('user_id', '')
         asin = item.get('asin', '')
 
-        if 'queries' not in item:
-            # 旧平铺格式，跳过
-            continue
-
-        for q in item['queries']:
-            # 正确版本查询：从 correct_query 或 filled_query 或 query 获取
-            correct_text = q.get('correct_query', '') or q.get('filled_query', '') or q.get('query', '')
-            if correct_text:
+        # 新格式：直接有 acl_query 字段
+        acl_query = item.get('acl_query')
+        if isinstance(acl_query, dict):
+            query_text = acl_query.get('query', '')
+            if query_text:
                 correct_queries.append({
                     'user_id': user_id,
                     'asin': asin,
-                    'acl': q.get('acl', 0),
-                    'is_ground_truth': q.get('is_ground_truth', False),
-                    'query': correct_text,
+                    'acl': acl_query.get('level', 0),
+                    'is_ground_truth': True,
+                    'query': query_text,
                 })
+        elif isinstance(acl_query, str) and acl_query:
+            # 兼容字符串格式
+            correct_queries.append({
+                'user_id': user_id,
+                'asin': asin,
+                'acl': 0,
+                'is_ground_truth': True,
+                'query': acl_query,
+            })
 
-            # 含错误版本查询：仅 ground_truth 版本有
-            noisy_text = q.get('noisy_query', '')
-            if noisy_text:
-                noisy_queries.append({
-                    'user_id': user_id,
-                    'asin': asin,
-                    'acl': q.get('acl', 0),
-                    'is_ground_truth': q.get('is_ground_truth', True),
-                    'query': noisy_text,
-                })
+    # 从 Stage 7 noisy query 文件加载 noisy queries
+    if os.path.exists(ACL_NOISY_QUERY_FILE):
+        with open(ACL_NOISY_QUERY_FILE, 'r', encoding='utf-8') as f:
+            noisy_data = json.load(f)
+        if isinstance(noisy_data, list):
+            for item in noisy_data:
+                noisy_text = item.get('noisy_query', '')
+                if noisy_text:
+                    noisy_queries.append({
+                        'user_id': item.get('user_id', ''),
+                        'asin': item.get('asin', ''),
+                        'acl': item.get('acl', 0),
+                        'is_ground_truth': True,
+                        'query': noisy_text,
+                    })
+        log_with_timestamp(f"✓ 从 {ACL_NOISY_QUERY_FILE} 加载了 {len(noisy_queries)} 条 noisy 查询 (ACL)")
+    else:
+        log_with_timestamp(f"⚠️  Stage 7 noisy query 文件不存在: {ACL_NOISY_QUERY_FILE}")
 
-    log_with_timestamp(f"✓ 从 {ACL_QUERY_FILE} 加载了 {len(correct_queries)} 条 correct 查询, {len(noisy_queries)} 条 noisy 查询 (ACL)")
+    log_with_timestamp(f"✓ 从 {ACL_QUERY_FILE} 加载了 {len(correct_queries)} 条 correct 查询 (ACL)")
     return correct_queries, noisy_queries
 
 
 def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
-    """从 ccomp_query.json 加载所有查询，返回 (correct_queries, noisy_queries)
+    """从 query.json 加载所有 CCOMP 查询，返回 (correct_queries, noisy_queries)
 
-    每个查询结构：
-    - correct_query / filled_query: 正确版本查询
-    - noisy_query: 含错误版本查询（仅 ground_truth 版本有）
+    新格式：每个 item 直接包含 ccomp_query 字段
+    noisy_queries 从 Stage 7 的 LLM 注入结果读取
     """
     if not os.path.exists(CCOMP_QUERY_FILE):
         log_with_timestamp(f"⚠️  文件不存在: {CCOMP_QUERY_FILE}")
@@ -292,7 +309,7 @@ def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
         data = json.load(f)
 
     if not isinstance(data, list):
-        log_with_timestamp(f"⚠️  ccomp_query.json 格式错误：期望 list，实际 {type(data)}")
+        log_with_timestamp(f"⚠️  query.json 格式错误：期望 list，实际 {type(data)}")
         return [], []
 
     correct_queries = []
@@ -302,34 +319,48 @@ def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
         user_id = item.get('user_id', '')
         asin = item.get('asin', '')
 
-        if 'queries' not in item:
-            # 旧平铺格式，跳过
-            continue
-
-        for q in item['queries']:
-            # 正确版本查询：从 correct_query 或 filled_query 或 query 获取
-            correct_text = q.get('correct_query', '') or q.get('filled_query', '') or q.get('query', '')
-            if correct_text:
+        # 新格式：直接有 ccomp_query 字段
+        ccomp_query = item.get('ccomp_query')
+        if isinstance(ccomp_query, dict):
+            query_text = ccomp_query.get('query', '')
+            if query_text:
                 correct_queries.append({
                     'user_id': user_id,
                     'asin': asin,
-                    'ccomp': q.get('ccomp', 0),
-                    'is_ground_truth': q.get('is_ground_truth', False),
-                    'query': correct_text,
+                    'ccomp': ccomp_query.get('level', 0),
+                    'is_ground_truth': True,
+                    'query': query_text,
                 })
+        elif isinstance(ccomp_query, str) and ccomp_query:
+            # 兼容字符串格式
+            correct_queries.append({
+                'user_id': user_id,
+                'asin': asin,
+                'ccomp': 0,
+                'is_ground_truth': True,
+                'query': ccomp_query,
+            })
 
-            # 含错误版本查询：仅 ground_truth 版本有
-            noisy_text = q.get('noisy_query', '')
-            if noisy_text:
-                noisy_queries.append({
-                    'user_id': user_id,
-                    'asin': asin,
-                    'ccomp': q.get('ccomp', 0),
-                    'is_ground_truth': q.get('is_ground_truth', True),
-                    'query': noisy_text,
-                })
+    # 从 Stage 7 noisy query 文件加载 noisy queries
+    if os.path.exists(CCOMP_NOISY_QUERY_FILE):
+        with open(CCOMP_NOISY_QUERY_FILE, 'r', encoding='utf-8') as f:
+            noisy_data = json.load(f)
+        if isinstance(noisy_data, list):
+            for item in noisy_data:
+                noisy_text = item.get('noisy_query', '')
+                if noisy_text:
+                    noisy_queries.append({
+                        'user_id': item.get('user_id', ''),
+                        'asin': item.get('asin', ''),
+                        'ccomp': item.get('ccomp', 0),
+                        'is_ground_truth': True,
+                        'query': noisy_text,
+                    })
+        log_with_timestamp(f"✓ 从 {CCOMP_NOISY_QUERY_FILE} 加载了 {len(noisy_queries)} 条 noisy 查询 (CCOMP)")
+    else:
+        log_with_timestamp(f"⚠️  Stage 7 noisy query 文件不存在: {CCOMP_NOISY_QUERY_FILE}")
 
-    log_with_timestamp(f"✓ 从 {CCOMP_QUERY_FILE} 加载了 {len(correct_queries)} 条 correct 查询, {len(noisy_queries)} 条 noisy 查询 (CCOMP)")
+    log_with_timestamp(f"✓ 从 {CCOMP_QUERY_FILE} 加载了 {len(correct_queries)} 条 correct 查询 (CCOMP)")
     return correct_queries, noisy_queries
 
 

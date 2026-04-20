@@ -44,7 +44,11 @@ ALL_USERS_FILE = f'/home/wlia0047/ar57/wenyu/result/personal_query/01_preference
 STAGE1_ATTR_FILE = f'/home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction/{CATEGORY}/attributes_{CATEGORY}.json'
 
 # ============ 标记词 ============
-ACL_MARKERS = {'that', 'whether', 'if', 'what', 'which', 'who', 'whom', 'whose', 'whatever', 'whichever', 'whoever'}
+# ACL 标记词（形容词性从句、状语从句、主语从句等）
+ACL_MARKERS = {'that', 'whether', 'if', 'what', 'which', 'who', 'whom', 'whose',
+               'whatever', 'whichever', 'whoever', 'when', 'where', 'why', 'how',
+               'because', 'although', 'while', 'until', 'unless', 'since', 'before', 'after', 'though', 'if'}
+# CCOMP 标记词
 CCOMP_MARKERS = {'that', 'whether', 'if', 'what', 'which', 'who', 'whom', 'whose'}
 
 # ============ 属性词典 ============
@@ -84,7 +88,15 @@ for category_words in ATTRIBUTE_DICTIONARY.values():
     ALL_ATTRIBUTE_WORDS.update(category_words)
 
 
-# ============ ACL 分析 ============
+# ============ ACL 分析（句法树变宽特征）============
+# ACL 让句法树变宽，包括：
+# - acl: 形容词性从句
+# - relcl: 关系从句
+# - advcl: 状语从句（可并列，让树变宽）
+# - conj: 并列结构（让树变宽）
+# - parataxis: 并列结构
+# 注意：csubj/csubjpass 属于"变深"特征，在 CCOMP 中统计
+
 def compute_acl_gaps(doc, acl_info):
     if len(acl_info) < 2:
         return []
@@ -99,6 +111,8 @@ def analyze_acl_in_doc(doc):
     results = []
     for token in doc:
         acl_info = None
+
+        # 1. acl: 形容词性从句
         if token.dep_ == 'acl':
             marker_word = None
             complementizer = None
@@ -121,6 +135,8 @@ def analyze_acl_in_doc(doc):
                 'verb_word': token.text,
                 'position': token.i
             }
+
+        # 2. relcl: 关系从句
         elif token.dep_ == 'relcl':
             rel_pronoun = None
             for child in token.children:
@@ -137,14 +153,58 @@ def analyze_acl_in_doc(doc):
                 'verb_word': token.text,
                 'position': token.i
             }
+
+        # 3. advcl: 状语从句（让句法树变宽）
+        elif token.dep_ == 'advcl':
+            marker_word = None
+            for child in token.children:
+                if child.dep_ == 'mark':
+                    marker_word = child.text.lower()
+                    break
+            acl_info = {
+                'acl_type': 'advcl',
+                'marker': marker_word,
+                'complementizer': None,
+                'head_word': token.head.text if token.head else '',
+                'verb_word': token.text,
+                'position': token.i
+            }
+
+        # 4. conj: 并列结构（让句法树变宽）
+        elif token.dep_ == 'conj':
+            acl_info = {
+                'acl_type': 'conj',
+                'marker': None,
+                'complementizer': None,
+                'head_word': token.head.text if token.head else '',
+                'verb_word': token.text,
+                'position': token.i
+            }
+
+        # 5. parataxis: 并列结构（让句法树变宽）
+        elif token.dep_ == 'parataxis':
+            acl_info = {
+                'acl_type': 'parataxis',
+                'marker': None,
+                'complementizer': None,
+                'head_word': token.head.text if token.head else '',
+                'verb_word': token.text,
+                'position': token.i
+            }
+
+        # 8. mark 标记词开头的从句（acl, advcl, csubj 等）
         elif token.dep_ == 'mark':
             marker_lower = token.text.lower()
             if marker_lower in ACL_MARKERS:
                 head = token.head
                 if head:
-                    acl_type = 'acl'
+                    # 根据 head 的 dep_ 确定类型
                     if head.dep_ == 'relcl':
                         acl_type = 'relcl_reference'
+                    elif head.dep_ == 'advcl':
+                        acl_type = 'advcl'
+                    else:
+                        acl_type = 'acl'
                     acl_info = {
                         'acl_type': acl_type,
                         'marker': marker_lower,
@@ -153,6 +213,7 @@ def analyze_acl_in_doc(doc):
                         'verb_word': head.text if head else '',
                         'position': token.i
                     }
+
         if acl_info:
             results.append(acl_info)
     return results
@@ -202,6 +263,25 @@ def analyze_ccomp_in_doc(doc):
             comp_info = {
                 'comp_type': 'xcomp',
                 'marker': marker_word if marker_word else 'bare_infinitive',
+                'complementizer': None,
+                'head_word': token.head.text if token.head else '',
+                'verb_word': token.text,
+                'position': token.i
+            }
+        # csubj/csubjpass: 主语从句/被动主语从句（让句法树变深）
+        elif token.dep_ == 'csubj':
+            comp_info = {
+                'comp_type': 'csubj',
+                'marker': None,
+                'complementizer': None,
+                'head_word': token.head.text if token.head else '',
+                'verb_word': token.text,
+                'position': token.i
+            }
+        elif token.dep_ == 'csubjpass':
+            comp_info = {
+                'comp_type': 'csubjpass',
+                'marker': None,
                 'complementizer': None,
                 'head_word': token.head.text if token.head else '',
                 'verb_word': token.text,

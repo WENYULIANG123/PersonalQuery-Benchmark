@@ -1045,25 +1045,17 @@ def process_item(item: Dict) -> Optional[Dict]:
 
     attrs = extract_attributes(item)
 
-    # 过滤条件：A1、A2、A3 都不为空，且 A4-A18 中至少有两个属性不为空
-    # A1: A1_product_type, A2: A2_brand, A3: A3_price
-    if not attrs.get('A1_product_type') or not attrs.get('A2_brand') or not attrs.get('A3_price'):
-        return None
-
-    # 统计 A4 到 A18 中非空的属性数量
+    # 过滤条件：A1-A18 中至少5个属性不为空
     non_empty_count = 0
     for key in attrs:
         if key.startswith('A') and len(key) >= 2 and key[1].isdigit():
-            # 从 'A1_product_type' 提取 '1'
             slot_str = key.split('_')[0][1:]
             if slot_str.isdigit():
-                slot_num = int(slot_str)
-                if 4 <= slot_num <= 18:
-                    val = attrs[key]
-                    if val and (isinstance(val, (list, dict)) and len(val) > 0 if isinstance(val, (list, dict)) else bool(val)):
-                        non_empty_count += 1
+                val = attrs[key]
+                if val and (isinstance(val, (list, dict)) and len(val) > 0 if isinstance(val, (list, dict)) else bool(val)):
+                    non_empty_count += 1
 
-    if non_empty_count < 2:
+    if non_empty_count < 5:
         return None
 
     return attrs
