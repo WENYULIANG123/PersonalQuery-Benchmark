@@ -33,7 +33,7 @@ CAT_CONFIG = get_category_config(CATEGORY_NAME)
 
 CACHE_DIR = CAT_CONFIG['retriever_cache_dir']
 QUERY_CACHE_BASE_DIR = CAT_CONFIG['query_cache_dir']
-QUERY_TYPES = ['correct', 'noisy']
+QUERY_TYPES = ['correct']  # 只评估 correct
 QUERY_CATEGORIES = ['acl', 'ccomp']
 QUERY_FILE = CAT_CONFIG['query_file']
 ACL_QUERIES_FILE = QUERY_FILE
@@ -1472,17 +1472,24 @@ def run_symmetry_check(acl_df: pd.DataFrame, ccomp_df: pd.DataFrame, word_idf: D
 
 
 # ============ 实验 3: OLS 控制 len_diff + idf_diff ============
+# 所有需要进行 OLS 分析的指标
+OLS_METRICS = ['p_at1', 'p_at3', 'p_at5', 'p_at10', 'n_at10', 'mrr_at10', 'hit_at10']
+METRIC_DISPLAY_NAMES = {
+    'p_at1': 'P@1', 'p_at3': 'P@3', 'p_at5': 'P@5', 'p_at10': 'P@10',
+    'n_at10': 'N@10', 'mrr_at10': 'MR@10', 'hit_at10': 'H@10'
+}
+
 def run_controlled_ols_analysis(all_results_by_category_and_type: Dict, word_idf: Dict[str, float]):
     """实验 3: OLS 控制 len_diff + idf_diff 后的纯方向偏好效应
 
-    如果实验 2 发现 ACL 和 CCOMP 长度/IDF 不完全对称，
-    运行 OLS: diff_p10 ~ len_diff + idf_diff
+    对多个指标运行 OLS: diff_metric ~ len_diff + idf_diff
     截距 = 控制长度和 IDF 后的"纯方向偏好"
     """
     log("\n" + "=" * 100)
-    log("实验 3: OLS 控制 len_diff + idf_diff 后的纯方向偏好 (P@10)")
+    log("实验 3: OLS 控制 len_diff + idf_diff 后的纯方向偏好")
     log("=" * 100)
-    log("模型: diff_p10 ~ len_diff + idf_diff")
+    log(f"分析指标: {', '.join(METRIC_DISPLAY_NAMES.values())}")
+    log("模型: diff_metric ~ len_diff + idf_diff")
     log("  • 截距 = 控制 len_diff 和 idf_diff 后的纯 ACL-CCOMP 方向偏好")
     log("  • len_diff 系数 = 长度每多 1 词，diff_p10 变化多少")
     log("  • idf_diff 系数 = IDF 每多 1，diff_p10 变化多少")
@@ -1516,12 +1523,14 @@ def run_controlled_ols_analysis(all_results_by_category_and_type: Dict, word_idf
                 else:
                     level = rec.get('ccomp', 0)
                 key = (rec.get('user_id', ''), rec.get('asin', ''))
-                target_dict[level][key] = {
-                    'p_at10': rec.get('p_at10', 0.0),
+                record = {
                     'query_length': rec.get('query_length', 0.0),
                     'mean_idf': rec.get('mean_idf', 0.0),
-                    'query': rec.get('query', '') if 'query' in rec else ''
                 }
+                # 收集所有 OLS 指标
+                for metric in OLS_METRICS:
+                    record[metric] = rec.get(metric, 0.0)
+                target_dict[level][key] = record
 
     # 配对并构建 OLS 数据
     ols_records = []
@@ -1545,17 +1554,20 @@ def run_controlled_ols_analysis(all_results_by_category_and_type: Dict, word_idf
                 acl_rec = acl_dict[key]
                 ccomp_rec = ccomp_dict[key]
 
-                ols_records.append({
+                record = {
                     'retriever': retriever,
                     'level': level,
-                    'diff_p10': acl_rec['p_at10'] - ccomp_rec['p_at10'],
                     'len_acl': acl_rec['query_length'],
                     'len_ccomp': ccomp_rec['query_length'],
                     'idf_acl': acl_rec['mean_idf'],
                     'idf_ccomp': ccomp_rec['mean_idf'],
                     'len_diff': acl_rec['query_length'] - ccomp_rec['query_length'],
                     'idf_diff': acl_rec['mean_idf'] - ccomp_rec['mean_idf'],
-                })
+                }
+                # 添加所有指标的 diff
+                for metric in OLS_METRICS:
+                    record[f'diff_{metric}'] = acl_rec[metric] - ccomp_rec[metric]
+                ols_records.append(record)
 
     if not ols_records:
         log("  警告: 没有足够的配对数据，跳过 OLS 分析")
@@ -1564,63 +1576,67 @@ def run_controlled_ols_analysis(all_results_by_category_and_type: Dict, word_idf
     df = pd.DataFrame(ols_records)
     log(f"  总配对数: {len(df)}")
 
-    # 分 (retriever, level) 跑 OLS
-    log(f"\n{'Retriever':<12} {'Level':<8} {'N':<8} {'R2':<8} {'Intercept':<12} {'P>|t|':<10} {'Coef_len':<10} {'P>|t|':<10} {'Coef_idf':<10} {'P>|t|':<10}")
-    log("-" * 120)
-
+    # 对每个指标分别跑 OLS
     ols_results = []
 
-    for retriever in sorted(df['retriever'].unique()):
-        for level in sorted(df['level'].unique()):
-            subset = df[(df['retriever'] == retriever) & (df['level'] == level)].copy()
+    for metric in OLS_METRICS:
+        metric_name = METRIC_DISPLAY_NAMES.get(metric, metric)
+        log(f"\n--- {metric_name} ---")
+        log(f"{'Retriever':<12} {'Level':<8} {'N':<8} {'R2':<8} {'Intercept':<12} {'P>|t|':<10} {'Coef_len':<10} {'P>|t|':<10} {'Coef_idf':<10} {'P>|t|':<10}")
+        log("-" * 100)
 
-            if len(subset) < 10:
-                continue
+        for retriever in sorted(df['retriever'].unique()):
+            for level in sorted(df['level'].unique()):
+                subset = df[(df['retriever'] == retriever) & (df['level'] == level)].copy()
 
-            # OLS: diff_p10 ~ len_diff + idf_diff
-            formula = 'diff_p10 ~ len_diff + idf_diff'
-            try:
-                model = smf.ols(formula, data=subset).fit()
+                if len(subset) < 10:
+                    continue
 
-                intercept = model.params.get('Intercept', float('nan'))
-                intercept_p = model.pvalues.get('Intercept', float('nan'))
-                coef_len = model.params.get('len_diff', float('nan'))
-                coef_len_p = model.pvalues.get('len_diff', float('nan'))
-                coef_idf = model.params.get('idf_diff', float('nan'))
-                coef_idf_p = model.pvalues.get('idf_diff', float('nan'))
+                diff_col = f'diff_{metric}'
+                formula = f'{diff_col} ~ len_diff + idf_diff'
+                try:
+                    model = smf.ols(formula, data=subset).fit()
 
-                sig_int = "***" if intercept_p < 0.001 else "**" if intercept_p < 0.01 else "*" if intercept_p < 0.05 else ""
+                    intercept = model.params.get('Intercept', float('nan'))
+                    intercept_p = model.pvalues.get('Intercept', float('nan'))
+                    coef_len = model.params.get('len_diff', float('nan'))
+                    coef_len_p = model.pvalues.get('len_diff', float('nan'))
+                    coef_idf = model.params.get('idf_diff', float('nan'))
+                    coef_idf_p = model.pvalues.get('idf_diff', float('nan'))
 
-                int_str = f"{intercept:+.5f}" if not np.isnan(intercept) else "NaN"
-                int_p_str = f"{intercept_p:.3e}" if intercept_p < 0.001 else f"{intercept_p:.4f}" if not np.isnan(intercept_p) else "NaN"
-                len_str = f"{coef_len:+.5f}" if not np.isnan(coef_len) else "NaN"
-                len_p_str = f"{coef_len_p:.4f}" if not np.isnan(coef_len_p) else "NaN"
-                idf_str = f"{coef_idf:+.5f}" if not np.isnan(coef_idf) else "NaN"
-                idf_p_str = f"{coef_idf_p:.4f}" if not np.isnan(coef_idf_p) else "NaN"
+                    sig_int = "***" if intercept_p < 0.001 else "**" if intercept_p < 0.01 else "*" if intercept_p < 0.05 else ""
 
-                log(f"{retriever:<12} {level:<8} {len(subset):<8} {model.rsquared:<8.4f} {int_str:<12} {int_p_str:<10} {len_str:<10} {len_p_str:<10} {idf_str:<10} {idf_p_str:<10}")
+                    int_str = f"{intercept:+.5f}" if not np.isnan(intercept) else "NaN"
+                    int_p_str = f"{intercept_p:.3e}" if intercept_p < 0.001 else f"{intercept_p:.4f}" if not np.isnan(intercept_p) else "NaN"
+                    len_str = f"{coef_len:+.5f}" if not np.isnan(coef_len) else "NaN"
+                    len_p_str = f"{coef_len_p:.4f}" if not np.isnan(coef_len_p) else "NaN"
+                    idf_str = f"{coef_idf:+.5f}" if not np.isnan(coef_idf) else "NaN"
+                    idf_p_str = f"{coef_idf_p:.4f}" if not np.isnan(coef_idf_p) else "NaN"
 
-                ols_results.append({
-                    'retriever': retriever,
-                    'level': level,
-                    'n': len(subset),
-                    'r2': model.rsquared,
-                    'intercept': intercept,
-                    'intercept_p': intercept_p,
-                    'coef_len': coef_len,
-                    'coef_len_p': coef_len_p,
-                    'coef_idf': coef_idf,
-                    'coef_idf_p': coef_idf_p,
-                    'sig_int': sig_int
-                })
-            except Exception as e:
-                log(f"{retriever:<12} {level:<8} {len(subset):<8} ERR: {e}")
+                    log(f"{retriever:<12} {level:<8} {len(subset):<8} {model.rsquared:<8.4f} {int_str:<12} {int_p_str:<10} {len_str:<10} {len_p_str:<10} {idf_str:<10} {idf_p_str:<10}")
 
-    # 汇总: 所有 (retriever, level) 合并
+                    ols_results.append({
+                        'metric': metric_name,
+                        'retriever': retriever,
+                        'level': level,
+                        'n': len(subset),
+                        'r2': model.rsquared,
+                        'intercept': intercept,
+                        'intercept_p': intercept_p,
+                        'coef_len': coef_len,
+                        'coef_len_p': coef_len_p,
+                        'coef_idf': coef_idf,
+                        'coef_idf_p': coef_idf_p,
+                        'sig_int': sig_int
+                    })
+                except Exception as e:
+                    log(f"{retriever:<12} {level:<8} {len(subset):<8} ERR: {e}")
+
+    # 汇总
     if ols_results:
-        log("-" * 120)
-        log("\n  解读:")
-        log("  • Intercept = 控制 len_diff 和 idf_diff 后，ACL - CCOMP 的 P@10 纯效应")
+        log("\n" + "=" * 100)
+        log("  解读:")
+        log("  • Intercept = 控制 len_diff 和 idf_diff 后，ACL - CCOMP 的纯方向偏好")
         log("  • 如果 Intercept 显著为正 → 用户对 ACL 风格有明显偏好")
         log("  • 如果 Intercept 接近 0 → ACL/CCOMP 偏好差异来自长度/IDF confounds")
 
@@ -1809,8 +1825,8 @@ def main():
 
             all_results_by_type[query_type] = query_type_results
 
-        # 保存该类别的所有结果
-        all_results_by_category[query_category] = all_results_by_type.get('correct', []) + all_results_by_type.get('noisy', [])
+        # 保存该类别的所有结果（只有 correct）
+        all_results_by_category[query_category] = all_results_by_type.get('correct', [])
 
         # 存储到全局结构
         for qt, results in all_results_by_type.items():
@@ -1829,8 +1845,7 @@ def main():
         # 确保 GROUP_FIELD 与当前 query_category 一致
         GROUP_FIELD = query_category
         all_results_by_type = {
-            'correct': all_results_by_category_and_type.get((query_category, 'correct'), []),
-            'noisy': all_results_by_category_and_type.get((query_category, 'noisy'), [])
+            'correct': all_results_by_category_and_type.get((query_category, 'correct'), [])
         }
 
         log("\n" + "=" * 80)
@@ -1840,21 +1855,6 @@ def main():
         # 该类别的 CORRECT 组间性能比较
         if all_results_by_type.get('correct'):
             print_summary_table_wide(all_results_by_type['correct'], f'{CATEGORY_NAME} {query_category.upper()}-CORRECT')
-
-        # 该类别的 NOISY 组间性能比较
-        if all_results_by_type.get('noisy'):
-            print_summary_table_wide(all_results_by_type['noisy'], f'{CATEGORY_NAME} {query_category.upper()}-NOISY')
-
-        # 该类别的 CORRECT vs NOISY 配对比较
-        if all_results_by_type.get('noisy') and all_results_by_type.get('correct'):
-            print_query_type_comparison(all_results_by_type, k_values, CATEGORY_NAME)
-
-
-    # ========== 全局 CORRECT vs NOISY 配对比较 (所有类别) ==========
-    # 打印一个综合的 CORRECT vs NOISY 对比表
-    log("\n" + "=" * 100)
-    log("GLOBAL CORRECT vs NOISY 配对比较（所有类别综合）")
-    log("=" * 100)
 
     # 合并所有类别的结果
     all_results_combined = []
