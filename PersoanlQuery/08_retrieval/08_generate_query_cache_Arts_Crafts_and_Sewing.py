@@ -17,10 +17,8 @@
     - 预期收益: 查询评估时间 14.6s → 11-12s (20-30% improvement)
 """
 
-# 完全离线模式 - 避免 HuggingFace 网络验证
 import os
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_HOME"] = "/root/hf_models"
 
 import sys
 import json
@@ -44,26 +42,26 @@ from utils.retrievers import (
     STARRetriever, MiniLMRetriever, GritLMRetriever, BM25
 )
 
-BM25_RETRIEVER_CACHE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/retriever_Arts_Crafts_and_Sewing_cache"
-
-STAGE9_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/09_targeted_noisy_query"
-STAGE7_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/07_iterative_refinement"
-STAGE6_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query"
-# Stage 6 query files (correct queries)
-PERSONA_GENERATED_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Arts_Crafts_and_Sewing/acl_query.json"
-CCOMP_QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Arts_Crafts_and_Sewing/ccomp_query.json"
+STAGE9_DIR = "/root/test/result/personal_query/09_targeted_noisy_query"
+STAGE7_DIR = "/root/test/result/personal_query/07_iterative_refinement"
+STAGE6_DIR = "/root/test/result/personal_query/06_query"
+# Stage 6 query files (correct queries) - 新格式使用统一的 query.json
+QUERY_FILE = "/root/test/result/personal_query/06_query/Arts_Crafts_and_Sewing/query.json"
+ACL_QUERY_FILE = QUERY_FILE  # 兼容：ACL 和 CCOMP 共用同一文件
+CCOMP_QUERY_FILE = QUERY_FILE  # 兼容：ACL 和 CCOMP 共用同一文件
 # Stage 7 noisy query files (from LLM injection)
-ACL_NOISY_QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/07_inject_noisy/Arts_Crafts_and_Sewing/acl_noisy_query.json"
-CCOMP_NOISY_QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/07_inject_noisy/Arts_Crafts_and_Sewing/ccomp_noisy_query.json"
-CACHE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/query_cache_Arts_Crafts_and_Sewing"
+ACL_NOISY_QUERY_FILE = "/root/test/result/personal_query/07_inject_noisy/Arts_Crafts_and_Sewing/acl_noisy_query.json"
+CCOMP_NOISY_QUERY_FILE = "/root/test/result/personal_query/07_inject_noisy/Arts_Crafts_and_Sewing/ccomp_noisy_query.json"
+CACHE_DIR = "/root/test/result/personal_query/08_retrieval/query_cache_Arts_Crafts_and_Sewing"
+BM25_RETRIEVER_CACHE_DIR = "/root/test/result/personal_query/08_retrieval/retriever_Arts_Crafts_and_Sewing_cache"
 
 AVAILABLE_RETRIEVERS = {
+    'GRITLM': GritLMRetriever,  # 优先处理 GRITLM
     'BGE': BGERetriever,
     'E5': E5Retriever,
     'MiniLM': MiniLMRetriever,
     'STAR': STARRetriever,
-    'GRITLM': GritLMRetriever,
-    'BM25': None,  # BM25 不需要预计算查询嵌入
+    'BM25': None,  # BM25 单独处理
 }
 
 def log_with_timestamp(msg: str):
@@ -76,8 +74,10 @@ def load_bm25_retriever():
     for f in os.listdir(BM25_RETRIEVER_CACHE_DIR):
         if f.startswith('bm25_') and f.endswith('.pkl'):
             bm25_path = os.path.join(BM25_RETRIEVER_CACHE_DIR, f)
+            break
     if bm25_path is None:
         raise FileNotFoundError(f"BM25 retriever cache not found in {BM25_RETRIEVER_CACHE_DIR}")
+
     log_with_timestamp(f"  加载 BM25 索引: {os.path.getsize(bm25_path)/1024/1024:.1f} MB")
     with open(bm25_path, 'rb') as f:
         bm25 = pickle.load(f)
@@ -122,7 +122,9 @@ def generate_bm25_cache_from_persona_source():
         log_with_timestamp("⚠️  没有从 acl_query.json 或 ccomp_query.json 加载到任何查询")
         return {'total_cached': 0}
 
+    log_with_timestamp("=" * 80)
     log_with_timestamp("🚀 开始生成 BM25 查询缓存 (ACL + CCOMP - correct + noisy)")
+    log_with_timestamp("=" * 80)
 
     # 统计
     acl_correct_count = len(acl_correct)
@@ -130,26 +132,46 @@ def generate_bm25_cache_from_persona_source():
     ccomp_correct_count = len(ccomp_correct)
     ccomp_noisy_count = len(ccomp_noisy)
 
+    log_with_timestamp(f"")
+    log_with_timestamp(f"📋 任务配置:")
     log_with_timestamp(f"  • ACL correct 查询: {acl_correct_count} 条")
     log_with_timestamp(f"  • ACL noisy 查询: {acl_noisy_count} 条")
     log_with_timestamp(f"  • CCOMP correct 查询: {ccomp_correct_count} 条")
     log_with_timestamp(f"  • CCOMP noisy 查询: {ccomp_noisy_count} 条")
+    log_with_timestamp(f"  • 缓存目录: {CACHE_DIR}")
+    log_with_timestamp(f"")
 
+    start_time = time.time()
     total_cached = 0
 
-    # 生成 correct 和 noisy 缓存
-    for queries, mode in [
+    # 定义所有查询类型和模式
+    query_modes = [
         (acl_correct, 'acl_correct'),
         (acl_noisy, 'acl_noisy'),
         (ccomp_correct, 'ccomp_correct'),
         (ccomp_noisy, 'ccomp_noisy'),
-    ]:
+    ]
+
+    for queries, mode in query_modes:
         if queries:
             cache = generate_bm25_query_cache_for_mode(queries, mode, top_k=100)
             save_bm25_query_cache(cache, mode)
             total_cached += len(cache)
+        else:
+            log_with_timestamp(f"  (无 {mode} 查询，跳过)")
 
+    elapsed = time.time() - start_time
+
+    log_with_timestamp("")
+    log_with_timestamp("=" * 80)
     log_with_timestamp("✅ BM25 查询缓存生成完成!")
+    log_with_timestamp("=" * 80)
+    log_with_timestamp(f"")
+    log_with_timestamp(f"⏱️  执行统计:")
+    log_with_timestamp(f"  • 总耗时: {elapsed:.1f} 秒 ({elapsed/60:.1f} 分钟)")
+    log_with_timestamp(f"  • 缓存查询总数: {total_cached}")
+    log_with_timestamp(f"")
+
     return {'total_cached': total_cached}
 
 
@@ -179,19 +201,20 @@ def find_all_users() -> Set[str]:
 
 
 def load_acl_queries() -> Tuple[List[Dict], List[Dict]]:
-    """从 acl_query.json 加载所有查询，返回 (correct_queries, noisy_queries)
+    """从 query.json 加载所有 ACL 查询，返回 (correct_queries, noisy_queries)
 
+    新格式：每个 item 直接包含 acl_query 字段
     noisy_queries 从 Stage 7 的 LLM 注入结果读取
     """
-    if not os.path.exists(PERSONA_GENERATED_QUERIES_FILE):
-        log_with_timestamp(f"⚠️  文件不存在: {PERSONA_GENERATED_QUERIES_FILE}")
+    if not os.path.exists(ACL_QUERY_FILE):
+        log_with_timestamp(f"⚠️  文件不存在: {ACL_QUERY_FILE}")
         return [], []
 
-    with open(PERSONA_GENERATED_QUERIES_FILE, 'r', encoding='utf-8') as f:
+    with open(ACL_QUERY_FILE, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
     if not isinstance(data, list):
-        log_with_timestamp(f"⚠️  acl_query.json 格式错误：期望 list，实际 {type(data)}")
+        log_with_timestamp(f"⚠️  query.json 格式错误：期望 list，实际 {type(data)}")
         return [], []
 
     correct_queries = []
@@ -201,21 +224,27 @@ def load_acl_queries() -> Tuple[List[Dict], List[Dict]]:
         user_id = item.get('user_id', '')
         asin = item.get('asin', '')
 
-        if 'queries' not in item:
-            # 旧平铺格式，跳过
-            continue
-
-        for q in item['queries']:
-            # 正确版本查询：从 correct_query 或 filled_query 或 query 获取
-            correct_text = q.get('correct_query', '') or q.get('filled_query', '') or q.get('query', '')
-            if correct_text:
+        # 新格式：直接有 acl_query 字段
+        acl_query = item.get('acl_query')
+        if isinstance(acl_query, dict):
+            query_text = acl_query.get('query', '')
+            if query_text:
                 correct_queries.append({
                     'user_id': user_id,
                     'asin': asin,
-                    'acl': q.get('acl', 0),
-                    'is_ground_truth': q.get('is_ground_truth', False),
-                    'query': correct_text,
+                    'acl': acl_query.get('level', 0),
+                    'is_ground_truth': True,
+                    'query': query_text,
                 })
+        elif isinstance(acl_query, str) and acl_query:
+            # 兼容字符串格式
+            correct_queries.append({
+                'user_id': user_id,
+                'asin': asin,
+                'acl': 0,
+                'is_ground_truth': True,
+                'query': acl_query,
+            })
 
     # 从 Stage 7 noisy query 文件加载 noisy queries
     if os.path.exists(ACL_NOISY_QUERY_FILE):
@@ -236,13 +265,14 @@ def load_acl_queries() -> Tuple[List[Dict], List[Dict]]:
     else:
         log_with_timestamp(f"⚠️  Stage 7 noisy query 文件不存在: {ACL_NOISY_QUERY_FILE}")
 
-    log_with_timestamp(f"✓ 从 {PERSONA_GENERATED_QUERIES_FILE} 加载了 {len(correct_queries)} 条 correct 查询")
+    log_with_timestamp(f"✓ 从 {ACL_QUERY_FILE} 加载了 {len(correct_queries)} 条 correct 查询 (ACL)")
     return correct_queries, noisy_queries
 
 
 def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
-    """从 ccomp_query.json 加载所有查询，返回 (correct_queries, noisy_queries)
+    """从 query.json 加载所有 CCOMP 查询，返回 (correct_queries, noisy_queries)
 
+    新格式：每个 item 直接包含 ccomp_query 字段
     noisy_queries 从 Stage 7 的 LLM 注入结果读取
     """
     if not os.path.exists(CCOMP_QUERY_FILE):
@@ -253,7 +283,7 @@ def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
         data = json.load(f)
 
     if not isinstance(data, list):
-        log_with_timestamp(f"⚠️  ccomp_query.json 格式错误：期望 list，实际 {type(data)}")
+        log_with_timestamp(f"⚠️  query.json 格式错误：期望 list，实际 {type(data)}")
         return [], []
 
     correct_queries = []
@@ -263,21 +293,27 @@ def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
         user_id = item.get('user_id', '')
         asin = item.get('asin', '')
 
-        if 'queries' not in item:
-            # 旧平铺格式，跳过
-            continue
-
-        for q in item['queries']:
-            # 正确版本查询：从 correct_query 或 filled_query 或 query 获取
-            correct_text = q.get('correct_query', '') or q.get('filled_query', '') or q.get('query', '')
-            if correct_text:
+        # 新格式：直接有 ccomp_query 字段
+        ccomp_query = item.get('ccomp_query')
+        if isinstance(ccomp_query, dict):
+            query_text = ccomp_query.get('query', '')
+            if query_text:
                 correct_queries.append({
                     'user_id': user_id,
                     'asin': asin,
-                    'ccomp': q.get('ccomp', 0),
-                    'is_ground_truth': q.get('is_ground_truth', False),
-                    'query': correct_text,
+                    'ccomp': ccomp_query.get('level', 0),
+                    'is_ground_truth': True,
+                    'query': query_text,
                 })
+        elif isinstance(ccomp_query, str) and ccomp_query:
+            # 兼容字符串格式
+            correct_queries.append({
+                'user_id': user_id,
+                'asin': asin,
+                'ccomp': 0,
+                'is_ground_truth': True,
+                'query': ccomp_query,
+            })
 
     # 从 Stage 7 noisy query 文件加载 noisy queries
     if os.path.exists(CCOMP_NOISY_QUERY_FILE):
@@ -298,7 +334,7 @@ def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
     else:
         log_with_timestamp(f"⚠️  Stage 7 noisy query 文件不存在: {CCOMP_NOISY_QUERY_FILE}")
 
-    log_with_timestamp(f"✓ 从 {CCOMP_QUERY_FILE} 加载了 {len(correct_queries)} 条 correct 查询")
+    log_with_timestamp(f"✓ 从 {CCOMP_QUERY_FILE} 加载了 {len(correct_queries)} 条 correct 查询 (CCOMP)")
     return correct_queries, noisy_queries
 
 
@@ -526,13 +562,17 @@ def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str 
                 log_with_timestamp(f"      编码进度 [{retriever_name}|{user_id}|{mode}]: {progress}/{len(queries)} ({progress_pct:.1f}%)")
         
         except Exception as e:
-            failed_count += 1
-            log_with_timestamp(f"      ❌ 编码失败 [{retriever_name}|{user_id}|{mode}] 查询: {query_text[:40]}... 错误: {str(e)[:50]}")
-            continue
-    
+            error_msg = str(e)
+            log_with_timestamp(f"      ❌ 编码失败 [{retriever_name}|{user_id}|{mode}] 查询: {query_text[:40]}... 错误: {error_msg[:100]}")
+            # 任何编码错误都立即结束脚本
+            log_with_timestamp(f"      ⚠️  检测到编码错误，立即结束任务")
+            log_with_timestamp(f"      ⚠️  当前检索器: {retriever_name}, 用户: {user_id}, 模式: {mode}")
+            import sys
+            sys.exit(1)
+
     if failed_count > 0:
         log_with_timestamp(f"      ⚠️  共有 {failed_count} 个查询编码失败")
-    
+
     return cache
 
 def clear_cache() -> int:
@@ -985,7 +1025,7 @@ def generate_cache_for_all_retrievers(
 def main():
     # ==================== 硬编码配置 ====================
     # 检索器列表：核心5个 + GritLM
-    RETRIEVER_NAMES = ['BGE', 'E5', 'MiniLM', 'STAR', 'GRITLM']
+    RETRIEVER_NAMES = ['GRITLM', 'BGE', 'E5', 'MiniLM', 'STAR']  # GRITLM 优先
     # 是否清理旧缓存
     CLEAR_CACHE_BEFORE = True
     # 数据源：persona_generated_queries.json
@@ -1000,19 +1040,23 @@ def main():
 
     if PERSONA_SOURCE:
         log_with_timestamp("📋 使用 persona_generated_queries.json 作为数据源")
+
+        # 先初始化缓存目录
+        if CLEAR_CACHE_BEFORE:
+            clear_cache()
+        initialize_cache_dir()
+
+        # 生成密集检索器查询缓存
         stats = generate_cache_from_persona_source(
             retriever_names=RETRIEVER_NAMES,
-            clear_cache_before=CLEAR_CACHE_BEFORE,
+            clear_cache_before=False,  # 目录已初始化
         )
 
         # 生成 BM25 查询缓存
         if GENERATE_BM25_CACHE:
-            log_with_timestamp("\n" + "=" * 80)
-            log_with_timestamp("🚀 开始生成 BM25 查询缓存")
-            log_with_timestamp("=" * 80)
+            log_with_timestamp("")
             bm25_stats = generate_bm25_cache_from_persona_source()
             log_with_timestamp(f"✓ BM25 查询缓存生成完成: {bm25_stats['total_cached']} 条")
-
         return
 
     # 默认旧逻辑（保留但不使用）

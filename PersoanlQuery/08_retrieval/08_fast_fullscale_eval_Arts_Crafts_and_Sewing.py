@@ -5,10 +5,8 @@
 包含 ACL/CCOMP 混淆因素分析 (Check 1-4 + Bootstrap CI)
 """
 
-# 完全离线模式 - 避免 HuggingFace 网络验证
 import os
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_HOME"] = "/root/hf_models"
 
 import sys
 import time
@@ -25,17 +23,19 @@ from scipy import stats
 import statsmodels.formula.api as smf
 
 # 设置路径
-sys.path.insert(0, '/fs04/ar57/wenyu/PersoanlQuery/12_retrieval')
+sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery/12_retrieval')
 
 # ============ 配置 ============
-CACHE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/retriever_Arts_Crafts_and_Sewing_cache"
-QUERY_CACHE_BASE_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/query_cache_Arts_Crafts_and_Sewing"
+CACHE_DIR = "/root/test/result/personal_query/08_retrieval/retriever_Arts_Crafts_and_Sewing_cache"
+QUERY_CACHE_BASE_DIR = "/root/test/result/personal_query/08_retrieval/query_cache_Arts_Crafts_and_Sewing"
 QUERY_TYPES = ['correct', 'noisy']  # 两种查询类型
 QUERY_CATEGORIES = ['acl', 'ccomp']  # 两种查询类别
-ACL_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Arts_Crafts_and_Sewing/acl_query.json"
-CCOMP_QUERIES_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Arts_Crafts_and_Sewing/ccomp_query.json"
-OUTPUT_DIR = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/Arts_Crafts_and_Sewing"
-META_FILE = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2023/raw/meta_categories/meta_Arts_Crafts_and_Sewing.jsonl.gz"
+# Stage 6 query files (correct queries) - 新格式使用统一的 query.json
+QUERY_FILE = "/root/test/result/personal_query/06_query/Arts_Crafts_and_Sewing/query.json"
+ACL_QUERIES_FILE = QUERY_FILE  # 兼容：ACL 和 CCOMP 共用同一文件
+CCOMP_QUERIES_FILE = QUERY_FILE  # 兼容：ACL 和 CCOMP 共用同一文件
+OUTPUT_DIR = "/root/test/result/personal_query/08_retrieval/Arts_Crafts_and_Sewing"
+META_FILE = "/root/test/Amazon-Reviews-2023/raw/meta_categories/meta_Arts_Crafts_and_Sewing.jsonl.gz"
 CATEGORY_NAME = "Arts_Crafts_and_Sewing"
 
 # 要评估的检索器列表
@@ -146,24 +146,25 @@ def validate_cache() -> bool:
 
     # 检查查询缓存
     log("  检查查询缓存...")
-    for query_type in QUERY_TYPES:
-        query_cache_dir = os.path.join(QUERY_CACHE_BASE_DIR, f'persona_{query_type}_query')
-        if not os.path.exists(query_cache_dir):
-            issues.append(f"  缺失: 查询缓存目录 persona_{query_type}_query")
-            continue
+    for query_category in QUERY_CATEGORIES:
+        for query_type in QUERY_TYPES:
+            query_cache_dir = os.path.join(QUERY_CACHE_BASE_DIR, f'{query_category}_{query_type}_query')
+            if not os.path.exists(query_cache_dir):
+                issues.append(f"  缺失: 查询缓存目录 {query_category}_{query_type}_query")
+                continue
 
-        for retriever in RETRIEVERS:
-            cache_file = os.path.join(query_cache_dir, f'{retriever}__persona_{query_type}_cache.pkl')
-            if not os.path.exists(cache_file):
-                issues.append(f"  缺失: {retriever} ({query_type}) 查询缓存")
-            else:
-                try:
-                    with open(cache_file, 'rb') as f:
-                        cache_data = pickle.load(f)
-                    n_users = len(cache_data)
-                    log(f"  {retriever} ({query_type}): {n_users} 用户")
-                except Exception as e:
-                    issues.append(f"  验证失败: {retriever} ({query_type}) - {str(e)}")
+            for retriever in RETRIEVERS:
+                cache_file = os.path.join(query_cache_dir, f'{retriever}__{query_category}_{query_type}_cache.pkl')
+                if not os.path.exists(cache_file):
+                    issues.append(f"  缺失: {retriever} ({query_category}/{query_type}) 查询缓存")
+                else:
+                    try:
+                        with open(cache_file, 'rb') as f:
+                            cache_data = pickle.load(f)
+                        n_users = len(cache_data)
+                        log(f"  {retriever} ({query_category}/{query_type}): {n_users} 用户")
+                    except Exception as e:
+                        issues.append(f"  验证失败: {retriever} ({query_category}/{query_type}) - {str(e)}")
 
     if issues:
         log("  缓存完整性检查未通过:")
@@ -180,7 +181,37 @@ UNIQUE_LEVELS = [0, 1, 2, 3]  # 默认值，会在 load_paired_queries 时更新
 GROUP_FIELD = 'ccomp'  # 默认值，会在 load_paired_queries 时更新
 
 
-def load_paired_queries(query_category: str = 'acl') -> Tuple[pd.DataFrame, pd.DataFrame]:
+def _find_same_level_pairs(data: list) -> set:
+    """找出 ACL 和 CCOMP level 一致的 (user_id, asin) 对"""
+    pairs = {}  # (user_id, asin) -> {acl_level, ccomp_level}
+    for item in data:
+        user_id = item.get('user_id', '')
+        asin = item.get('asin', '')
+        key = (user_id, asin)
+
+        acl_query = item.get('acl_query', {})
+        ccomp_query = item.get('ccomp_query', {})
+
+        if isinstance(acl_query, dict) and isinstance(ccomp_query, dict):
+            acl_level = acl_query.get('level', -1)
+            ccomp_level = ccomp_query.get('level', -1)
+
+            if key not in pairs:
+                pairs[key] = {'acl_level': acl_level, 'ccomp_level': ccomp_level}
+
+            # 只有 level 完全一致才保留
+            if acl_level != ccomp_level:
+                pairs[key]['invalid'] = True
+
+    # 只返回 level 一致的对
+    valid_pairs = set()
+    for key, info in pairs.items():
+        if not info.get('invalid', False):
+            valid_pairs.add(key)
+    return valid_pairs
+
+
+def load_paired_queries(query_category: str = 'acl', filter_same_level: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """加载 ACL 和 CCOMP 查询数据用于配对分析，返回 (acl_df, ccomp_df)
 
     每条记录包含: user_id, asin, level, retriever, P@10, query, word_count, mean_idf
@@ -195,6 +226,11 @@ def load_paired_queries(query_category: str = 'acl') -> Tuple[pd.DataFrame, pd.D
     with open(CCOMP_QUERIES_FILE, 'r') as f:
         ccomp_data = json.load(f)
 
+    # 如果启用筛选，先找出 ACL 和 CCOMP level 一致的 (user_id, asin) 对
+    valid_pairs = set()
+    if filter_same_level:
+        valid_pairs = _find_same_level_pairs(acl_data)
+
     # 动态收集所有唯一的 level 值
     acl_levels = set()
     ccomp_levels = set()
@@ -204,6 +240,9 @@ def load_paired_queries(query_category: str = 'acl') -> Tuple[pd.DataFrame, pd.D
         if 'queries' in item:
             user_id = item.get('user_id', '')
             asin = item.get('asin', '')
+            # 过滤：只保留 ACL 和 CCOMP level 一致的对
+            if filter_same_level and (user_id, asin) not in valid_pairs:
+                continue
             for q in item['queries']:
                 level = q.get('acl', 0)
                 acl_levels.add(level)
@@ -217,9 +256,32 @@ def load_paired_queries(query_category: str = 'acl') -> Tuple[pd.DataFrame, pd.D
                         'query': query_text,
                         'word_count': word_count,
                     })
+        elif 'acl_query' in item:
+            # 新格式: acl_query 是嵌套对象
+            user_id = item.get('user_id', '')
+            asin = item.get('asin', '')
+            # 过滤：只保留 ACL 和 CCOMP level 一致的对
+            if filter_same_level and (user_id, asin) not in valid_pairs:
+                continue
+            acl_query = item.get('acl_query', {})
+            level = acl_query.get('level', 0)
+            acl_levels.add(level)
+            query_text = acl_query.get('query', '')
+            word_count = acl_query.get('word_count', 0)
+            if query_text and asin:
+                acl_records.append({
+                    'user_id': user_id,
+                    'asin': asin,
+                    'level': level,
+                    'query': query_text,
+                    'word_count': word_count,
+                })
         else:
             user_id = item.get('user_id', '')
             asin = item.get('asin', '')
+            # 过滤：只保留 ACL 和 CCOMP level 一致的对
+            if filter_same_level and (user_id, asin) not in valid_pairs:
+                continue
             level = item.get('target_acl', item.get('acl', 0))
             acl_levels.add(level)
             query_text = item.get('filled_query', '') or item.get('generated_query', '') or item.get('query', '')
@@ -238,6 +300,9 @@ def load_paired_queries(query_category: str = 'acl') -> Tuple[pd.DataFrame, pd.D
         if 'queries' in item:
             user_id = item.get('user_id', '')
             asin = item.get('asin', '')
+            # 过滤：只保留 ACL 和 CCOMP level 一致的对
+            if filter_same_level and (user_id, asin) not in valid_pairs:
+                continue
             for q in item['queries']:
                 level = q.get('ccomp', 0)
                 ccomp_levels.add(level)
@@ -251,9 +316,32 @@ def load_paired_queries(query_category: str = 'acl') -> Tuple[pd.DataFrame, pd.D
                         'query': query_text,
                         'word_count': word_count,
                     })
+        elif 'ccomp_query' in item:
+            # 新格式: ccomp_query 是嵌套对象
+            user_id = item.get('user_id', '')
+            asin = item.get('asin', '')
+            # 过滤：只保留 ACL 和 CCOMP level 一致的对
+            if filter_same_level and (user_id, asin) not in valid_pairs:
+                continue
+            ccomp_query = item.get('ccomp_query', {})
+            level = ccomp_query.get('level', 0)
+            ccomp_levels.add(level)
+            query_text = ccomp_query.get('query', '')
+            word_count = ccomp_query.get('word_count', 0)
+            if query_text and asin:
+                ccomp_records.append({
+                    'user_id': user_id,
+                    'asin': asin,
+                    'level': level,
+                    'query': query_text,
+                    'word_count': word_count,
+                })
         else:
             user_id = item.get('user_id', '')
             asin = item.get('asin', '')
+            # 过滤：只保留 ACL 和 CCOMP level 一致的对
+            if filter_same_level and (user_id, asin) not in valid_pairs:
+                continue
             level = item.get('target_ccomp', item.get('ccomp', 0))
             ccomp_levels.add(level)
             query_text = item.get('filled_query', '') or item.get('generated_query', '') or item.get('query', '')
@@ -434,12 +522,13 @@ def load_bm25_query_cache(query_type: str = 'correct', query_category: str = 'ac
     with open(cache_path, 'rb') as f:
         return pickle.load(f)
 
-def load_user_queries(query_type: str = 'correct', query_category: str = 'acl') -> Tuple[Dict[str, List[Dict]], Dict[str, int], List[Tuple[int, float, float]]]:
+def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', filter_same_level: bool = True) -> Tuple[Dict[str, List[Dict]], Dict[str, int], List[Tuple[int, float, float]]]:
     """加载用户查询，每个查询项包含word_count和group_ratio（POS ratio代理）
 
     Args:
         query_type: 查询类型 ('correct' 使用 filled_query, 'noisy' 使用 noisy_query)
         query_category: 查询类别 ('acl' 或 'ccomp')
+        filter_same_level: 是否只保留 ACL 和 CCOMP level 一致的用户（默认 True）
     """
     global GROUP_FIELD, UNIQUE_LEVELS
 
@@ -462,10 +551,20 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl') 
             for q in item['queries']:
                 gv = q.get(GROUP_FIELD, 0)
                 group_values.add(gv)
+        elif f'{query_category}_query' in item:
+            # 新嵌套格式: acl_query 或 ccomp_query 对象
+            query_obj = item.get(f'{query_category}_query', {})
+            gv = query_obj.get('level', 0)
+            group_values.add(gv)
         else:
             gv = item.get(f'target_{GROUP_FIELD}', item.get(GROUP_FIELD, 0))
             group_values.add(gv)
     UNIQUE_LEVELS = sorted(group_values)
+
+    # 如果启用筛选，先找出 ACL 和 CCOMP level 一致的 (user_id, asin) 对
+    valid_pairs = set()
+    if filter_same_level:
+        valid_pairs = _find_same_level_pairs(data)
 
     # 根据 query_type 确定查询文本字段
     # correct: correct_query (ground truth) / filled_query / generated_query / query
@@ -481,16 +580,20 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl') 
                 return q.get('correct_query', '') or q.get('filled_query', '') or q.get('query', '')
             return q.get('filled_query', '') or q.get('generated_query', '') or q.get('query', '')
 
-    # 支持两种格式：
-    # 1. 新嵌套格式：[{"user_id": ..., "asin": ..., "queries": [{filled_query, acl/ccomp, word_count}, ...]}]
-    # 2. 旧平铺格式：[{"user_id": ..., "filled_query": ..., "target_acl/ccomp": ...}]
+    # 支持三种格式：
+    # 1. 新嵌套格式 (queries 数组)：[{"user_id": ..., "asin": ..., "queries": [...]}]
+    # 2. 新嵌套格式 (acl_query/ccomp_query 对象)：[{"user_id": ..., "asin": ..., "acl_query": {...}, "ccomp_query": {...}}]
+    # 3. 旧平铺格式：[{"user_id": ..., "filled_query": ..., "target_acl/ccomp": ...}]
     items = data if isinstance(data, list) else []
 
     for item in items:
-        # 新嵌套格式
+        # 新嵌套格式 (queries 数组)
         if 'queries' in item:
             user_id = item.get('user_id', '')
             asin = item.get('asin', '')
+            # 过滤：只保留 ACL 和 CCOMP level 一致的对
+            if filter_same_level and (user_id, asin) not in valid_pairs:
+                continue
             for q in item['queries']:
                 query_text = get_query_text(q)
                 gv = q.get(GROUP_FIELD, 0)
@@ -508,13 +611,40 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl') 
                     })
                     all_query_metadata.append((idx, word_count, 0.0))
                     idx += 1
+        # 新嵌套格式 (acl_query/ccomp_query 对象)
+        elif f'{query_category}_query' in item:
+            user_id = item.get('user_id', '')
+            asin = item.get('asin', '')
+            # 过滤：只保留 ACL 和 CCOMP level 一致的对
+            if filter_same_level and (user_id, asin) not in valid_pairs:
+                continue
+            query_obj = item.get(f'{query_category}_query', {})
+            query_text = query_obj.get('query', '')
+            gv = query_obj.get('level', 0)
+            word_count = query_obj.get('word_count', 0)
+            if user_id not in user_queries:
+                user_queries[user_id] = []
+                user_to_group[user_id] = gv
+            if query_text and asin:
+                user_queries[user_id].append({
+                    'query': query_text,
+                    'asin': asin,
+                    'word_count': word_count,
+                    f'{GROUP_FIELD}_ratio': 0.0,
+                    f'{GROUP_FIELD}': gv
+                })
+                all_query_metadata.append((idx, word_count, 0.0))
+                idx += 1
         else:
             # 旧平铺格式
             user_id = item.get('user_id')
             if not user_id:
                 continue
-            query_text = get_query_text(item)
             asin = item.get('asin', '')
+            # 过滤：只保留 ACL 和 CCOMP level 一致的对
+            if filter_same_level and (user_id, asin) not in valid_pairs:
+                continue
+            query_text = get_query_text(item)
             gv = item.get(f'target_{GROUP_FIELD}', item.get(GROUP_FIELD, 0))
             word_count = item.get('word_count') or 0
             group_ratio = item.get('persona', {}).get(f'{GROUP_FIELD}_sentence_ratio', 0.0)

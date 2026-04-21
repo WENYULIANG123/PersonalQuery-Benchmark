@@ -18,9 +18,9 @@ from datetime import datetime
 
 # 确保 HF_HOME 和 HF_HUB_CACHE 指向正确的缓存目录
 if "HF_HOME" not in os.environ:
-    os.environ["HF_HOME"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
+    os.environ["HF_HOME"] = "/root/hf_models"
 if "HF_HUB_CACHE" not in os.environ:
-    os.environ["HF_HUB_CACHE"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
+    os.environ["HF_HUB_CACHE"] = "/root/hf_models"
 
 # 完全离线模式 - 避免 HuggingFace 网络验证
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -481,7 +481,7 @@ def main():
     log_with_timestamp(f"[DEBUG] Category: {category}")
     
     # Load full-scale metadata
-    metadata_file = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/document_cache/Arts_Crafts_and_Sewing_metadata_2023.pkl"
+    metadata_file = "/root/result/personal_query/08_retrieval/document_cache/Arts_Crafts_and_Sewing_metadata_2023.pkl"
     log_with_timestamp(f"[DEBUG] Metadata file path: {metadata_file}")
     log_with_timestamp(f"[DEBUG] Metadata file exists: {os.path.exists(metadata_file)}")
 
@@ -499,7 +499,7 @@ def main():
             raise
     else:
         log_with_timestamp("[DEBUG] Metadata cache not found, loading from raw data...")
-        raw_metadata_file = "/fs04/ar57/wenyu/data/Amazon-Reviews-2023/raw/meta_categories/meta_Arts_Crafts_and_Sewing.jsonl.gz"
+        raw_metadata_file = "/workspace/PersonalQuery/data/Amazon-Reviews-2023/raw/meta_categories/meta_Arts_Crafts_and_Sewing.jsonl.gz"
         log_with_timestamp(f"[DEBUG] Raw metadata file: {raw_metadata_file}")
         metadata = load_fullscale_metadata(raw_metadata_file)
     
@@ -512,7 +512,7 @@ def main():
     # Compute document hash for cache keys
     log_with_timestamp(f"[DEBUG] Computing document hash...")
     doc_hash = compute_document_hash(documents)
-    cache_dir = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/08_retrieval/retriever_Arts_Crafts_and_Sewing_cache"
+    cache_dir = "/root/result/personal_query/08_retrieval/retriever_Arts_Crafts_and_Sewing_cache"
     log_with_timestamp(f"[DEBUG] Creating cache directory...")
     os.makedirs(cache_dir, exist_ok=True)
     log_with_timestamp(f"Document hash: {doc_hash}")
