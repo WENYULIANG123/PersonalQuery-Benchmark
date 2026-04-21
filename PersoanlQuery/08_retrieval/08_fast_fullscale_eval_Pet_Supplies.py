@@ -150,24 +150,25 @@ def validate_cache() -> bool:
 
     # 检查查询缓存
     log("  检查查询缓存...")
-    for query_type in QUERY_TYPES:
-        query_cache_dir = os.path.join(QUERY_CACHE_BASE_DIR, f'persona_{query_type}_query')
-        if not os.path.exists(query_cache_dir):
-            issues.append(f"  缺失: 查询缓存目录 persona_{query_type}_query")
-            continue
+    for query_category in QUERY_CATEGORIES:
+        for query_type in QUERY_TYPES:
+            query_cache_dir = os.path.join(QUERY_CACHE_BASE_DIR, f'{query_category}_{query_type}_query')
+            if not os.path.exists(query_cache_dir):
+                issues.append(f"  缺失: 查询缓存目录 {query_category}_{query_type}_query")
+                continue
 
-        for retriever in RETRIEVERS:
-            cache_file = os.path.join(query_cache_dir, f'{retriever}__persona_{query_type}_cache.pkl')
-            if not os.path.exists(cache_file):
-                issues.append(f"  缺失: {retriever} ({query_type}) 查询缓存")
-            else:
-                try:
-                    with open(cache_file, 'rb') as f:
-                        cache_data = pickle.load(f)
-                    n_users = len(cache_data)
-                    log(f"  {retriever} ({query_type}): {n_users} 用户")
-                except Exception as e:
-                    issues.append(f"  验证失败: {retriever} ({query_type}) - {str(e)}")
+            for retriever in RETRIEVERS:
+                cache_file = os.path.join(query_cache_dir, f'{retriever}__{query_category}_{query_type}_cache.pkl')
+                if not os.path.exists(cache_file):
+                    issues.append(f"  缺失: {retriever} ({query_category}/{query_type}) 查询缓存")
+                else:
+                    try:
+                        with open(cache_file, 'rb') as f:
+                            cache_data = pickle.load(f)
+                        n_users = len(cache_data)
+                        log(f"  {retriever} ({query_category}/{query_type}): {n_users} 用户")
+                    except Exception as e:
+                        issues.append(f"  验证失败: {retriever} ({query_category}/{query_type}) - {str(e)}")
 
     if issues:
         log("  缓存完整性检查未通过:")
@@ -179,9 +180,39 @@ def validate_cache() -> bool:
     return True
 
 # ============ ACL/CCOMP Paired Analysis ============
-# 模块级变量
+# 模块级变量，动态从查询文件获取
 UNIQUE_LEVELS = [0, 1, 2, 3]  # 默认值，会在 load_paired_queries 时更新
 GROUP_FIELD = 'ccomp'  # 默认值，会在 load_paired_queries 时更新
+
+
+def _find_same_level_pairs(data: list) -> set:
+    """找出 ACL 和 CCOMP level 一致的 (user_id, asin) 对"""
+    pairs = {}  # (user_id, asin) -> {acl_level, ccomp_level}
+    for item in data:
+        user_id = item.get('user_id', '')
+        asin = item.get('asin', '')
+        key = (user_id, asin)
+
+        acl_query = item.get('acl_query', {})
+        ccomp_query = item.get('ccomp_query', {})
+
+        if isinstance(acl_query, dict) and isinstance(ccomp_query, dict):
+            acl_level = acl_query.get('level', -1)
+            ccomp_level = ccomp_query.get('level', -1)
+
+            if key not in pairs:
+                pairs[key] = {'acl_level': acl_level, 'ccomp_level': ccomp_level}
+
+            # 只有 level 完全一致才保留
+            if acl_level != ccomp_level:
+                pairs[key]['invalid'] = True
+
+    # 只返回 level 一致的对
+    valid_pairs = set()
+    for key, info in pairs.items():
+        if not info.get('invalid', False):
+            valid_pairs.add(key)
+    return valid_pairs
 
 
 def load_paired_queries(query_category: str = 'acl', filter_same_level: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
