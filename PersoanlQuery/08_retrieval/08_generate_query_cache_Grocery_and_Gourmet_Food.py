@@ -43,18 +43,23 @@ from utils.retrievers import (
     STARRetriever, MiniLMRetriever, GritLMRetriever, BM25
 )
 
-STAGE9_DIR = "/root/test/result/personal_query/09_targeted_noisy_query"
-STAGE7_DIR = "/root/test/result/personal_query/07_iterative_refinement"
-STAGE6_DIR = "/root/test/result/personal_query/06_query"
-# Stage 6 query files (correct queries) - 新格式使用统一的 query.json
-QUERY_FILE = "/root/test/result/personal_query/06_query/Grocery_and_Gourmet_Food/query.json"
-ACL_QUERY_FILE = QUERY_FILE  # 兼容：ACL 和 CCOMP 共用同一文件
-CCOMP_QUERY_FILE = QUERY_FILE  # 兼容：ACL 和 CCOMP 共用同一文件
-# Stage 7 noisy query files (from LLM injection)
-ACL_NOISY_QUERY_FILE = "/root/test/result/personal_query/07_inject_noisy/Grocery_and_Gourmet_Food/acl_noisy_query.json"
-CCOMP_NOISY_QUERY_FILE = "/root/test/result/personal_query/07_inject_noisy/Grocery_and_Gourmet_Food/ccomp_noisy_query.json"
-CACHE_DIR = "/root/test/result/personal_query/08_retrieval/query_cache_Grocery_and_Gourmet_Food"
-BM25_RETRIEVER_CACHE_DIR = "/root/test/result/personal_query/08_retrieval/retriever_Grocery_and_Gourmet_Food_cache"
+# ============ 配置加载 ============
+from config import get_category_config, get_global_paths
+
+CATEGORY_NAME = "Grocery_and_Gourmet_Food"
+CAT_CONFIG = get_category_config(CATEGORY_NAME)
+GLOBAL_PATHS = get_global_paths()
+
+STAGE9_DIR = GLOBAL_PATHS['stage9_targeted_noisy_query']
+STAGE7_DIR = GLOBAL_PATHS['stage7_iterative_refinement']
+STAGE6_DIR = GLOBAL_PATHS['stage6_query']
+QUERY_FILE = CAT_CONFIG['query_file']
+ACL_QUERY_FILE = QUERY_FILE
+CCOMP_QUERY_FILE = QUERY_FILE
+ACL_NOISY_QUERY_FILE = f"{GLOBAL_PATHS['inject_noisy']}/Grocery_and_Gourmet_Food/acl_noisy_query.json"
+CCOMP_NOISY_QUERY_FILE = f"{GLOBAL_PATHS['inject_noisy']}/Grocery_and_Gourmet_Food/ccomp_noisy_query.json"
+CACHE_DIR = CAT_CONFIG['query_cache_dir']
+BM25_RETRIEVER_CACHE_DIR = CAT_CONFIG['retriever_cache_dir']
 
 AVAILABLE_RETRIEVERS = {
     'GRITLM': GritLMRetriever,  # 优先处理 GRITLM

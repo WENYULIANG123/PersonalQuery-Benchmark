@@ -27,24 +27,28 @@ import statsmodels.formula.api as smf
 # 设置路径
 sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery/12_retrieval')
 
-# ============ 配置 ============
-CACHE_DIR = "/root/test/result/personal_query/08_retrieval/retriever_Pet_Supplies_cache"
-QUERY_CACHE_BASE_DIR = "/root/test/result/personal_query/08_retrieval/query_cache_Pet_Supplies"
+# ============ 配置加载 ============
+from config import get_category_config, get_retriever_config
+
+CATEGORY_NAME = "Pet_Supplies"
+CAT_CONFIG = get_category_config(CATEGORY_NAME)
+
+CACHE_DIR = CAT_CONFIG['retriever_cache_dir']
+QUERY_CACHE_BASE_DIR = CAT_CONFIG['query_cache_dir']
 QUERY_TYPES = ['correct', 'noisy']  # 两种查询类型
 QUERY_CATEGORIES = ['acl', 'ccomp']  # 两种查询类别
-ACL_QUERIES_FILE = "/root/test/result/personal_query/06_query/Pet_Supplies/query.json"
-CCOMP_QUERIES_FILE = "/root/test/result/personal_query/06_query/Pet_Supplies/query.json"
-OUTPUT_DIR = "/root/test/result/personal_query/08_retrieval/Pet_Supplies"
-META_FILE = "/root/test/Amazon-Reviews-2023/raw/meta_categories/meta_Pet_Supplies.jsonl.gz"
-CATEGORY_NAME = "Pet_Supplies"
+ACL_QUERIES_FILE = CAT_CONFIG['query_file']
+CCOMP_QUERIES_FILE = CAT_CONFIG['query_file']
+OUTPUT_DIR = CAT_CONFIG['output_dir']
+META_FILE = CAT_CONFIG['corpus_file']
 
-# 要评估的检索器列表
-RETRIEVERS = ['bge', 'e5', 'minilm', 'star', 'gritlm', 'bm25']
-DENSE_RETRIEVERS = ['bge', 'e5', 'minilm', 'star', 'gritlm']
+RETRIEVER_CONFIG = get_retriever_config()
+RETRIEVERS = RETRIEVER_CONFIG['retrievers']
+DENSE_RETRIEVERS = RETRIEVER_CONFIG['dense_retrievers']
 
-# IDF 分层配置 (基于查询词的平均IDF, 根据实际分布 [2.97, 5.79] 调整)
+# IDF 分层配置
 IDF_BINS = [(2.5, 3.5), (3.5, 4.5), (4.5, 5.0), (5.0, float('inf'))]
-IDF_BIN_LABELS = ['IDF[2.5-3.5)', 'IDF[3.5-4.5)', 'IDF[4.5-5.0)', 'IDF[5.0+)']
+IDF_BIN_LABELS = RETRIEVER_CONFIG['idf_bin_labels']
 
 # ============ 日志 ============
 def log(msg):

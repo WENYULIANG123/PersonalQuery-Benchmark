@@ -37,6 +37,13 @@ load_product_metadata = utils.load_product_metadata
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../..'))
 from utils import retrievers
 
+# ============ 配置加载 ============
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config import get_category_config
+
+CATEGORY_NAME = "Grocery_and_Gourmet_Food"
+CAT_CONFIG = get_category_config(CATEGORY_NAME)
+
 
 
 def load_fullscale_metadata(metadata_file: str) -> Dict:
@@ -477,11 +484,11 @@ def main():
     log_with_timestamp(f"[DEBUG] Python version: {__import__('sys').version}")
     log_with_timestamp(f"[DEBUG] Current time: {__import__('datetime').datetime.now()}")
     
-    category = "Grocery_and_Gourmet_Food"
+    category = CATEGORY_NAME
     log_with_timestamp(f"[DEBUG] Category: {category}")
-    
+
     # Load full-scale metadata
-    metadata_file = "/root/result/personal_query/08_retrieval/document_cache/Grocery_and_Gourmet_Food_metadata_2023.pkl"
+    metadata_file = CAT_CONFIG['metadata_cache_file']
     log_with_timestamp(f"[DEBUG] Metadata file path: {metadata_file}")
     log_with_timestamp(f"[DEBUG] Metadata file exists: {os.path.exists(metadata_file)}")
 
@@ -499,7 +506,7 @@ def main():
             raise
     else:
         log_with_timestamp("[DEBUG] Metadata cache not found, loading from raw data...")
-        raw_metadata_file = "/workspace/PersonalQuery/data/Amazon-Reviews-2023/raw/meta_categories/meta_Grocery_and_Gourmet_Food.jsonl.gz"
+        raw_metadata_file = CAT_CONFIG['raw_corpus_file']
         log_with_timestamp(f"[DEBUG] Raw metadata file: {raw_metadata_file}")
         metadata = load_fullscale_metadata(raw_metadata_file)
     
@@ -512,7 +519,7 @@ def main():
     # Compute document hash for cache keys
     log_with_timestamp(f"[DEBUG] Computing document hash...")
     doc_hash = compute_document_hash(documents)
-    cache_dir = "/root/result/personal_query/08_retrieval/retriever_Grocery_and_Gourmet_Food_cache"
+    cache_dir = CAT_CONFIG['retriever_cache_dir']
     log_with_timestamp(f"[DEBUG] Creating cache directory...")
     os.makedirs(cache_dir, exist_ok=True)
     log_with_timestamp(f"Document hash: {doc_hash}")
