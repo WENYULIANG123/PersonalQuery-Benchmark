@@ -1920,3 +1920,118 @@ class CachedRetriever:
                           for j, idx in enumerate(topk_indices)])
 
         return results
+
+
+class SPLADERetriever:
+    """SPLADE++: Sparse Retrieval with BERT-based term weighting
+
+    SPLADE++ uses BERT to compute importance weights for each term,
+    producing a high-dimensional sparse vector representation.
+    """
+    def __init__(self, model_name: str = "naver/splade-cocondenser-ensembledistil"):
+        self.model_name = model_name
+        self.model = None
+        self.tokenizer = None
+        self.doc_ids = []
+        self.all_metadata = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.doc_vectors = None  # Sparse vectors stored as dicts: {term_idx: weight}
+
+    def _get_model(self):
+        if self.model is None:
+            log_with_timestamp(f"  Loading SPLADE++ model: {self.model_name}")
+            from transformers import AutoModelForMaskedLM, AutoTokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            self.model = AutoModelForMaskedLM.from_pretrained(self.model_name)
+            self.model = self.model.to(self.device)
+            self.model.eval()
+            log_with_timestamp(f"  SPLADE++ model loaded")
+
+    def _encode_text(self, text: str) -> Dict[str, float]:
+        """Encode text to sparse vector (term -> weight)"""
+        import torch.nn.functional as F
+
+        inputs = self.tokenizer(
+            text,
+            return_tensors='pt',
+            truncation=True,
+            max_length=512,
+            padding=True
+        ).to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            logits = outputs.logits  # [batch, seq_len, vocab_size]
+
+            # SPLADE++: ReLU(log(1 + x)) + max pooling
+            # Apply ReLU and log to get sparse weights
+            weights = F.relu(logits)
+            weights = torch.log(1 + weights)
+
+            # Max pooling over sequence length dimension
+            weights, _ = weights.max(dim=1)  # [batch, vocab_size]
+
+            # Convert to sparse dict (only keep non-zero values)
+            sparse_vec = {}
+            for idx, w in enumerate(weights[0]):
+                if w.item() > 0.01:  # Threshold for sparsity
+                    sparse_vec[idx] = w.item()
+
+            return sparse_vec
+
+    def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
+        """Build SPLADE++ index"""
+        log_with_timestamp("  Building SPLADE++ index...")
+        self._get_model()
+
+        self.doc_ids = [doc.get('asin', '') for doc in documents]
+        self.all_metadata = all_metadata
+
+        # Build document vectors
+        doc_vectors = []
+        for i, doc in enumerate(documents):
+            if (i + 1) % 10000 == 0:
+                log_with_timestamp(f"    Processed {i + 1}/{len(documents)}")
+
+            text = build_document_text(doc, all_metadata)
+            sparse_vec = self._encode_text(text)
+            doc_vectors.append(sparse_vec)
+
+        self.doc_vectors = doc_vectors
+        log_with_timestamp(f"  SPLADE++ index built with {len(self.doc_ids)} docs")
+
+    def _encode_query(self, query: str) -> Dict[str, float]:
+        """Encode query to sparse vector"""
+        return self._encode_text(query)
+
+    def search(self, queries: List[str], top_k: int = 10) -> List[List[Tuple[str, float]]]:
+        """Search using SPLADE++ sparse vectors with dot product"""
+        if self.doc_vectors is None:
+            log_with_timestamp("  ERROR: SPLADE index not built!")
+            return [[] for _ in queries]
+
+        # Encode all queries
+        query_vectors = [self._encode_query(q) for q in queries]
+
+        results = []
+        for q_vec in query_vectors:
+            scores = []
+            for i, d_vec in enumerate(self.doc_vectors):
+                # Compute dot product between sparse vectors
+                score = 0.0
+                # Only iterate over smaller vector for efficiency
+                if len(q_vec) < len(d_vec):
+                    for term_id, weight in q_vec.items():
+                        if term_id in d_vec:
+                            score += weight * d_vec[term_id]
+                else:
+                    for term_id, weight in d_vec.items():
+                        if term_id in q_vec:
+                            score += weight * q_vec[term_id]
+                scores.append((self.doc_ids[i], score))
+
+            # Sort by score and return top k
+            scores.sort(key=lambda x: x[1], reverse=True)
+            results.append(scores[:top_k])
+
+        return results

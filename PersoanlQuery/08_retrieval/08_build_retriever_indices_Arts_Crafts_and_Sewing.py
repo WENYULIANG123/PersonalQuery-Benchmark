@@ -22,9 +22,9 @@ if "HF_HOME" not in os.environ:
 if "HF_HUB_CACHE" not in os.environ:
     os.environ["HF_HUB_CACHE"] = "/root/hf_models"
 
-# 完全离线模式 - 避免 HuggingFace 网络验证
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
+# 离线模式（设置为 "0" 允许从网络下载）
+os.environ["HF_HUB_OFFLINE"] = "0"
+os.environ["TRANSFORMERS_OFFLINE"] = "0"
 
 # Add utils path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -82,10 +82,10 @@ def compute_document_hash(documents: List[Dict]) -> str:
 
 def get_cache_paths(retriever_name: str, doc_hash: str, cache_dir: str) -> Dict[str, str]:
     """Get cache file paths for a retriever"""
-    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'gritlm']
+    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance', 'gritlm']
     # ColBERT 使用 token-level embeddings，需要特殊处理，不使用简单的 numpy 数组
     COLBERT_RETRIEVERS = ['colbert']
-    SPARSE_RETRIEVERS = ['bm25']
+    SPARSE_RETRIEVERS = ['bm25', 'splade']
 
     if retriever_name in DENSE_RETRIEVERS:
         base_path = os.path.join(cache_dir, f"{retriever_name}_{doc_hash}")
@@ -108,7 +108,7 @@ def get_cache_paths(retriever_name: str, doc_hash: str, cache_dir: str) -> Dict[
 
 def cache_exists(retriever_name: str, doc_hash: str, cache_dir: str) -> bool:
     """Check if retriever cache already exists"""
-    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'gritlm']
+    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance', 'gritlm']
     COLBERT_RETRIEVERS = ['colbert']
 
     if retriever_name in DENSE_RETRIEVERS:
@@ -129,7 +129,7 @@ def validate_retriever_cache(retriever_name: str, doc_hash: str, cache_dir: str,
     Returns:
         (is_valid, error_message)
     """
-    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'gritlm']
+    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance', 'gritlm']
     COLBERT_RETRIEVERS = ['colbert']
 
     log_with_timestamp(f"[VALIDATE] Checking cache integrity for {retriever_name}...")
@@ -292,7 +292,7 @@ def _normalize_embeddings_for_save(embeddings, retriever_name: str) -> np.ndarra
 
 def save_retriever_to_cache(retriever_name: str, doc_hash: str, retriever: object, cache_dir: str) -> bool:
     """Save retriever to disk cache. Returns True if successful."""
-    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'gritlm']
+    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance', 'gritlm']
     COLBERT_RETRIEVERS = ['colbert']
 
     log_with_timestamp(f"[DEBUG] save_retriever_to_cache called for {retriever_name}")
@@ -433,6 +433,9 @@ def build_retriever(retriever_name: str, documents: List[Dict], doc_hash: str, c
         if retriever_name == 'bm25':
             retriever = retrievers.BM25()
             log_with_timestamp(f"[DEBUG] BM25 instance created")
+        elif retriever_name == 'splade':
+            retriever = retrievers.SPLADERetriever()
+            log_with_timestamp(f"[DEBUG] SPLADERetriever instance created")
         elif retriever_name == 'bge':
             retriever = retrievers.BGERetriever()
             log_with_timestamp(f"[DEBUG] BGERetriever instance created")
@@ -445,12 +448,15 @@ def build_retriever(retriever_name: str, documents: List[Dict], doc_hash: str, c
         elif retriever_name == 'star':
             retriever = retrievers.STARRetriever()
             log_with_timestamp(f"[DEBUG] STARRetriever instance created")
+        elif retriever_name == 'ance':
+            retriever = retrievers.ANCERetriever()
+            log_with_timestamp(f"[DEBUG] ANCERetriever instance created")
         elif retriever_name == 'gritlm':
             retriever = retrievers.GritLMRetriever()
             log_with_timestamp(f"[DEBUG] GritLMRetriever instance created")
         elif retriever_name == 'colbert':
             retriever = retrievers.ColBERTRetriever()
-            log_with_timestamp(f"[DEBUG] ColBERTRetriever instance created")
+            log_with_timestamp(f"[DEBUG] ColBERTRetriever (colbertv2.0) instance created")
         else:
             return False, f"Unknown retriever type: {retriever_name}"
         
@@ -526,12 +532,11 @@ def main():
     log_with_timestamp(f"Cache directory: {cache_dir}")
     
     # Define retrievers to build (按参数量从小到大排序: minilm < star < e5 < bge < gritlm)
-    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'gritlm']
+    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance', 'gritlm']
     COLBERT_RETRIEVERS = ['colbert']  # 使用 token-level late interaction
-    SPARSE_RETRIEVERS = ['bm25']
-    # TODO: ColBERT 暂时禁用，token-level embeddings 数据量过大（300k docs × 200 tokens × 768 dim ≈ 176GB+）
-    # ALL_RETRIEVERS = DENSE_RETRIEVERS + COLBERT_RETRIEVERS + SPARSE_RETRIEVERS
-    ALL_RETRIEVERS = DENSE_RETRIEVERS + SPARSE_RETRIEVERS
+    SPARSE_RETRIEVERS = ['bm25', 'splade']
+    # ColBERT 使用 token-level embeddings，数据量较大（300k docs × 200 tokens × 768 dim ≈ 176GB+）
+    ALL_RETRIEVERS = DENSE_RETRIEVERS + COLBERT_RETRIEVERS + SPARSE_RETRIEVERS
 
     log_with_timestamp(f"\nBuilding {len(ALL_RETRIEVERS)} retrievers:")
     log_with_timestamp(f"  Dense: {DENSE_RETRIEVERS}")
