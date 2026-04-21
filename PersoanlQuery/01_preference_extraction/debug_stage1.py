@@ -311,7 +311,7 @@ def debug_item(item: Dict, index: int) -> Dict:
     return result
 
 def main():
-    INPUT_FILE = "/fs04/ar57/wenyu/data/Amazon-Reviews-2023/raw/meta_categories/meta_Arts_Crafts_and_Sewing.jsonl.gz"
+    INPUT_FILE = "/workspace/PersonalQuery/data/Amazon-Reviews-2023/raw/meta_categories/meta_Arts_Crafts_and_Sewing.jsonl.gz"
 
     print(f"Reading data from {INPUT_FILE}...")
 

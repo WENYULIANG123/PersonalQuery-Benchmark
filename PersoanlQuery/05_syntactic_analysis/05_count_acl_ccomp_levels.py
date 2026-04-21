@@ -37,7 +37,7 @@ CATEGORIES = [
     "Pet_Supplies"
 ]
 
-BASE_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis"
+BASE_DIR = "/root/result/personal_query/05_syntactic_analysis"
 
 # ========================================
 # 日志

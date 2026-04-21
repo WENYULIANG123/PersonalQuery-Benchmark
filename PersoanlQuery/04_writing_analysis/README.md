@@ -16,7 +16,7 @@
 ---
 
 ### Data Directory
-`/home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/`
+`/root/result/personal_query/04_writing_analysis/`
 
 #### Output Files (12 items)
 

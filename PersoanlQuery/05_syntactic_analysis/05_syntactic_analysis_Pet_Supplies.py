@@ -25,7 +25,7 @@ def log(msg):
 
 # ============ 路径配置 ============
 CATEGORY = "Pet_Supplies"
-BASE_DIR = f'/fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis/{CATEGORY}'
+BASE_DIR = f'/root/result/personal_query/05_syntactic_analysis/{CATEGORY}'
 os.makedirs(BASE_DIR, exist_ok=True)
 
 ACL_OUTPUT_JSONL = f'{BASE_DIR}/acl_sentences.jsonl'
@@ -40,8 +40,8 @@ ATTR_DENSITY_OUTPUT_JSONL = f'{BASE_DIR}/attr_density_sentences.jsonl'
 ATTR_DENSITY_STATS_JSON = f'{BASE_DIR}/attr_density_stats.json'
 ATTR_DENSITY_USERS_JSON = f'{BASE_DIR}/attr_density_user_profiles.json'
 
-ALL_USERS_FILE = f'/home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction/{CATEGORY}/stage1_filtered_users_reviews.json'
-STAGE1_ATTR_FILE = f'/home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction/{CATEGORY}/attributes_{CATEGORY}.json'
+ALL_USERS_FILE = f'/root/result/personal_query/01_preference_extraction/{CATEGORY}/stage1_filtered_users_reviews.json'
+STAGE1_ATTR_FILE = f'/root/result/personal_query/01_preference_extraction/{CATEGORY}/attributes_{CATEGORY}.json'
 
 # ============ 标记词 ============
 # ACL 标记词（形容词性从句、状语从句、主语从句等）

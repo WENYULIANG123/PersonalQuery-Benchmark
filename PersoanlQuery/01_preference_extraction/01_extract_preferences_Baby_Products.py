@@ -9,8 +9,8 @@ Stage 1 v5: 5-Slot Product Attribute Extraction
 - A4: Appearance (外观：颜色+风格)
 - A5: Usage (使用场景：for X)
 
-Input: meta_Arts_Crafts_and_Sewing.json.gz
-Output: attributes_Arts_Crafts_and_Sewing.json
+Input: meta_Baby_Products.jsonl.gz
+Output: attributes_Baby_Products.json
 """
 
 import os
@@ -226,6 +226,9 @@ def extract_use_case(title: str, description: str, feature: List) -> Optional[st
         'for students', 'for teachers', 'for artists', 'for babies', 'for toddlers',
         'kids', 'children', 'beginners', 'professionals', 'men', 'women',
         'teens', 'adults', 'seniors', 'students', 'teachers', 'artists',
+        # 婴儿/儿童相关
+        'for baby', 'for infant', 'for newborn', 'for toddler',
+        'baby', 'infant', 'newborn', 'toddler',
         # 场所/地点
         'for home', 'for office', 'for school', 'for classroom', 'for studio',
         'for workshop', 'for outdoor', 'for indoor', 'for garden', 'for bedroom',
@@ -251,47 +254,16 @@ def extract_use_case(title: str, description: str, feature: List) -> Optional[st
         'for thanksgiving', 'for valentine', 'for anniversary',
         'gift', 'party', 'wedding', 'birthday', 'christmas', 'holiday',
         'seasonal', 'easter', 'halloween', 'thanksgiving', 'valentine',
-        # DIY/手工相关
-        'diy', 'handmade', 'craft', 'crafts', 'making', 'creating',
-        'decorating', 'decoration',
-        'for soap making', 'for candle making', 'for cake decorating',
-        'for polymer clay', 'for modeling', 'for sculpture', 'for mosaic',
-        'for origami', 'for needlework', 'for weaving', 'for macrame',
-        'for leather craft', 'for metal work', 'for wire work',
-        'for doll making', 'for toy making', 'for model making',
-        'for printmaking', 'for block printing', 'for screen printing',
-        'for monogramming', 'for monogram', 'for cross stitch',
-        'soap making', 'candle making', 'cake decorating', 'polymer clay',
-        'modeling', 'sculpture', 'mosaic', 'origami', 'needlework',
-        'weaving', 'macrame', 'leather craft', 'metal work', 'wire work',
-        'doll making', 'toy making', 'model making', 'printmaking',
-        'block printing', 'screen printing', 'monogramming', 'cross stitch',
-        # 儿童相关
-        'for kids crafts', 'for kids art', 'for kids activities',
-        'for children crafts', 'for school projects', 'for educational',
-        'kids crafts', 'kids art', 'kids activities', 'children crafts',
-        'school projects', 'educational',
-        # 工具用途
-        'for cutting', 'for trimming', 'for shaping', 'for polishing',
-        'for sanding', 'for carving', 'for etching',
-        'cutting', 'trimming', 'shaping', 'polishing', 'sanding', 'carving', 'etching',
         # 组织/存储
         'for organizing', 'for storage', 'for display', 'for presentation',
         'organizing', 'storage', 'display', 'presentation',
-        # Arts & Crafts常见用途
-        'applique', 'stamping', 'beading', 'jewelry making', 'yarn',
-        'quilt', 'papercraft', 'calligraphy', 'coloring', 'sculpting',
-        'molding', 'casting', 'floral', 'arrangement',
-        # 补充常见词
-        'paper', 'card', 'cards', 'scrapbook', 'stamp', 'die cut',
-        'vinyl', 'fabric', 'leather', 'wood', 'metal', 'clay',
-        'candle', 'soap', 'resin', 'glitter', 'ribbon', 'bow',
-        'frame', 'photo', 'picture', 'sign', 'label', 'tag',
-        'party', 'wedding', 'bridal', 'baby', 'shower',
-        'christmas', 'holiday', 'easter', 'halloween', 'thanksgiving',
-        'beads', 'jewelry', 'bracelet', 'necklace', 'earring',
-        'keychain', 'pendant', 'charm', ' Findings',
-        'felt', 'foam', 'rubber', 'plastic', 'ceramic', 'glass',
+        # 婴儿用品常见用途
+        'for feeding', 'for nursing', 'for bathing', 'for sleeping',
+        'for diaper changing', 'for potty training', 'for teething',
+        'feeding', 'nursing', 'bathing', 'sleeping', 'diaper', 'potty', 'teething',
+        # 儿童玩具/教育
+        'for playing', 'for learning', 'for development', 'for entertainment',
+        'playing', 'learning', 'development', 'entertainment',
     ]
 
     # 场景关键词到输出标签的映射
@@ -305,6 +277,9 @@ def extract_use_case(title: str, description: str, feature: List) -> Optional[st
         'professionals': 'Professional', 'men': 'Men', 'women': 'Women',
         'teens': 'Teens', 'adults': 'Adults', 'seniors': 'Seniors',
         'students': 'Students', 'teachers': 'Teachers', 'artists': 'Artists',
+        # 婴儿/儿童
+        'for baby': 'Baby', 'for infant': 'Infant', 'for newborn': 'Newborn', 'for toddlers': 'Toddler',
+        'baby': 'Baby', 'infant': 'Infant', 'newborn': 'Newborn', 'toddler': 'Toddler',
         # 场所/地点
         'for home': 'Home', 'for office': 'Office', 'for school': 'School',
         'for classroom': 'Classroom', 'for studio': 'Studio', 'for workshop': 'Workshop',
@@ -346,72 +321,17 @@ def extract_use_case(title: str, description: str, feature: List) -> Optional[st
         'christmas': 'Christmas', 'holiday': 'Holiday', 'seasonal': 'Seasonal',
         'easter': 'Easter', 'halloween': 'Halloween', 'thanksgiving': 'Thanksgiving',
         'valentine': 'Valentine', 'anniversary': 'Anniversary',
-        # DIY/手工相关
-        'diy': 'DIY', 'handmade': 'Handmade', 'craft': 'Crafting', 'crafts': 'Crafting',
-        'making': 'Making', 'creating': 'Creating', 'decorating': 'Decorating', 'decoration': 'Decorating',
-        'for soap making': 'Soap Making', 'for candle making': 'Candle Making',
-        'for cake decorating': 'Cake Decorating', 'for polymer clay': 'Polymer Clay',
-        'for modeling': 'Modeling', 'for sculpture': 'Sculpting', 'for mosaic': 'Mosaic',
-        'for origami': 'Origami', 'for needlework': 'Needlework', 'for weaving': 'Weaving',
-        'for macrame': 'Macrame', 'for leather craft': 'Leather Craft',
-        'for metal work': 'Metal Work', 'for wire work': 'Wire Work',
-        'for doll making': 'Doll Making', 'for toy making': 'Toy Making',
-        'for model making': 'Model Making', 'for printmaking': 'Printmaking',
-        'for block printing': 'Block Printing', 'for screen printing': 'Screen Printing',
-        'for monogramming': 'Monogramming', 'for monogram': 'Monogramming',
-        'for cross stitch': 'Cross Stitch',
-        'soap making': 'Soap Making', 'candle making': 'Candle Making',
-        'cake decorating': 'Cake Decorating', 'polymer clay': 'Polymer Clay',
-        'modeling': 'Modeling', 'sculpture': 'Sculpting', 'mosaic': 'Mosaic',
-        'origami': 'Origami', 'needlework': 'Needlework', 'weaving': 'Weaving',
-        'macrame': 'Macrame', 'leather craft': 'Leather Craft',
-        'metal work': 'Metal Work', 'wire work': 'Wire Work',
-        'doll making': 'Doll Making', 'toy making': 'Toy Making',
-        'model making': 'Model Making', 'printmaking': 'Printmaking',
-        'block printing': 'Block Printing', 'screen printing': 'Screen Printing',
-        'monogramming': 'Monogramming', 'cross stitch': 'Cross Stitch',
-        # 儿童相关
-        'for kids crafts': 'Kids Crafts', 'for kids art': 'Kids Art',
-        'for kids activities': 'Kids Activities', 'for children crafts': 'Kids Crafts',
-        'for school projects': 'School Projects', 'for educational': 'Educational',
-        'kids crafts': 'Kids Crafts', 'kids art': 'Kids Art',
-        'kids activities': 'Kids Activities', 'children crafts': 'Kids Crafts',
-        'school projects': 'School Projects', 'educational': 'Educational',
-        # 工具用途
-        'for cutting': 'Cutting', 'for trimming': 'Trimming', 'for shaping': 'Shaping',
-        'for polishing': 'Polishing', 'for sanding': 'Sanding', 'for carving': 'Carving',
-        'for etching': 'Etching',
-        'cutting': 'Cutting', 'trimming': 'Trimming', 'shaping': 'Shaping',
-        'polishing': 'Polishing', 'sanding': 'Sanding', 'carving': 'Carving', 'etching': 'Etching',
-        # 组织/存储
-        'for organizing': 'Organizing', 'for storage': 'Storage',
-        'for display': 'Display', 'for presentation': 'Presentation',
-        'organizing': 'Organizing', 'storage': 'Storage', 'display': 'Display', 'presentation': 'Presentation',
-        # Arts & Crafts
-        'applique': 'Applique', 'stamping': 'Stamping', 'beading': 'Beading',
-        'jewelry making': 'Jewelry Making', 'yarn': 'Yarn', 'quilt': 'Quilting',
-        'papercraft': 'Paper Craft', 'calligraphy': 'Calligraphy', 'coloring': 'Coloring',
-        'sculpting': 'Sculpting', 'molding': 'Molding', 'casting': 'Casting',
-        'floral': 'Floral', 'arrangement': 'Arrangement',
-        # 补充常见词
-        'paper': 'Paper Craft', 'card': 'Card Making', 'cards': 'Card Making',
-        'scrapbook': 'Scrapbooking', 'stamp': 'Stamping', 'die cut': 'Die Cutting',
-        'vinyl': 'Vinyl Craft', 'fabric': 'Fabric Craft', 'leather': 'Leather Craft',
-        'wood': 'Woodworking', 'metal': 'Metal Work', 'clay': 'Clay Craft',
-        'candle': 'Candle Making', 'soap': 'Soap Making', 'resin': 'Resin Craft',
-        'glitter': 'Glitter Craft', 'ribbon': 'Ribbon Craft', 'bow': 'Bow Making',
-        'frame': 'Framing', 'photo': 'Photo Craft', 'picture': 'Picture Craft',
-        'sign': 'Sign Making', 'label': 'Label Making', 'tag': 'Tag Making',
-        'party': 'Party', 'wedding': 'Wedding', 'bridal': 'Bridal', 'baby': 'Baby',
-        'shower': 'Shower',
-        'christmas': 'Christmas', 'holiday': 'Holiday', 'easter': 'Easter',
-        'halloween': 'Halloween', 'thanksgiving': 'Thanksgiving',
-        'beads': 'Beading', 'jewelry': 'Jewelry Making', 'bracelet': 'Jewelry Making',
-        'necklace': 'Jewelry Making', 'earring': 'Jewelry Making',
-        'keychain': 'Keychain Making', 'pendant': 'Jewelry Making',
-        'charm': 'Charm Making',
-        'felt': 'Felt Craft', 'foam': 'Foam Craft', 'rubber': 'Rubber Craft',
-        'plastic': 'Plastic Craft', 'ceramic': 'Ceramic Craft', 'glass': 'Glass Craft',
+        # 婴儿用品
+        'for feeding': 'Feeding', 'for nursing': 'Nursing', 'for bathing': 'Bathing',
+        'for sleeping': 'Sleeping', 'for diaper changing': 'Diaper Changing',
+        'for potty training': 'Potty Training', 'for teething': 'Teething',
+        'feeding': 'Feeding', 'nursing': 'Nursing', 'bathing': 'Bathing',
+        'sleeping': 'Sleeping', 'diaper': 'Diaper', 'potty': 'Potty', 'teething': 'Teething',
+        # 儿童玩具/教育
+        'for playing': 'Playing', 'for learning': 'Learning', 'for development': 'Development',
+        'for entertainment': 'Entertainment',
+        'playing': 'Playing', 'learning': 'Learning', 'development': 'Development',
+        'entertainment': 'Entertainment',
     }
 
     # 清理文本
@@ -708,10 +628,10 @@ def extract_description_attributes(description) -> Dict[str, List[str]]:
     }
 
 
-def extract_domain_specific_arts(item: Dict) -> Dict[str, Any]:
+def extract_domain_specific_baby(item: Dict) -> Dict[str, Any]:
     """
-    提取 Arts & Crafts 领域特定的详细属性 (A6)
-    包含: Material, Shape, Pattern, Scent, Finish Type, Reusability, Fabric Type 等
+    提取 Baby Products 领域特定的详细属性 (A6)
+    包含: Target Species, Age Range, Size, Material, Color 等
     """
     details = item.get('details', {})
     if isinstance(details, str):
@@ -722,50 +642,55 @@ def extract_domain_specific_arts(item: Dict) -> Dict[str, Any]:
 
     a6_fields = {}
 
+    # Target Species - 目标物种
+    target = details.get('Target Species', '')
+    if target:
+        a6_fields['target_species'] = str(target).strip()
+
+    # Age Range - 年龄范围
+    age = details.get('Age Range', '') or details.get('Age Range Description', '')
+    if age:
+        a6_fields['age_range'] = str(age).strip()
+
+    # Size - 尺寸
+    size = details.get('Size', '')
+    if size:
+        a6_fields['size'] = str(size).strip()
+
     # Material - 材料
     material = details.get('Material', '')
     if material:
         a6_fields['material'] = str(material).strip()
 
-    # Shape - 形状
-    shape = details.get('Shape', '')
-    if shape:
-        a6_fields['shape'] = str(shape).strip()
-
-    # Pattern - 图案/样式
-    pattern = details.get('Pattern', '')
-    if pattern:
-        a6_fields['pattern'] = str(pattern).strip()
-
-    # Scent - 香味
-    scent = details.get('Scent', '')
-    if scent:
-        a6_fields['scent'] = str(scent).strip()
-
-    # Finish Type - 表面处理类型
-    finish = details.get('Finish Type', '')
-    if finish:
-        a6_fields['finish_type'] = str(finish).strip()
-
-    # Reusability - 可重复使用性
-    reusability = details.get('Reusability', '')
-    if reusability:
-        a6_fields['reusability'] = str(reusability).strip()
-
-    # Fabric Type - 面料类型
-    fabric = details.get('Fabric Type', '')
-    if fabric:
-        a6_fields['fabric_type'] = str(fabric).strip()
+    # Color - 颜色
+    color = details.get('Color', '')
+    if color:
+        a6_fields['color'] = str(color).strip()
 
     # Item Form - 商品形态
     item_form = details.get('Item Form', '')
     if item_form:
         a6_fields['item_form'] = str(item_form).strip()
 
-    # Paint Type - 颜料类型
-    paint_type = details.get('Paint Type', '')
-    if paint_type:
-        a6_fields['paint_type'] = str(paint_type).strip()
+    # Special Feature - 特殊功能
+    special = details.get('Special Feature', '')
+    if special:
+        a6_fields['special_feature'] = str(special).strip()
+
+    # Fit Type - 适合类型
+    fit = details.get('Fit Type', '')
+    if fit:
+        a6_fields['fit_type'] = str(fit).strip()
+
+    # Theme - 主题
+    theme = details.get('Theme', '')
+    if theme:
+        a6_fields['theme'] = str(theme).strip()
+
+    # Brand - 品牌（冗余但有用）
+    brand = details.get('Brand', '')
+    if brand:
+        a6_fields['brand'] = str(brand).strip()
 
     return a6_fields
 
@@ -846,8 +771,7 @@ def extract_extended_attributes(item: Dict, description: str, feature: List) -> 
         result['A11_temperature_resistance'] = list(dict.fromkeys(found_temp))
 
     # A12: Surface - 表面特性（已部分在 A4_appearance，这里补充）
-    surface_keywords = ['smooth', 'textured', 'anti-slip', 'non-slip', 'rubberized', 'padded', 'mesh',
-                       'glossy', 'matte', 'satin', 'gloss']
+    surface_keywords = ['smooth', 'textured', 'anti-slip', 'non-slip', 'rubberized', 'padded', 'mesh']
     found_surface = []
     for kw in surface_keywords:
         if kw in desc_lower:
@@ -855,23 +779,18 @@ def extract_extended_attributes(item: Dict, description: str, feature: List) -> 
     if found_surface:
         result['A12_surface'] = list(dict.fromkeys(found_surface))
 
-    # A13: Reusability - 从 details.Reusability 或 description 提取
-    reuse_field = details.get('Reusability', '')
-    if reuse_field:
-        result['A13_reusability'] = [str(reuse_field).strip()]
-    else:
-        reuse_keywords = ['reusable', 'washable', 'disposable', 'one-time use', 'multi-use', 'refillable',
-                          'recyclable', 'eco-friendly', 'sustainable', 'biodegradable']
-        found_reuse = []
-        for kw in reuse_keywords:
-            if kw in desc_lower:
-                found_reuse.append(kw.replace('-', ' ').title())
-        if found_reuse:
-            result['A13_reusability'] = list(dict.fromkeys(found_reuse))
+    # A13: Reusability - 从 description 提取可重复使用性
+    reuse_keywords = ['reusable', 'washable', 'disposable', 'one-time use', 'multi-use', 'refillable',
+                      'recyclable', 'eco-friendly', 'sustainable', 'biodegradable']
+    found_reuse = []
+    for kw in reuse_keywords:
+        if kw in desc_lower:
+            found_reuse.append(kw.replace('-', ' ').title())
+    if found_reuse:
+        result['A13_reusability'] = list(dict.fromkeys(found_reuse))
 
     # A14: Size - 从 details.Size 等提取
-    size_fields = ['Size', 'Item Dimensions LxWxH', 'Package Dimensions', 'Product Dimensions',
-                   'Assembled Length', 'Assembled Width', 'Assembled Height']
+    size_fields = ['Size', 'Item Dimensions LxWxH', 'Package Dimensions', 'Product Dimensions']
     found_size = []
     for field in size_fields:
         val = details.get(field, '')
@@ -885,9 +804,8 @@ def extract_extended_attributes(item: Dict, description: str, feature: List) -> 
     if weight:
         result['A15_weight'] = [str(weight).strip()]
 
-    # A16: Compatibility - 从 Compatible Material, Surface Recommendation 等提取
-    compat_fields = ['Compatible Material', 'Surface Recommendation', 'Recommended Uses For Product',
-                     'Specific Uses For Product', 'Usage']
+    # A16: Compatibility - 从 Target Species, Age Range, Target Audience 提取
+    compat_fields = ['Target Species', 'Age Range', 'Age Range Description', 'Target Audience', 'Sport']
     found_compat = []
     for field in compat_fields:
         val = details.get(field, '')
@@ -896,11 +814,10 @@ def extract_extended_attributes(item: Dict, description: str, feature: List) -> 
     if found_compat:
         result['A16_compatibility'] = found_compat[:3]
 
-    # A17: Flavor - Arts Crafts 一般没有口味，这个字段可能不适用
-    # 但可以提取 Scent 作为类似属性
-    scent = details.get('Scent', '')
-    if scent:
-        result['A17_flavor'] = [str(scent).strip()]
+    # A17: Flavor - 从 details.Flavor 提取
+    flavor = details.get('Flavor', '')
+    if flavor:
+        result['A17_flavor'] = [str(flavor).strip()]
 
     return result
 
@@ -958,8 +875,8 @@ def extract_attributes(item: Dict) -> Dict:
         combined_a18 = list(dict.fromkeys(structured_a18 + desc_a18))
         structured['A18_quality'] = combined_a18
 
-    # 提取 Arts & Crafts 领域特定属性
-    domain_specific = extract_domain_specific_arts(item)
+    # 提取 Baby Products 领域特定属性
+    domain_specific = extract_domain_specific_baby(item)
 
     # 提取 A7-A17 扩展属性
     extended = extract_extended_attributes(item, description, feature)
@@ -1010,7 +927,7 @@ def process_item(item: Dict) -> Optional[Dict]:
     if not category:
         categories = item.get('categories', [])
         if categories:
-            # categories 是 ['Pet Supplies', 'Dogs', 'Collars'] 这样的普通字符串列表
+            # categories 是 ['Baby Products', 'Baby Feeding', 'Bibs'] 这样的普通字符串列表
             # 取最后一个（最细粒度）
             category = [categories[-1]] if categories else []
 
@@ -1071,7 +988,6 @@ def process_chunk(items: List) -> Tuple[List[Dict], Dict]:
         'missing_brand': 0,
         'missing_category': 0,
         'missing_price': 0,
-        'filtered_no_a3': 0,
         'filtered_no_a4_a5': 0,
     }
     for slot in ['A1', 'A2', 'A3', 'A4', 'A5']:
@@ -1107,7 +1023,6 @@ def process_chunk(items: List) -> Tuple[List[Dict], Dict]:
             if not price:
                 stats['missing_price'] = stats.get('missing_price', 0) + 1
             if asin and brand and category and price:
-                # attrs 为空，说明是 A1/A3/A4/A5 其中一个缺失导致的过滤
                 stats['filtered_no_a4_a5'] += 1
             continue
 
@@ -1129,9 +1044,9 @@ def process_chunk(items: List) -> Tuple[List[Dict], Dict]:
 
 
 def main():
-    INPUT_FILE = "/workspace/PersonalQuery/data/Amazon-Reviews-2023/raw/meta_categories/meta_Arts_Crafts_and_Sewing.jsonl.gz"
-    OUTPUT_FILE = "/root/result/personal_query/01_preference_extraction/Arts_Crafts_and_Sewing/attributes_Arts_Crafts_and_Sewing.json"
-    STAGE0_DIR = "/root/result/personal_query/00_data_preparation/Arts_Crafts_and_Sewing"
+    INPUT_FILE = "/root/test/Amazon-Reviews-2023/meta_Baby_Products.jsonl.gz"
+    OUTPUT_FILE = "/root/result/personal_query/01_preference_extraction/Baby_Products/attributes_Baby_Products.json"
+    STAGE0_DIR = "/root/result/personal_query/00_data_preparation/Baby_Products"
 
     os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
 
@@ -1197,14 +1112,11 @@ def main():
         parent_asin = item.get('parent_asin', '')
         asin = item.get('asin', '')
         if asin and parent_asin and asin != parent_asin:
-            # child -> parent
             child_to_parent[asin] = parent_asin
-            # parent -> children (可能多个子商品)
             if parent_asin not in parent_to_children:
                 parent_to_children[parent_asin] = set()
             parent_to_children[parent_asin].add(asin)
         elif parent_asin:
-            # asin 为空或等于 parent_asin，这也是一个 parent
             if parent_asin not in parent_to_children:
                 parent_to_children[parent_asin] = set()
     log_with_timestamp(f"  映射: {len(child_to_parent)} 个 child->parent, {len(parent_to_children)} 个 parent")
@@ -1254,7 +1166,7 @@ def main():
 
     log_with_timestamp(f"  Stage 0 用户评论过的商品数: {len(reviewed_asins)}")
 
-    # 找出被评论过的 parent_asins（如果评论的是子商品，映射到父商品）
+    # 找出被评论过的 parent_asins
     reviewed_parents = set()
     for asin in reviewed_asins:
         if asin in child_to_parent:
@@ -1268,7 +1180,6 @@ def main():
     original_count = len(all_results)
 
     def is_reviewed_product(result_asin):
-        """检查商品是否被评论过（直接匹配 或 子商品被评论）"""
         if result_asin in reviewed_asins:
             return True
         if result_asin in reviewed_parents:
@@ -1277,13 +1188,12 @@ def main():
 
     all_results = [r for r in all_results if is_reviewed_product(r.get('asin'))]
 
-    # 为每个商品添加评论用户信息（直接匹配 或 收集子商品的用户）
+    # 为每个商品添加评论用户信息
     for r in all_results:
         asin = r.get('asin', '')
         users = set()
         if asin in asin_to_users:
             users.update(asin_to_users[asin])
-        # 如果这是父商品，收集所有评论过其子商品的用户
         if asin in parent_to_children:
             for child_asin in parent_to_children[asin]:
                 if child_asin in asin_to_users:
@@ -1294,9 +1204,8 @@ def main():
 
     log_with_timestamp(f"  Stage 0 过滤后商品数: {filtered_count} (过滤掉 {original_count - filtered_count} 个)")
 
-    # 找出被评论过但不在结果中的商品（使用父商品检查）
+    # 找出被评论过但不在结果中的商品
     result_asins = set(r.get('asin') for r in all_results)
-    # 统计：有子商品被评论但父商品不在结果中的情况
     missing_count = 0
     for asin in reviewed_asins:
         if asin in child_to_parent:
@@ -1334,7 +1243,7 @@ def main():
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump({
             'metadata': {
-                'source': 'meta_Arts_Crafts_and_Sewing.json.gz',
+                'source': 'meta_Baby_Products.jsonl.gz',
                 'total_products': stats['total'],
                 'extraction_time': datetime.now().isoformat(),
                 'slots': {
@@ -1343,7 +1252,7 @@ def main():
                     'A3': 'Price - 价格',
                     'A4': 'Appearance - 外观（颜色+风格+表面）',
                     'A5': 'Usage - 使用场景',
-                    'A6': 'Detailed - Arts&Crafts领域特定属性（Material/Shape/Pattern/Scent等）',
+                    'A6': 'Detailed - Baby领域特定属性（AgeRange/TargetSpecies/Size/Material等）',
                     'A7': 'Material - 材料',
                     'A8': 'Safety - 安全/环保',
                     'A9': 'Durability - 耐用性',
@@ -1411,7 +1320,7 @@ def main():
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump({
             'metadata': {
-                'source': 'meta_Arts_Crafts_and_Sewing.json.gz',
+                'source': 'meta_Baby_Products.jsonl.gz',
                 'total_products': len(output_results),
                 'total_users': matching_stats['total_users'],
                 'matched_users': matching_stats['matched_users'],
@@ -1423,7 +1332,7 @@ def main():
                     'A3': 'Price - 价格',
                     'A4': 'Appearance - 外观（颜色+风格+表面）',
                     'A5': 'Usage - 使用场景',
-                    'A6': 'Detailed - Arts&Crafts领域特定属性（Material/Shape/Pattern/Scent等）',
+                    'A6': 'Detailed - Baby领域特定属性（AgeRange/TargetSpecies/Size/Material等）',
                     'A7': 'Material - 材料',
                     'A8': 'Safety - 安全/环保',
                     'A9': 'Durability - 耐用性',

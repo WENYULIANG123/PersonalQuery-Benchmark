@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ACL/CCOMP/AttrDensity 句法分析（spaCy模型分析）- Arts_Crafts_and_Sewing
+"""ACL/CCOMP/AttrDensity 句法分析（spaCy模型分析）- Baby_Products
 
 同时计算：
 - ACL (Adjectival Clause) - 形容词性从句
@@ -24,7 +24,7 @@ def log(msg):
     print(f'[{ts}] {msg}', flush=True)
 
 # ============ 路径配置 ============
-CATEGORY = "Arts_Crafts_and_Sewing"
+CATEGORY = "Baby_Products"
 BASE_DIR = f'/root/result/personal_query/05_syntactic_analysis/{CATEGORY}'
 os.makedirs(BASE_DIR, exist_ok=True)
 
@@ -192,17 +192,20 @@ def analyze_acl_in_doc(doc):
                 'position': token.i
             }
 
-        # 8. mark 标记词开头的从句（acl, advcl, csubj 等）
+        # 6. mark 标记词开头的从句
         elif token.dep_ == 'mark':
             marker_lower = token.text.lower()
             if marker_lower in ACL_MARKERS:
                 head = token.head
                 if head:
-                    # 根据 head 的 dep_ 确定类型
                     if head.dep_ == 'relcl':
                         acl_type = 'relcl_reference'
                     elif head.dep_ == 'advcl':
                         acl_type = 'advcl'
+                    elif head.dep_ == 'csubj':
+                        acl_type = 'csubj'
+                    elif head.dep_ == 'csubjpass':
+                        acl_type = 'csubjpass'
                     else:
                         acl_type = 'acl'
                     acl_info = {

@@ -7,10 +7,10 @@ Stage 4: Combined ACL + CCOMP Error Extraction
 2. CCOMP: 补语从句错误 - think/believe/would/that 等词的拼写错误
 
 Input:
-  - /home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction/Arts_Crafts_and_Sewing/stage1_filtered_users_reviews.json
+  - /root/result/personal_query/01_preference_extraction/Arts_Crafts_and_Sewing/stage1_filtered_users_reviews.json
 
 Output:
-  - /home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/Arts_Crafts_and_Sewing/merged_error.json
+  - /root/result/personal_query/04_writing_analysis/Arts_Crafts_and_Sewing/merged_error.json
 
 Usage:
   python 04_extract_merged_errors_Arts_Crafts_and_Sewing.py
@@ -30,7 +30,7 @@ import threading
 import logging
 import time
 
-sys.path.insert(0, '/home/wlia0047/ar57/wenyu/PersoanlQuery')
+sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery')
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,15 +48,15 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 # 硬编码参数
 # ============================================================================
 
-INPUT_FILE = "/fs04/ar57/wenyu/result/personal_query/01_preference_extraction/Arts_Crafts_and_Sewing/stage1_filtered_users_reviews.json"
-OUTPUT_DIR = "/fs04/ar57/wenyu/result/personal_query/04_writing_analysis/Arts_Crafts_and_Sewing"
+INPUT_FILE = "/root/result/personal_query/01_preference_extraction/Arts_Crafts_and_Sewing/stage1_filtered_users_reviews.json"
+OUTPUT_DIR = "/root/result/personal_query/04_writing_analysis/Arts_Crafts_and_Sewing"
 
 
 # ============================================================================
 # Merged 错误提取 Prompt (从 JSON 文件动态加载)
 # ============================================================================
 
-PROMPT_CONFIG_FILE = "/home/wlia0047/ar57/wenyu/PersoanlQuery/04_writing_analysis/acl_ccomp_prompts.json"
+PROMPT_CONFIG_FILE = "/workspace/PersonalQuery/PersoanlQuery/04_writing_analysis/acl_ccomp_prompts.json"
 
 def load_config():
     """从 JSON 文件加载配置"""

@@ -11,7 +11,7 @@ import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-sys.path.insert(0, '/home/wlia0047/ar57/wenyu/PersoanlQuery')
+sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery')
 
 # ========================================
 # 硬编码参数
@@ -19,22 +19,22 @@ sys.path.insert(0, '/home/wlia0047/ar57/wenyu/PersoanlQuery')
 CATEGORY = "Arts_Crafts_and_Sewing"
 
 # Stage 6 查询文件
-ACL_QUERY_FILE = f'/fs04/ar57/wenyu/result/personal_query/06_query/{CATEGORY}/acl_query.json'
-CCOMP_QUERY_FILE = f'/fs04/ar57/wenyu/result/personal_query/06_query/{CATEGORY}/ccomp_query.json'
+ACL_QUERY_FILE = f'/root/result/personal_query/06_query/{CATEGORY}/acl_query.json'
+CCOMP_QUERY_FILE = f'/root/result/personal_query/06_query/{CATEGORY}/ccomp_query.json'
 
 # Stage 4 用户错误文件
-USER_ERROR_FILE = f'/home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/{CATEGORY}/acl_ccomp_error.json'
+USER_ERROR_FILE = f'/root/result/personal_query/04_writing_analysis/{CATEGORY}/acl_ccomp_error.json'
 
 # 输出文件
-ACL_NOISY_OUTPUT_FILE = f'/fs04/ar57/wenyu/result/personal_query/07_inject_noisy/{CATEGORY}/acl_noisy_query.json'
-CCOMP_NOISY_OUTPUT_FILE = f'/fs04/ar57/wenyu/result/personal_query/07_inject_noisy/{CATEGORY}/ccomp_noisy_query.json'
+ACL_NOISY_OUTPUT_FILE = f'/root/result/personal_query/07_inject_noisy/{CATEGORY}/acl_noisy_query.json'
+CCOMP_NOISY_OUTPUT_FILE = f'/root/result/personal_query/07_inject_noisy/{CATEGORY}/ccomp_noisy_query.json'
 
 # Prompt 配置
-NOISY_PROMPT_FILE = '/home/wlia0047/ar57/wenyu/PersoanlQuery/07_inject_noisy/noisy_query_prompts.json'
+NOISY_PROMPT_FILE = '/workspace/PersonalQuery/PersoanlQuery/07_inject_noisy/noisy_query_prompts.json'
 
 # 全局配置
-NOISY_CONFIG_FILE = '/home/wlia0047/ar57/wenyu/PersoanlQuery/07_inject_noisy/noisy_query_config.json'
-QUERY_CONFIG_FILE = '/home/wlia0047/ar57/wenyu/PersoanlQuery/06_query/query_config.json'
+NOISY_CONFIG_FILE = '/workspace/PersonalQuery/PersoanlQuery/07_inject_noisy/noisy_query_config.json'
+QUERY_CONFIG_FILE = '/workspace/PersonalQuery/PersoanlQuery/06_query/query_config.json'
 
 
 # ========================================

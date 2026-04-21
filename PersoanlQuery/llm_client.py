@@ -7,7 +7,7 @@ import json
 from datetime import datetime
 from typing import Optional
 
-VLLM_CONFIG_FILE = '/home/wlia0047/ar57/wenyu/PersoanlQuery/06_query/vllm_config.json'
+VLLM_CONFIG_FILE = '/workspace/PersonalQuery/PersoanlQuery/06_query/vllm_config.json'
 
 
 def _log(msg: str):

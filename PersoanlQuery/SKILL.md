@@ -124,8 +124,8 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/05_syntactic_analysis/05_extract_local_features.py \
-     --reviews-file /fs04/ar57/wenyu/result/personal_query/00_data_preparation/all_user_reviews.json \
-     --output-dir /fs04/ar57/wenyu/result/personal_query/05_syntactic_analysis"
+     --reviews-file /root/result/personal_query/00_data_preparation/all_user_reviews.json \
+     --output-dir /root/result/personal_query/05_syntactic_analysis"
 ```
 
 ---
@@ -155,9 +155,9 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/07_iterative_refinement/07_iterative_refinement.py \
-     --query-dir /home/wlia0047/wenyu/result/personal_query/06_query \
-     --linguistic-dir /home/wlia0047/wenyu/result/personal_query/05_syntactic_analysis \
-     --output-dir /home/wlia0047/wenyu/result/personal_query/07_iterative_refinement \
+     --query-dir /root/result/personal_query/06_query \
+     --linguistic-dir /root/result/personal_query/05_syntactic_analysis \
+     --output-dir /root/result/personal_query/07_iterative_refinement \
      --max-rounds 5 \
      --candidates-per-round 3 \
      --feature-set style_only_16 \
@@ -232,9 +232,9 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
      python -u .claude/skills/PersoanlQuery/10_evaluation/10_evaluate_LLM_score.py \
-     --input-file /fs04/ar57/wenyu/result/personal_query/06_query/dual_queries_A13OFOB1394G31.json \
-     --persona-dir /fs04/ar57/wenyu/result/personal_query/03_persona \
-     --output-dir /fs04/ar57/wenyu/result/personal_query/10_evaluation \
+     --input-file /root/result/personal_query/06_query/dual_queries_A13OFOB1394G31.json \
+     --persona-dir /root/result/personal_query/03_persona \
+     --output-dir /root/result/personal_query/10_evaluation \
      --workers 10"
 
 # 语义相似度分析
@@ -243,9 +243,9 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
      python -u .claude/skills/PersoanlQuery/10_evaluation/10_evaluate_semantic_similarity.py \
-     --dual-queries-dir /fs04/ar57/wenyu/result/personal_query/06_query \
-     --persona-dir /fs04/ar57/wenyu/result/personal_query/03_persona \
-     --output-dir /fs04/ar57/wenyu/result/personal_query/10_evaluation \
+     --dual-queries-dir /root/result/personal_query/06_query \
+     --persona-dir /root/result/personal_query/03_persona \
+     --output-dir /root/result/personal_query/10_evaluation \
      --method sbert"
 
 # 画像多样性评估
@@ -254,8 +254,8 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      cd /home/wlia0047/ar57/wenyu && \
      python -u .claude/skills/PersoanlQuery/10_evaluation/10_evaluate_persona_diversity.py \
-     --persona-dir /fs04/ar57/wenyu/result/personal_query/03_persona \
-     --output-file /fs04/ar57/wenyu/result/personal_query/10_evaluation/diversity_metrics.json"
+     --persona-dir /root/result/personal_query/03_persona \
+     --output-file /root/result/personal_query/10_evaluation/diversity_metrics.json"
 ```
 
 ---
@@ -271,28 +271,28 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/11_human_evaluation/11_generate_human_eval_tasks.py \
-     --stage10-dir /home/wlia0047/wenyu/result/personal_query/10_evaluation \
-     --stage9-dir /home/wlia0047/wenyu/result/personal_query/09_targeted_noisy_query \
-     --persona-dir /home/wlia0047/wenyu/result/personal_query/03_persona/results \
-     --output-dir /home/wlia0047/wenyu/result/personal_query/11_human_evaluation/tasks"
+     --stage10-dir /root/result/personal_query/10_evaluation \
+     --stage9-dir /root/result/personal_query/09_targeted_noisy_query \
+     --persona-dir /root/result/personal_query/03_persona/results \
+     --output-dir /root/result/personal_query/11_human_evaluation/tasks"
 
 # Step 2: 计算对齐指标
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/11_human_evaluation/11_compute_alignment_metrics.py \
-     --human-results /home/wlia0047/wenyu/result/personal_query/11_human_evaluation/human_eval_results.json \
-     --llm-results /home/wlia0047/wenyu/result/personal_query/10_evaluation/evaluation_summary.json \
-     --llm-dir /home/wlia0047/wenyu/result/personal_query/10_evaluation \
-     --output-dir /home/wlia0047/wenyu/result/personal_query/11_human_evaluation/reports"
+     --human-results /root/result/personal_query/11_human_evaluation/human_eval_results.json \
+     --llm-results /root/result/personal_query/10_evaluation/evaluation_summary.json \
+     --llm-dir /root/result/personal_query/10_evaluation \
+     --output-dir /root/result/personal_query/11_human_evaluation/reports"
 
 # Step 3: 生成报告
 python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py \
     "source /apps/anaconda/2024.02-1/etc/profile.d/conda.sh && \
      conda activate /home/wlia0047/ar57_scratch/wenyu/stark && \
      python -u /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/11_human_evaluation/11_generate_report.py \
-     --metrics-dir /home/wlia0047/wenyu/result/personal_query/11_human_evaluation/reports \
-     --output-dir /home/wlia0047/wenyu/result/personal_query/11_human_evaluation/reports"
+     --metrics-dir /root/result/personal_query/11_human_evaluation/reports \
+     --output-dir /root/result/personal_query/11_human_evaluation/reports"
 ```
 
 ---
@@ -365,9 +365,9 @@ python3 /home/wlia0047/ar57/wenyu/.cursor/hooks/sbatch_wrapper.py --gpu \
      python3 /home/wlia0047/ar57/wenyu/.claude/skills/PersoanlQuery/13_rerank/13_select_attributes_from_history.py \
      --user-id A2U6VP21H9UVV3 \
      --category Yarn \
-     --query-file /fs04/ar57/wenyu/result/personal_query/13_rerank/results/tmp_attr_query_A2U6_yarn.json \
+     --query-file /root/result/personal_query/13_rerank/results/tmp_attr_query_A2U6_yarn.json \
      --meta-file /fs04/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json.gz \
-     --output-file /fs04/ar57/wenyu/result/personal_query/13_rerank/results/attr_select_A2U6_yarn_thr0.7_rerun.json"
+     --output-file /root/result/personal_query/13_rerank/results/attr_select_A2U6_yarn_thr0.7_rerun.json"
 ```
 
 其中 `tmp_attr_query_A2U6_yarn.json` 的内容示例：

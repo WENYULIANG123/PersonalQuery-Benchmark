@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-基于 LLM 的查询语句噪声注入 - Arts_Crafts_and_Sewing
+基于 LLM 的查询语句噪声注入 - Pet_Supplies
 """
 
 import sys
@@ -11,30 +11,33 @@ import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-sys.path.insert(0, '/home/wlia0047/ar57/wenyu/PersoanlQuery')
+sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery')
 
 # ========================================
-# 硬编码参数
+# 配置加载
 # ========================================
+from config import get_category_config
+
 CATEGORY = "Pet_Supplies"
+CAT_CONFIG = get_category_config(CATEGORY)
 
 # Stage 6 查询文件
-ACL_QUERY_FILE = f'/fs04/ar57/wenyu/result/personal_query/06_query/{CATEGORY}/acl_query.json'
-CCOMP_QUERY_FILE = f'/fs04/ar57/wenyu/result/personal_query/06_query/{CATEGORY}/ccomp_query.json'
+ACL_QUERY_FILE = CAT_CONFIG['acl_query_file']
+CCOMP_QUERY_FILE = CAT_CONFIG['ccomp_query_file']
 
 # Stage 4 用户错误文件
-USER_ERROR_FILE = f'/home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/{CATEGORY}/acl_ccomp_error.json'
+USER_ERROR_FILE = CAT_CONFIG['user_error_file']
 
 # 输出文件
-ACL_NOISY_OUTPUT_FILE = f'/fs04/ar57/wenyu/result/personal_query/07_inject_noisy/{CATEGORY}/acl_noisy_query.json'
-CCOMP_NOISY_OUTPUT_FILE = f'/fs04/ar57/wenyu/result/personal_query/07_inject_noisy/{CATEGORY}/ccomp_noisy_query.json'
+ACL_NOISY_OUTPUT_FILE = CAT_CONFIG['acl_noisy_output']
+CCOMP_NOISY_OUTPUT_FILE = CAT_CONFIG['ccomp_noisy_output']
 
 # Prompt 配置
-NOISY_PROMPT_FILE = '/home/wlia0047/ar57/wenyu/PersoanlQuery/07_inject_noisy/noisy_query_prompts.json'
+NOISY_PROMPT_FILE = '/workspace/PersonalQuery/PersoanlQuery/07_inject_noisy/noisy_query_prompts.json'
 
 # 全局配置
-NOISY_CONFIG_FILE = '/home/wlia0047/ar57/wenyu/PersoanlQuery/07_inject_noisy/noisy_query_config.json'
-QUERY_CONFIG_FILE = '/home/wlia0047/ar57/wenyu/PersoanlQuery/06_query/query_config.json'
+NOISY_CONFIG_FILE = '/workspace/PersonalQuery/PersoanlQuery/07_inject_noisy/noisy_query_config.json'
+QUERY_CONFIG_FILE = '/workspace/PersonalQuery/PersoanlQuery/06_query/query_config.json'
 
 
 # ========================================
