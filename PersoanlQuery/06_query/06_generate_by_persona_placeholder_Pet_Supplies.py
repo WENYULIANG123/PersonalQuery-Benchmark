@@ -18,21 +18,25 @@ import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-sys.path.insert(0, '/home/wlia0047/ar57/wenyu/PersoanlQuery')
+sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery')
 
 # ========================================
-# 硬编码参数
+# 加载配置
 # ========================================
+from config import get_category_config, get_query_config_file, get_ccomp_prompts_file
+
 CATEGORY = "Pet_Supplies"
-LEVEL_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/Pet_Supplies/level.json'
-ACL_USER_PROFILES_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/Pet_Supplies/acl_user_profiles.json'
-CCOMP_USER_PROFILES_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/Pet_Supplies/ccomp_user_profiles.json'
-ATTR_DENSITY_PROFILES_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/Pet_Supplies/attr_density_user_profiles.json'
-ATTR_VALUES_FILE = '/home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction/Pet_Supplies/attributes_Pet_Supplies.json'
-OUTPUT_FILE = '/fs04/ar57/wenyu/result/personal_query/06_query/Pet_Supplies/query.json'
+_cat_config = get_category_config(CATEGORY)
 
-QUERY_CONFIG_FILE = '/home/wlia0047/ar57/wenyu/PersoanlQuery/06_query/query_config.json'
-CCOMP_PROMPTS_FILE = '/home/wlia0047/ar57/wenyu/PersoanlQuery/06_query/ccomp_query_prompts.json'
+LEVEL_FILE = _cat_config['level_file']
+ACL_USER_PROFILES_FILE = _cat_config['acl_user_profiles_file']
+CCOMP_USER_PROFILES_FILE = _cat_config['ccomp_user_profiles_file']
+ATTR_DENSITY_PROFILES_FILE = _cat_config['attr_density_profiles_file']
+ATTR_VALUES_FILE = _cat_config['attr_values_file']
+OUTPUT_FILE = _cat_config['output_file']
+
+QUERY_CONFIG_FILE = get_query_config_file()
+CCOMP_PROMPTS_FILE = get_ccomp_prompts_file()
 
 # ========================================
 # 加载配置和 prompt 模板
