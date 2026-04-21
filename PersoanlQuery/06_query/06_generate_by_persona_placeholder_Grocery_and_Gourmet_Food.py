@@ -568,11 +568,41 @@ def main():
 
     log(f"过滤后（ACL≤3 且 CCOMP≤3）的用户数: {len(all_user_data)}")
 
+    # 加载已完成的用户，跳过已存在的
+    completed_user_ids = set()
+    existing_results = []
+    if os.path.exists(OUTPUT_FILE):
+        log(f"检测到已存在的 {OUTPUT_FILE}，加载已完成的用户...")
+        try:
+            with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
+                existing_results = json.load(f)
+            completed_user_ids = {r['user_id'] for r in existing_results if 'user_id' in r}
+            log(f"  已完成用户数: {len(completed_user_ids)}")
+        except json.JSONDecodeError:
+            log(f"  文件格式错误，将从头开始")
+            existing_results = []
+            completed_user_ids = set()
+
+    # 过滤掉已完成的用户
+    all_user_data = [u for u in all_user_data if u['uid'] not in completed_user_ids]
+    log(f"去除已完成后剩余用户数: {len(all_user_data)}")
+
     # 预热 cache
     prewarm_cache()
 
-    # 选择前 N 个用户
-    target_users = all_user_data[:NUM_USERS_TO_TEST]
+    # 优先选择 ACL level == CCOMP level 的用户
+    same_level_users = [u for u in all_user_data if u['acl_level'] == u['ccomp_level']]
+    diff_level_users = [u for u in all_user_data if u['acl_level'] != u['ccomp_level']]
+    log(f"ACL/CCOMP level 相同的用户数: {len(same_level_users)}")
+    log(f"ACL/CCOMP level 不同的用户数: {len(diff_level_users)}")
+
+    # 优先选择 level 相同的用户，不够时再选 level 不同的
+    target_users = same_level_users[:NUM_USERS_TO_TEST]
+    if len(target_users) < NUM_USERS_TO_TEST:
+        remaining = NUM_USERS_TO_TEST - len(target_users)
+        target_users.extend(diff_level_users[:remaining])
+        log(f"补充 {remaining} 个 level 不同的用户")
+
     log(f"目标用户数: {len(target_users)}")
 
     # 构建用户任务列表
@@ -705,10 +735,11 @@ def main():
 
         return user_result
 
-    results = []
+    results = existing_results.copy()
     failed_users = []
     total_start = time.time()
     total_users = len(user_tasks)
+    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(process_one_user, t): t for t in user_tasks}
@@ -718,17 +749,15 @@ def main():
                 results.append(r)
                 done = len(results)
                 log(f"  [{done}/{total_users}] user={r['user_id'][:20] if r['user_id'] else 'N/A'}")
+                # 流式写入：每次完成后立即写入文件
+                with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(results, f, indent=2, ensure_ascii=False)
             else:
                 failed_users.append(futures[future]['user_id'])
 
     total_elapsed = time.time() - total_start
 
-    # 输出结果
-    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
-    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
-
-    # 统计
+    # 最终统计
     log(f"\n{'='*60}")
     log(f"成功用户: {len(results)}/{total_users}")
     log(f"失败用户: {len(failed_users)}/{total_users}")
