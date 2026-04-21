@@ -2,11 +2,11 @@
   "_comment": "PersonalQuery 08_retrieval 路径配置文件",
   "base_paths": {
     "root": "/root",
-    "result": "/root/result/personal_query",
-    "test_result": "/root/test/result/personal_query",
+    "result": "/workspace/result/personal_query",
+    "test_result": "/workspace/result/personal_query",
     "workspace": "/workspace/PersonalQuery",
     "hf_models": "/root/hf_models",
-    "amazon_reviews": "/root/test/Amazon-Reviews-2023"
+    "amazon_reviews": "/workspace/Amazon-Reviews-2023"
   },
   "categories": {
     "Arts_Crafts_and_Sewing": {
@@ -17,7 +17,7 @@
       "query_cache_dir": "{test_result}/08_retrieval/query_cache_Arts_Crafts_and_Sewing",
       "output_dir": "{test_result}/08_retrieval/Arts_Crafts_and_Sewing",
       "metadata_cache_file": "{result}/08_retrieval/document_cache/Arts_Crafts_and_Sewing_metadata_2023.pkl",
-      "raw_corpus_file": "{workspace}/data/Amazon-Reviews-2023/raw/meta_categories/meta_Arts_Crafts_and_Sewing.jsonl.gz"
+      "raw_corpus_file": "{amazon_reviews}/raw/meta_categories/meta_Arts_Crafts_and_Sewing.jsonl.gz"
     },
     "Grocery_and_Gourmet_Food": {
       "name": "Grocery_and_Gourmet_Food",
@@ -27,7 +27,7 @@
       "query_cache_dir": "{test_result}/08_retrieval/query_cache_Grocery_and_Gourmet_Food",
       "output_dir": "{test_result}/08_retrieval/Grocery_and_Gourmet_Food",
       "metadata_cache_file": "{result}/08_retrieval/document_cache/Grocery_and_Gourmet_Food_metadata_2023.pkl",
-      "raw_corpus_file": "{workspace}/data/Amazon-Reviews-2023/raw/meta_categories/meta_Grocery_and_Gourmet_Food.jsonl.gz"
+      "raw_corpus_file": "{amazon_reviews}/raw/meta_categories/meta_Grocery_and_Gourmet_Food.jsonl.gz"
     },
     "Pet_Supplies": {
       "name": "Pet_Supplies",
@@ -37,7 +37,17 @@
       "query_cache_dir": "{test_result}/08_retrieval/query_cache_Pet_Supplies",
       "output_dir": "{test_result}/08_retrieval/Pet_Supplies",
       "metadata_cache_file": "{result}/08_retrieval/document_cache/Pet_Supplies_metadata_2023.pkl",
-      "raw_corpus_file": "{workspace}/data/Amazon-Reviews-2023/raw/meta_categories/meta_Pet_Supplies.jsonl.gz"
+      "raw_corpus_file": "{amazon_reviews}/raw/meta_categories/meta_Pet_Supplies.jsonl.gz"
+    },
+    "Baby_Products": {
+      "name": "Baby_Products",
+      "query_file": "{test_result}/06_query/Baby_Products/query.json",
+      "corpus_file": "{amazon_reviews}/raw/meta_categories/meta_Baby_Products.jsonl.gz",
+      "retriever_cache_dir": "{test_result}/08_retrieval/retriever_Baby_Products_cache",
+      "query_cache_dir": "{test_result}/08_retrieval/query_cache_Baby_Products",
+      "output_dir": "{test_result}/08_retrieval/Baby_Products",
+      "metadata_cache_file": "{result}/08_retrieval/document_cache/Baby_Products_metadata_2023.pkl",
+      "raw_corpus_file": "{amazon_reviews}/raw/meta_categories/meta_Baby_Products.jsonl.gz"
     }
   },
   "global_paths": {
