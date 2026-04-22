@@ -34,10 +34,11 @@ from datetime import datetime
 CATEGORIES = [
     "Arts_Crafts_and_Sewing",
     "Grocery_and_Gourmet_Food",
-    "Pet_Supplies"
+    "Pet_Supplies",
+    "Baby_Products"
 ]
 
-BASE_DIR = "/root/result/personal_query/05_syntactic_analysis"
+BASE_DIR = "/workspace/result/personal_query/05_syntactic_analysis"
 
 # ========================================
 # 日志

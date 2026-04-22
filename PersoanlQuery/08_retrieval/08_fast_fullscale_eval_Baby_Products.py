@@ -5,8 +5,10 @@
 包含 ACL/CCOMP 混淆因素分析 (Check 1-4 + Bootstrap CI)
 """
 
+# 完全离线模式 - 避免 HuggingFace 网络验证
 import os
-os.environ["HF_HOME"] = "/root/hf_models"
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import sys
 import time
@@ -28,16 +30,15 @@ sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery/12_retrieval')
 # ============ 配置加载 ============
 from config import get_category_config, get_retriever_config
 
-CATEGORY_NAME = "Arts_Crafts_and_Sewing"
+CATEGORY_NAME = "Baby_Products"
 CAT_CONFIG = get_category_config(CATEGORY_NAME)
 
 CACHE_DIR = CAT_CONFIG['retriever_cache_dir']
 QUERY_CACHE_BASE_DIR = CAT_CONFIG['query_cache_dir']
 QUERY_TYPES = ['correct']  # 只评估 correct
-QUERY_CATEGORIES = ['acl', 'ccomp']
-QUERY_FILE = CAT_CONFIG['query_file']
-ACL_QUERIES_FILE = QUERY_FILE
-CCOMP_QUERIES_FILE = QUERY_FILE
+QUERY_CATEGORIES = ['acl', 'ccomp']  # 两种查询类别
+ACL_QUERIES_FILE = CAT_CONFIG['query_file']
+CCOMP_QUERIES_FILE = CAT_CONFIG['query_file']
 OUTPUT_DIR = CAT_CONFIG['output_dir']
 META_FILE = CAT_CONFIG['corpus_file']
 
@@ -45,6 +46,7 @@ RETRIEVER_CONFIG = get_retriever_config()
 RETRIEVERS = RETRIEVER_CONFIG['retrievers']
 DENSE_RETRIEVERS = RETRIEVER_CONFIG['dense_retrievers']
 
+# IDF 分层配置
 IDF_BINS = [(2.5, 3.5), (3.5, 4.5), (4.5, 5.0), (5.0, float('inf'))]
 IDF_BIN_LABELS = RETRIEVER_CONFIG['idf_bin_labels']
 
@@ -177,7 +179,7 @@ def validate_cache() -> bool:
     log("  缓存完整性检查通过 ✓")
     return True
 
-# ============ ACL/CCOMP 混淆因素分析 ============
+# ============ ACL/CCOMP Paired Analysis ============
 # 模块级变量，动态从查询文件获取
 UNIQUE_LEVELS = [0, 1, 2, 3]  # 默认值，会在 load_paired_queries 时更新
 GROUP_FIELD = 'ccomp'  # 默认值，会在 load_paired_queries 时更新
@@ -439,10 +441,10 @@ def print_bootstrap_ci_table(all_results: List[Dict], k_values: List[int]):
 
     for r in all_results:
         retriever = r['retriever']
-        for group in UNIQUE_LEVELS:
-            ci = r['bootstrap_ci'].get(group, {}).get('P@10', {})
+        for ccomp in UNIQUE_LEVELS:
+            ci = r['bootstrap_ci'].get(ccomp, {}).get('P@10', {})
             if ci:
-                row = f"{retriever:<12} {GROUP_FIELD.upper()}{group}   {ci['mean']:.4f}     {ci['std']:.4f}     {ci['ci_lower']:.4f}      {ci['ci_upper']:.4f}"
+                row = f"{retriever:<12} {GROUP_FIELD.upper()}{ccomp}   {ci['mean']:.4f}     {ci['std']:.4f}     {ci['ci_lower']:.4f}      {ci['ci_upper']:.4f}"
                 log(row)
 
     log("-" * 100)
@@ -524,6 +526,36 @@ def load_bm25_query_cache(query_type: str = 'correct', query_category: str = 'ac
     with open(cache_path, 'rb') as f:
         return pickle.load(f)
 
+def _find_same_level_pairs(data: list) -> set:
+    """找出 ACL 和 CCOMP level 一致的 (user_id, asin) 对"""
+    pairs = {}  # (user_id, asin) -> {acl_level, ccomp_level}
+    for item in data:
+        user_id = item.get('user_id', '')
+        asin = item.get('asin', '')
+        key = (user_id, asin)
+
+        acl_query = item.get('acl_query', {})
+        ccomp_query = item.get('ccomp_query', {})
+
+        if isinstance(acl_query, dict) and isinstance(ccomp_query, dict):
+            acl_level = acl_query.get('level', -1)
+            ccomp_level = ccomp_query.get('level', -1)
+
+            if key not in pairs:
+                pairs[key] = {'acl_level': acl_level, 'ccomp_level': ccomp_level}
+
+            # 只有 level 完全一致才保留
+            if acl_level != ccomp_level:
+                pairs[key]['invalid'] = True
+
+    # 只返回 level 一致的对
+    valid_pairs = set()
+    for key, info in pairs.items():
+        if not info.get('invalid', False):
+            valid_pairs.add(key)
+    return valid_pairs
+
+
 def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', filter_same_level: bool = True) -> Tuple[Dict[str, List[Dict]], Dict[str, int], List[Tuple[int, float, float]]]:
     """加载用户查询，每个查询项包含word_count和group_ratio（POS ratio代理）
 
@@ -566,6 +598,7 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', 
     # 如果启用筛选，先找出 ACL 和 CCOMP level 一致的 (user_id, asin) 对
     valid_pairs = set()
     if filter_same_level:
+        # 只加载一次数据来找出有效对
         valid_pairs = _find_same_level_pairs(data)
 
     # 根据 query_type 确定查询文本字段
@@ -582,10 +615,9 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', 
                 return q.get('correct_query', '') or q.get('filled_query', '') or q.get('query', '')
             return q.get('filled_query', '') or q.get('generated_query', '') or q.get('query', '')
 
-    # 支持三种格式：
-    # 1. 新嵌套格式 (queries 数组)：[{"user_id": ..., "asin": ..., "queries": [...]}]
-    # 2. 新嵌套格式 (acl_query/ccomp_query 对象)：[{"user_id": ..., "asin": ..., "acl_query": {...}, "ccomp_query": {...}}]
-    # 3. 旧平铺格式：[{"user_id": ..., "filled_query": ..., "target_acl/ccomp": ...}]
+    # 支持两种格式：
+    # 1. 新嵌套格式：[{"user_id": ..., "asin": ..., "queries": [{filled_query, acl/ccomp, word_count}, ...]}]
+    # 2. 旧平铺格式：[{"user_id": ..., "filled_query": ..., "target_acl/ccomp": ...}]
     items = data if isinstance(data, list) else []
 
     for item in items:
@@ -647,6 +679,7 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', 
             if filter_same_level and (user_id, asin) not in valid_pairs:
                 continue
             query_text = get_query_text(item)
+            asin = item.get('asin', '')
             gv = item.get(f'target_{GROUP_FIELD}', item.get(GROUP_FIELD, 0))
             word_count = item.get('word_count') or 0
             group_ratio = item.get('persona', {}).get(f'{GROUP_FIELD}_sentence_ratio', 0.0)
@@ -756,42 +789,22 @@ class DenseSearcher:
         self.doc_ids = doc_ids
         self.retriever_name = retriever_name
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        self._use_cpu_fallback = False
-
-        # 初始化 GPU 确保 cuBLAS 可用
-        if self.device.type == 'cuda':
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-
         # 归一化 doc embeddings 以支持余弦相似度
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms = np.where(norms == 0, 1, norms)  # 避免除零
         normalized_embeddings = embeddings / norms
-
-        # 尝试 GPU，失败则回退到 CPU
-        if self.device.type == 'cuda':
-            try:
-                torch.cuda.empty_cache()
-                self.embeddings_tensor = torch.from_numpy(normalized_embeddings).float().to(self.device)
-                # 测试矩阵乘法
-                _test = torch.mm(self.embeddings_tensor[:1], self.embeddings_tensor[:1].T)
-                del _test
-            except Exception as e:
-                log(f"  [{retriever_name}] GPU 初始化失败 ({str(e)[:50]})，回退到 CPU")
-                torch.cuda.empty_cache()
-                self.device = torch.device('cpu')
-                self._use_cpu_fallback = True
-                self.embeddings_tensor = torch.from_numpy(normalized_embeddings).float()
-        else:
-            self.embeddings_tensor = torch.from_numpy(normalized_embeddings).float()
+        self.embeddings_tensor = torch.from_numpy(normalized_embeddings).float().to(self.device)
 
     def search_batch(self, query_embeddings: List[np.ndarray], top_k: int = 10) -> List[List[Tuple[str, float]]]:
         if not query_embeddings:
             return []
         query_tensor = torch.from_numpy(np.array(query_embeddings)).float().to(self.device)
-        # 使用 sentence_transformers 的 util.cos_sim，它有更好的 GPU 处理
-        from sentence_transformers import util
-        scores = util.cos_sim(query_tensor, self.embeddings_tensor)
+        # 归一化 query embeddings
+        q_norms = np.linalg.norm(query_embeddings, axis=1, keepdims=True)
+        q_norms = np.where(q_norms == 0, 1, q_norms)
+        query_tensor = query_tensor / torch.from_numpy(q_norms).float().to(self.device)
+        # 余弦相似度 = 归一化点积
+        scores = torch.mm(query_tensor, self.embeddings_tensor.T)
         results = []
         for i in range(len(query_embeddings)):
             top_scores, top_indices = torch.topk(scores[i], min(top_k, len(self.doc_ids)))
@@ -989,8 +1002,6 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_gr
     # 显式释放 GPU 内存
     del embeddings
     del searcher
-    import gc
-    gc.collect()
     if torch.cuda.is_available():
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
@@ -1140,6 +1151,10 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: L
                 idf_bin_groups[label].append(metrics)
                 idf_group_cross[(label, group)].append(metrics)
                 break
+
+        if (i + 1) % 100 == 0:
+            elapsed = time.time() - eval_start
+            log(f"    进度: {i+1}/{len(all_results)} ({100*(i+1)/len(all_results):.1f}%)")
 
     eval_time = time.time() - eval_start
     log(f"  评估完成，总耗时: {eval_time:.1f}秒")
@@ -1509,8 +1524,8 @@ def run_controlled_ols_analysis(all_results_by_category_and_type: Dict, word_idf
     log(f"分析指标: {', '.join(METRIC_DISPLAY_NAMES.values())}")
     log("模型: diff_metric ~ len_diff + idf_diff")
     log("  • 截距 = 控制 len_diff 和 idf_diff 后的纯 ACL-CCOMP 方向偏好")
-    log("  • len_diff 系数 = 长度每多 1 词，diff_p10 变化多少")
-    log("  • idf_diff 系数 = IDF 每多 1，diff_p10 变化多少")
+    log("  • len_diff 系数 = 长度每多 1 词，diff_metric 变化多少")
+    log("  • idf_diff 系数 = IDF 每多 1，diff_metric 变化多少")
     log("")
 
     # 重新组织数据：分别收集 ACL 和 CCOMP 的结果
@@ -1635,18 +1650,18 @@ def run_controlled_ols_analysis(all_results_by_category_and_type: Dict, word_idf
 
                     ols_results.append({
                         'metric': metric_name,
-                    'retriever': retriever,
-                    'level': level,
-                    'n': len(subset),
-                    'r2': model.rsquared,
-                    'intercept': intercept,
-                    'intercept_p': intercept_p,
-                    'coef_len': coef_len,
-                    'coef_len_p': coef_len_p,
-                    'coef_idf': coef_idf,
-                    'coef_idf_p': coef_idf_p,
-                    'sig_int': sig_int
-                })
+                        'retriever': retriever,
+                        'level': level,
+                        'n': len(subset),
+                        'r2': model.rsquared,
+                        'intercept': intercept,
+                        'intercept_p': intercept_p,
+                        'coef_len': coef_len,
+                        'coef_len_p': coef_len_p,
+                        'coef_idf': coef_idf,
+                        'coef_idf_p': coef_idf_p,
+                        'sig_int': sig_int
+                    })
                 except Exception as e:
                     log(f"{retriever:<12} {level:<8} {len(subset):<8} ERR: {e}")
 
@@ -1798,6 +1813,9 @@ def main():
 
         # 计算查询长度分组统计
         all_word_counts = [q.get('word_count') or 0 for user_qs in user_queries_correct.values() for q in user_qs]
+        if not all_word_counts:
+            log(f"  [{query_category.upper()}] 警告: 没有查询数据，跳过此类别")
+            continue
         q25, q50, q75 = np.percentile(all_word_counts, [25, 50, 75])
         log(f"  [{query_category.upper()}] Query长度分布: min={min(all_word_counts)}, Q25={q25:.0f}, Q50={q50:.0f}, Q75={q75:.0f}, max={max(all_word_counts)}")
 
@@ -1874,6 +1892,18 @@ def main():
         if all_results_by_type.get('correct'):
             print_summary_table_wide(all_results_by_type['correct'], f'{CATEGORY_NAME} {query_category.upper()}-CORRECT')
 
+    # 合并所有类别的结果
+    all_results_combined = []
+    for (category, qt), results in all_results_by_category_and_type.items():
+        for r in results:
+            r_copy = r.copy()
+            r_copy['query_category'] = category
+            all_results_combined.append(r_copy)
+
+    # =========================================================
+    # ========== 新增三个核心实验 ==========
+    # =========================================================
+
     # 加载配对数据用于实验 2
     log("\n加载 ACL/CCOMP 配对数据用于对称性检验...")
     acl_df, ccomp_df = load_paired_queries('acl')
@@ -1887,16 +1917,8 @@ def main():
     # 实验 3: OLS 控制 len_diff + idf_diff 后的纯方向偏好
     ols_results = run_controlled_ols_analysis(all_results_by_category_and_type, word_idf)
 
-    # 实验 4: Within-Family OLS (ACL/CCOMP 分别分析，中心化版本)
+    # 实验 4: Within-Family OLS (ACL 和 CCOMP 分别分析)
     within_family_ols_results, within_family_models = run_within_family_ols_analysis(all_results_by_category_and_type)
-
-    # 合并所有类别的结果
-    all_results_combined = []
-    for (category, qt), results in all_results_by_category_and_type.items():
-        for r in results:
-            r_copy = r.copy()
-            r_copy['query_category'] = category
-            all_results_combined.append(r_copy)
 
     if all_results_combined:
         # 计算并打印 Bootstrap CI
@@ -1941,6 +1963,7 @@ def main():
             'experiment1_paired_ttest': sanitize_for_json(pttest_results) if pttest_results else None,
             'experiment2_symmetry_check': sanitize_for_json(symmetry_results) if symmetry_results else None,
             'experiment3_controlled_ols': sanitize_for_json(ols_results) if ols_results else None,
+            'experiment4_within_family_ols': sanitize_for_json(within_family_ols_results.to_dict() if within_family_ols_results is not None else None),
         }, f, indent=2, default=str)
     log(f"\n结果已保存到: {output_file}")
 
@@ -1948,7 +1971,7 @@ def main():
     log("评估完成!")
     log("=" * 60)
 
-
+# ============================================================
 # Within-Family OLS: ACL 和 CCOMP 分别的 OLS 分析（中心化版本）
 # ============================================================
 def fit_within_family_ols_centered(

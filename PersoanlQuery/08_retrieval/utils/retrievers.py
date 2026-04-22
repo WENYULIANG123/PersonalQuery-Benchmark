@@ -384,14 +384,9 @@ class E5Retriever:
             result = model.encode(
                 [text_with_prefix],
                 convert_to_tensor=True,
-                show_progress_bar=False,
-                truncation=True,
-                max_length=512
+                show_progress_bar=False
             )
-            log_with_timestamp(f"    [E5_ENC_DEBUG] text len={len(text_with_prefix)}, tokens={num_tokens}, result shape={result.shape}")
-            embedding = result[0]
-            log_with_timestamp(f"    [E5_ENC_DEBUG] embedding shape={embedding.shape}, norm={embedding.norm().item():.4f}")
-            return embedding
+            return result[0]
         else:
             # 长文本：使用滑动窗口
             # 计算窗口数量
@@ -419,9 +414,7 @@ class E5Retriever:
                 window_embedding = model.encode(
                     [window_text],
                     convert_to_tensor=True,
-                    show_progress_bar=False,
-                    truncation=True,
-                    max_length=512
+                    show_progress_bar=False
                 )[0]
 
                 window_embeddings.append(window_embedding)
@@ -433,6 +426,7 @@ class E5Retriever:
         """
         构建 E5 索引（使用滑动窗口，保证不截断）
         """
+        from tqdm import tqdm
         log_with_timestamp("  Building E5-large-v2 index with sliding window (no truncation)...")
         model = self._get_model()
 
@@ -446,10 +440,7 @@ class E5Retriever:
         multi_window_indices = []
         window_stats = {'single_window': 0, 'multi_window': 0, 'max_windows': 0}
 
-        for i, text in enumerate(texts):
-            if (i + 1) % 10 == 0:
-                log_with_timestamp(f"    Encoding document {i+1}/{len(texts)}...")
-
+        for i, text in tqdm(enumerate(texts), total=len(texts), desc="  E5 Encoding"):
             doc_emb = self._encode_text_with_sliding_window(text, add_prefix=True)
 
             if doc_emb.dim() == 1:
@@ -512,16 +503,14 @@ class E5Retriever:
         """Search using E5 with batch processing for single-window documents"""
         if not hasattr(self, 'device'):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         model = self._get_model()
 
         with _model_inference_lock:
             query_with_prefix = self._add_instruction(query, is_query=True)
             query_embedding = model.encode(
                 [query_with_prefix],
-                convert_to_tensor=True,
-                truncation=True,
-                max_length=512
+                convert_to_tensor=True
             )[0]
 
         query_embedding = query_embedding.to(self.device)
@@ -1381,7 +1370,7 @@ class STARRetriever:
         self.all_metadata = all_metadata
         texts = [build_document_text(doc, all_metadata) for doc in documents]
 
-        self.doc_embeddings = model.encode(texts, show_progress_bar=True, batch_size=2048)
+        self.doc_embeddings = model.encode(texts, show_progress_bar=True, batch_size=512)
         log_with_timestamp(f"  STAR index built with {len(self.doc_ids)} docs")
 
     def encode_query(self, query: str) -> np.ndarray:
@@ -1417,9 +1406,7 @@ class STARRetriever:
 
         with _model_inference_lock:
             query_embedding = model.encode(
-                [query],
-                truncation=True,
-                max_length=512
+                [query]
             )
         
         if isinstance(query_embedding, np.ndarray):

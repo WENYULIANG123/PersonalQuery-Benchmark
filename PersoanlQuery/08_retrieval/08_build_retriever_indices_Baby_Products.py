@@ -22,9 +22,9 @@ if "HF_HOME" not in os.environ:
 if "HF_HUB_CACHE" not in os.environ:
     os.environ["HF_HUB_CACHE"] = "/root/hf_models"
 
-# 完全离线模式 - 避免 HuggingFace 网络验证
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
+# 离线模式（设置为 "0" 允许从网络下载）
+os.environ["HF_HUB_OFFLINE"] = "0"
+os.environ["TRANSFORMERS_OFFLINE"] = "0"
 
 # Add utils path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))

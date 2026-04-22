@@ -1917,6 +1917,9 @@ def main():
     # 实验 3: OLS 控制 len_diff + idf_diff 后的纯方向偏好
     ols_results = run_controlled_ols_analysis(all_results_by_category_and_type, word_idf)
 
+    # 实验 4: Within-Family OLS (ACL 和 CCOMP 分别分析)
+    within_family_ols_results, within_family_models = run_within_family_ols_analysis(all_results_by_category_and_type)
+
     if all_results_combined:
         # 计算并打印 Bootstrap CI
         log("\n计算 Bootstrap CI (n=1000, CI=95%)...")
@@ -1960,12 +1963,236 @@ def main():
             'experiment1_paired_ttest': sanitize_for_json(pttest_results) if pttest_results else None,
             'experiment2_symmetry_check': sanitize_for_json(symmetry_results) if symmetry_results else None,
             'experiment3_controlled_ols': sanitize_for_json(ols_results) if ols_results else None,
+            'experiment4_within_family_ols': sanitize_for_json(within_family_ols_results.to_dict() if within_family_ols_results is not None else None),
         }, f, indent=2, default=str)
     log(f"\n结果已保存到: {output_file}")
 
     log("\n" + "=" * 60)
     log("评估完成!")
     log("=" * 60)
+
+# ============================================================
+# Within-Family OLS: ACL 和 CCOMP 分别的 OLS 分析（中心化版本）
+# ============================================================
+def fit_within_family_ols_centered(
+    subdf: pd.DataFrame,
+    metric_col: str = "p10",
+    len_col: str = "qlen",
+    idf_col: str = "qidf",
+):
+    """
+    对单个 domain × retriever × family 子集拟合：
+        p10 ~ C(level) + len_c + idf_c
+
+    len 和 idf 会先做中心化：
+        len_c = len - mean(len)
+        idf_c = idf - mean(idf)
+
+    这样：
+    - Intercept(L1) = 平均长度、平均IDF下，L1 的预测 P@10
+    - L2vsL1 / L3vsL1 / L3vsL2 仍然是净变化
+    """
+    subdf = subdf.copy()
+    subdf = subdf[subdf["level"].isin([1, 2, 3])].dropna(
+        subset=[metric_col, "level", len_col, idf_col]
+    )
+
+    if len(subdf) < 20:
+        return None, None
+
+    # level 设为分类变量，L1 做 reference
+    subdf["level"] = pd.Categorical(subdf["level"], categories=[1, 2, 3], ordered=True)
+
+    # 中心化
+    subdf["len_c"] = subdf[len_col] - subdf[len_col].mean()
+    subdf["idf_c"] = subdf[idf_col] - subdf[idf_col].mean()
+
+    model = smf.ols(
+        f"{metric_col} ~ C(level, Treatment(reference=1)) + len_c + idf_c",
+        data=subdf
+    ).fit()
+
+    params = model.params
+    pvals = model.pvalues
+    conf = model.conf_int()
+
+    key_l2 = "C(level, Treatment(reference=1))[T.2]"
+    key_l3 = "C(level, Treatment(reference=1))[T.3]"
+
+    beta_l2 = params.get(key_l2, float("nan"))
+    beta_l3 = params.get(key_l3, float("nan"))
+    p_l2 = pvals.get(key_l2, float("nan"))
+    p_l3 = pvals.get(key_l3, float("nan"))
+
+    ci_l2 = conf.loc[key_l2].tolist() if key_l2 in conf.index else [float("nan"), float("nan")]
+    ci_l3 = conf.loc[key_l3].tolist() if key_l3 in conf.index else [float("nan"), float("nan")]
+
+    l3_minus_l2 = beta_l3 - beta_l2
+    try:
+        test = model.t_test(f"{key_l3} - {key_l2} = 0")
+        p_l3_vs_l2 = float(test.pvalue)
+        ci_l3_vs_l2 = test.conf_int().tolist()[0]
+    except Exception:
+        p_l3_vs_l2 = float("nan")
+        ci_l3_vs_l2 = [float("nan"), float("nan")]
+
+    result = {
+        "n": len(subdf),
+        "r2": model.rsquared,
+        "intercept_l1_at_mean_covariates": params.get("Intercept", float("nan")),
+        "p_intercept_l1": pvals.get("Intercept", float("nan")),
+        "delta_l2_vs_l1": beta_l2,
+        "p_l2_vs_l1": p_l2,
+        "ci_l2_vs_l1_low": ci_l2[0],
+        "ci_l2_vs_l1_high": ci_l2[1],
+        "delta_l3_vs_l1": beta_l3,
+        "p_l3_vs_l1": p_l3,
+        "ci_l3_vs_l1_low": ci_l3[0],
+        "ci_l3_vs_l1_high": ci_l3[1],
+        "delta_l3_vs_l2": l3_minus_l2,
+        "p_l3_vs_l2": p_l3_vs_l2,
+        "ci_l3_vs_l2_low": ci_l3_vs_l2[0],
+        "ci_l3_vs_l2_high": ci_l3_vs_l2[1],
+        "coef_len_c": params.get("len_c", float("nan")),
+        "p_len_c": pvals.get("len_c", float("nan")),
+        "coef_idf_c": params.get("idf_c", float("nan")),
+        "p_idf_c": pvals.get("idf_c", float("nan")),
+        "mean_len": subdf[len_col].mean(),
+        "mean_idf": subdf[idf_col].mean(),
+    }
+    return result, model
+
+
+def run_all_within_family_ols_centered(
+    df: pd.DataFrame,
+    metric_col: str = "p10",
+    len_col: str = "qlen",
+    idf_col: str = "qidf",
+):
+    results = []
+    models = {}
+
+    for (domain, retriever, family), subdf in df.groupby(["domain", "retriever", "family"]):
+        result, model = fit_within_family_ols_centered(
+            subdf,
+            metric_col=metric_col,
+            len_col=len_col,
+            idf_col=idf_col,
+        )
+        if result is None:
+            continue
+        row = {"domain": domain, "retriever": retriever, "family": family, **result}
+        results.append(row)
+        models[(domain, retriever, family)] = model
+
+    results_df = pd.DataFrame(results)
+    return results_df, models
+
+
+def sign_with_threshold(x: float, threshold: float = 0.01) -> str:
+    if pd.isna(x):
+        return "NA"
+    if x >= threshold:
+        return "+"
+    if x <= -threshold:
+        return "-"
+    return "0"
+
+
+def add_direction_columns(results_df: pd.DataFrame, threshold: float = 0.01):
+    out = results_df.copy()
+    out["dir_l2_vs_l1"] = out["delta_l2_vs_l1"].apply(lambda x: sign_with_threshold(x, threshold))
+    out["dir_l3_vs_l2"] = out["delta_l3_vs_l2"].apply(lambda x: sign_with_threshold(x, threshold))
+    return out
+
+
+def run_within_family_ols_analysis(all_results_by_category_and_type: Dict):
+    """构建 within-family OLS 分析数据并执行分析（中心化版本）"""
+    log("\n" + "=" * 100)
+    log("实验 4: Within-Family OLS (ACL/CCOMP 分别分析)")
+    log("=" * 100)
+    log("模型: p10 ~ C(level) + len_c + idf_c (level=1 作为 reference, covariates 中心化)")
+    log("")
+
+    # 重新组织 all_results_by_category_and_type 数据
+    all_query_records = []
+
+    for (category, qt), results in all_results_by_category_and_type.items():
+        if qt != 'correct':
+            continue
+
+        family = category.upper()  # 'ACL' or 'CCOMP'
+
+        for r in results:
+            retriever = r['retriever']
+            for rec in r.get('all_query_records', []):
+                level = rec.get('acl', rec.get('ccomp', 0))
+                if level not in [1, 2, 3]:
+                    continue
+                all_query_records.append({
+                    'domain': CATEGORY_NAME,
+                    'retriever': retriever,
+                    'family': family,
+                    'level': level,
+                    'p10': rec.get('p_at10', 0.0),
+                    'qlen': rec.get('query_length', 0),
+                    'qidf': rec.get('mean_idf', 0.0),
+                })
+
+    if not all_query_records:
+        log("  警告: 没有足够的 query 记录进行 OLS 分析")
+        return None, None
+
+    df = pd.DataFrame(all_query_records)
+    log(f"  总记录数: {len(df)}")
+
+    results_df, models = run_all_within_family_ols_centered(df)
+    results_df = add_direction_columns(results_df, threshold=0.01)
+
+    # 分别打印 ACL 和 CCOMP 结果
+    for family in ['ACL', 'CCOMP']:
+        fam_df = results_df[results_df['family'] == family].sort_values(['retriever'])
+        if fam_df.empty:
+            continue
+
+        log(f"\n--- {family} Within-Family OLS (Centered) ---")
+        log(f"{'Retriever':<12} {'N':<6} {'R2':<6} {'L2vsL1':<10} {'p':<8} {'L3vsL1':<10} {'p':<8} {'L3vsL2':<10} {'p':<8} {'dir_L2':<6} {'dir_L3':<6}")
+        log("-" * 100)
+
+        for _, row in fam_df.iterrows():
+            retriever = row['retriever']
+            n = row['n']
+            r2 = row['r2']
+            delta_l2 = row.get('delta_l2_vs_l1', float('nan'))
+            p_l2 = row.get('p_l2_vs_l1', float('nan'))
+            delta_l3 = row.get('delta_l3_vs_l1', float('nan'))
+            p_l3 = row.get('p_l3_vs_l1', float('nan'))
+            delta_l3_l2 = row.get('delta_l3_vs_l2', float('nan'))
+            p_l3_l2 = row.get('p_l3_vs_l2', float('nan'))
+
+            d2_str = f"{delta_l2:+.4f}" if not pd.isna(delta_l2) else "NaN"
+            p2_str = f"{p_l2:.3e}" if not pd.isna(p_l2) and p_l2 < 0.001 else f"{p_l2:.4f}" if not pd.isna(p_l2) else "NaN"
+            d3_str = f"{delta_l3:+.4f}" if not pd.isna(delta_l3) else "NaN"
+            p3_str = f"{p_l3:.3e}" if not pd.isna(p_l3) and p_l3 < 0.001 else f"{p_l3:.4f}" if not pd.isna(p_l3) else "NaN"
+            d32_str = f"{delta_l3_l2:+.4f}" if not pd.isna(delta_l3_l2) else "NaN"
+            p32_str = f"{p_l3_l2:.3e}" if not pd.isna(p_l3_l2) and p_l3_l2 < 0.001 else f"{p_l3_l2:.4f}" if not pd.isna(p_l3_l2) else "NaN"
+
+            sig_l2 = "*" if not pd.isna(p_l2) and p_l2 < 0.05 else ""
+            sig_l3 = "*" if not pd.isna(p_l3) and p_l3 < 0.05 else ""
+            sig_l3_l2 = "*" if not pd.isna(p_l3_l2) and p_l3_l2 < 0.05 else ""
+
+            dir_l2 = row.get('dir_l2_vs_l1', 'NA')
+            dir_l3 = row.get('dir_l3_vs_l2', 'NA')
+
+            log(f"{retriever:<12} {n:<6} {r2:<6.3f} {d2_str:<10}{sig_l2} {p2_str:<8} {d3_str:<10}{sig_l3} {p3_str:<8} {d32_str:<10}{sig_l3_l2} {p32_str:<8} {dir_l2:<6} {dir_l3:<6}")
+
+    # 保存结果
+    output_file = os.path.join(OUTPUT_DIR, "within_family_ols_results.csv")
+    results_df.to_csv(output_file, index=False)
+    log(f"\n  结果已保存到: {output_file}")
+
+    return results_df, models
+
 
 if __name__ == "__main__":
     main()

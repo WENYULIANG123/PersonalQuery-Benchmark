@@ -3,7 +3,7 @@
   "base_paths": {
     "root": "/root",
     "result": "/root/result/personal_query",
-    "test_result": "/root/test/result/personal_query",
+    "test_result": "/workspace/result/personal_query",
     "workspace": "/workspace/PersonalQuery"
   },
   "categories": {
@@ -33,6 +33,15 @@
       "attr_density_profiles_file": "{test_result}/05_syntactic_analysis/Pet_Supplies/attr_density_user_profiles.json",
       "attr_values_file": "{test_result}/01_preference_extraction/Pet_Supplies/attributes_Pet_Supplies.json",
       "output_file": "{test_result}/06_query/Pet_Supplies/query.json"
+    },
+    "Baby_Products": {
+      "name": "Baby_Products",
+      "level_file": "{test_result}/05_syntactic_analysis/Baby_Products/level.json",
+      "acl_user_profiles_file": "{test_result}/05_syntactic_analysis/Baby_Products/acl_user_profiles.json",
+      "ccomp_user_profiles_file": "{test_result}/05_syntactic_analysis/Baby_Products/ccomp_user_profiles.json",
+      "attr_density_profiles_file": "{test_result}/05_syntactic_analysis/Baby_Products/attr_density_user_profiles.json",
+      "attr_values_file": "{test_result}/01_preference_extraction/Baby_Products/attributes_Baby_Products.json",
+      "output_file": "{test_result}/06_query/Baby_Products/query.json"
     }
   },
   "query_config_file": "{workspace}/PersoanlQuery/06_query/query_config.json",
