@@ -2078,8 +2078,8 @@ def sign_with_threshold(x: float, threshold: float = 0.01) -> str:
 
 def add_direction_columns(results_df: pd.DataFrame, threshold: float = 0.01):
     out = results_df.copy()
-    out["dir_l2_vs_l1"] = out["delta_l2_vs_l1"].apply(lambda x: sign_with_threshold(x, threshold))
-    out["dir_l3_vs_l2"] = out["delta_l3_vs_l2"].apply(lambda x: sign_with_threshold(x, threshold))
+    out["dir_l2_vs_l1"] = out["delta_l2_vs_l1"].apply(lambda x: "+" if x > 0 else "-" if x < 0 else "0" if x == 0 else "NA")
+    out["dir_l3_vs_l2"] = out["delta_l3_vs_l2"].apply(lambda x: "+" if x > 0 else "-" if x < 0 else "0" if x == 0 else "NA")
     return out
 
 
