@@ -20,6 +20,8 @@ import json
 import pickle
 import time
 import argparse
+import numpy as np
+import torch
 from pathlib import Path
 from typing import Dict, List, Tuple
 from datetime import datetime
@@ -48,6 +50,7 @@ NOISY_QUERY_FILE = f"{GLOBAL_PATHS['inject_noisy']}/{CATEGORY_NAME}/noisy_query.
 
 # 缓存目录 - 使用与 08 相同的目录结构
 CACHE_DIR = CAT_CONFIG['query_cache_dir']
+BM25_RETRIEVER_CACHE_DIR = CAT_CONFIG['retriever_cache_dir']
 
 AVAILABLE_RETRIEVERS = {
     'GRITLM': GritLMRetriever,
@@ -175,7 +178,15 @@ def _encode_and_save_cache(
     mode: str,
 ) -> int:
     """为检索器编码并保存查询缓存"""
-    retriever = get_retriever(retriever_name)
+    if retriever_name == 'BM25':
+        # BM25 使用不同的处理方式
+        return _encode_and_save_bm25_cache(queries, by_user, mode)
+
+    retriever_class = AVAILABLE_RETRIEVERS[retriever_name]
+    log_with_timestamp(f"  初始化检索器 {retriever_name}...")
+    retriever = retriever_class()
+    log_with_timestamp(f"  ✓ 检索器初始化完成，模型已加载")
+
     cache = {}
     failed_count = 0
 
@@ -186,26 +197,100 @@ def _encode_and_save_cache(
                 text = q.get('query', '')
                 if not text:
                     continue
-                vec = retriever.encode_queries([text])
+                embedding = retriever.encode_query(text)
+
+                if not isinstance(embedding, np.ndarray):
+                    if isinstance(embedding, torch.Tensor):
+                        embedding = embedding.cpu().numpy()
+                    else:
+                        embedding = np.array(embedding)
+
                 user_cache.append({
                     'query': text,
-                    'vector': vec[0] if len(vec) > 0 else None,
+                    'vector': embedding,
                     'user_id': user_id,
                     'asin': q.get('asin', ''),
                     'level': q.get('acl') or q.get('ccomp', 0),
                     'is_ground_truth': q.get('is_ground_truth', True),
                 })
             except Exception as e:
+                log_with_timestamp(f"      ❌ 编码失败 [{retriever_name}] 查询: {text[:40]}... 错误: {str(e)[:100]}")
                 failed_count += 1
+                import sys
+                sys.exit(1)
 
         if user_cache:
             cache[user_id] = user_cache
 
     if cache:
-        cache_file = get_cache_file_path(retriever_name, "all_users", mode)
+        cache_file = get_cache_file_path(retriever_name, "", mode)
         os.makedirs(os.path.dirname(cache_file), exist_ok=True)
         with open(cache_file, 'wb') as f:
             pickle.dump(cache, f)
+        log_with_timestamp(f"  ✓ 缓存已保存: {cache_file}")
+
+    if failed_count > 0:
+        log_with_timestamp(f"      ⚠️  共有 {failed_count} 个查询编码失败")
+
+    return len(cache)
+
+
+def _encode_and_save_bm25_cache(
+    queries: List[Dict],
+    by_user: Dict[str, List[Dict]],
+    mode: str,
+) -> int:
+    """为 BM25 编码并保存查询缓存"""
+    log_with_timestamp(f"  初始化 BM25...")
+
+    # 加载 BM25 检索器
+    bm25_path = None
+    for f in os.listdir(BM25_RETRIEVER_CACHE_DIR):
+        if f.startswith('bm25_') and f.endswith('.pkl'):
+            bm25_path = os.path.join(BM25_RETRIEVER_CACHE_DIR, f)
+            break
+    if bm25_path is None:
+        log_with_timestamp(f"  ⚠️  BM25 retriever cache not found in {BM25_RETRIEVER_CACHE_DIR}")
+        return 0
+
+    with open(bm25_path, 'rb') as f:
+        bm25 = pickle.load(f)
+    log_with_timestamp(f"  ✓ BM25 加载完成")
+
+    cache = {}
+    failed_count = 0
+
+    for user_id, user_queries in by_user.items():
+        user_cache = []
+        for q in user_queries:
+            try:
+                text = q.get('query', '')
+                if not text:
+                    continue
+                results = bm25.search(text, top_k=100)
+                user_cache.append({
+                    'query': text,
+                    'results': results,
+                    'user_id': user_id,
+                    'asin': q.get('asin', ''),
+                    'level': q.get('acl') or q.get('ccomp', 0),
+                    'is_ground_truth': q.get('is_ground_truth', True),
+                })
+            except Exception as e:
+                log_with_timestamp(f"      ❌ BM25 搜索失败: {text[:40]}... 错误: {str(e)[:100]}")
+                failed_count += 1
+                import sys
+                sys.exit(1)
+
+        if user_cache:
+            cache[user_id] = user_cache
+
+    if cache:
+        cache_file = get_cache_file_path("bm25", "", mode)
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+        with open(cache_file, 'wb') as f:
+            pickle.dump(cache, f)
+        log_with_timestamp(f"  ✓ BM25 缓存已保存: {cache_file}")
 
     if failed_count > 0:
         log_with_timestamp(f"      ⚠️  共有 {failed_count} 个查询编码失败")
