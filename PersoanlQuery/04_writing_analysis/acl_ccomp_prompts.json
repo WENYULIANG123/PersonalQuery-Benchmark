@@ -1,5 +1,5 @@
 {
-  "max_users": 500,
+  "max_users": 400,
   "max_reviews": 5,
   "max_workers": 50,
   "use_minimaxio": false,
