@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 评估脚本 - 评估 Arts_Crafts_and_Sewing 类别的 correct vs noisy 查询性能
+只评估有 noisy 配对的 correct 查询
 """
 
 import os
@@ -16,7 +17,7 @@ import torch
 import pandas as pd
 from datetime import datetime
 from collections import defaultdict
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Set
 
 # 设置路径
 sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery/08_retrieval')
@@ -30,7 +31,6 @@ def log(msg):
 CATEGORY_NAME = "Arts_Crafts_and_Sewing"
 BASE_DIR = "/workspace/result/personal_query"
 
-# 尝试从 08_retrieval 配置获取路径
 try:
     CAT_CONFIG = get_category_config(CATEGORY_NAME)
     CACHE_DIR = CAT_CONFIG['retriever_cache_dir']
@@ -47,12 +47,9 @@ OUTPUT_DIR = f"{BASE_DIR}/09_noisy_retrieval/{CATEGORY_NAME}"
 
 RETRIEVER_CONFIG = get_retriever_config()
 RETRIEVERS = RETRIEVER_CONFIG['retrievers']
-DENSE_RETRIEVERS = RETRIEVER_CONFIG['dense_retrievers']
 
 # Noisy 查询文件路径
 NOISY_QUERY_BASE = "/workspace/result/personal_query/07_inject_noisy"
-ACL_NOISY_QUERY_FILE = f"{NOISY_QUERY_BASE}/{CATEGORY_NAME}/acl_noisy_query.json"
-CCOMP_NOISY_QUERY_FILE = f"{NOISY_QUERY_BASE}/{CATEGORY_NAME}/ccomp_noisy_query.json"
 
 # ============ 评估指标计算 ============
 def compute_metrics(relevant_asin: str, retrieved_asins: List[str], k_values: List[int]) -> Dict:
@@ -83,7 +80,7 @@ def compute_average_metrics(all_metrics: List[Dict], k_values: List[int]) -> Dic
 def load_dense_retriever(retriever_name: str) -> Tuple[np.ndarray, List[str], int]:
     embeddings_path = None
     for f in os.listdir(CACHE_DIR):
-        if f.startswith(f'{retriever_name}_') and f.endswith('_embeddings.npy'):
+        if f.startswith(f'{retriever_name.lower()}_') and f.endswith('_embeddings.npy'):
             embeddings_path = os.path.join(CACHE_DIR, f)
             break
     if embeddings_path is None:
@@ -111,134 +108,172 @@ def load_bm25_retriever():
         bm25 = pickle.load(f)
     return bm25
 
-def load_query_cache(retriever_name: str, query_type: str = 'correct', query_category: str = 'acl') -> Dict:
-    cache_path = os.path.join(
-        QUERY_CACHE_BASE_DIR,
-        f'{query_category}_{query_type}_query',
-        f'{retriever_name.lower()}__{query_category}_{query_type}_cache.pkl'
-    )
-    if not os.path.exists(cache_path):
-        return None
-    with open(cache_path, 'rb') as f:
-        return pickle.load(f)
-
-def load_bm25_query_cache(query_type: str = 'correct', query_category: str = 'acl') -> Dict:
-    cache_path = os.path.join(
-        QUERY_CACHE_BASE_DIR,
-        f'{query_category}_{query_type}_query',
-        f'bm25__{query_category}_{query_type}_cache.pkl'
-    )
-    if not os.path.exists(cache_path):
-        return None
-    with open(cache_path, 'rb') as f:
-        return pickle.load(f)
-
-def load_queries(query_type: str = 'correct') -> Tuple[List[Dict], Dict]:
+def load_noisy_queries() -> Tuple[List[Dict], Set[Tuple[str, str]]]:
+    """加载 noisy 查询，返回 (queries, user_asin_pairs)"""
     queries = []
-    doc_ids_set = set()
+    user_asin_pairs = set()
 
-    if query_type == 'correct':
-        with open(QUERY_FILE, 'r') as f:
-            data = json.load(f)
+    noisy_file = f"{NOISY_QUERY_BASE}/{CATEGORY_NAME}/noisy_query.json"
+    if not os.path.exists(noisy_file):
+        log(f"  警告: Noisy 查询文件不存在: {noisy_file}")
+        return [], set()
 
-        for item in data:
-            user_id = item.get('user_id', '')
-            asin = item.get('asin', '')
-            doc_ids_set.add(asin)
+    with open(noisy_file, 'r') as f:
+        content = f.read().strip()
 
-            acl_query = item.get('acl_query', {})
-            if acl_query:
-                query_text = acl_query.get('query', '')
-                level = acl_query.get('level', 0)
-                word_count = acl_query.get('word_count', 0)
-                if query_text:
-                    queries.append({
-                        'user_id': user_id,
-                        'asin': asin,
-                        'query': query_text,
-                        'query_category': 'acl',
-                        'level': level,
-                        'word_count': word_count,
-                        'query_type': query_type
-                    })
+    if content.startswith('['):
+        data = json.loads(content)
+    else:
+        data = []
+        depth = 0
+        start = -1
+        for i, c in enumerate(content):
+            if c == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    try:
+                        data.append(json.loads(content[start:i+1]))
+                    except:
+                        pass
+                    start = -1
 
-            ccomp_query = item.get('ccomp_query', {})
-            if ccomp_query:
-                query_text = ccomp_query.get('query', '')
-                level = ccomp_query.get('level', 0)
-                word_count = ccomp_query.get('word_count', 0)
-                if query_text:
-                    queries.append({
-                        'user_id': user_id,
-                        'asin': asin,
-                        'query': query_text,
-                        'query_category': 'ccomp',
-                        'level': level,
-                        'word_count': word_count,
-                        'query_type': query_type
-                    })
+    for item in data:
+        user_id = item.get('user_id', '')
+        asin = item.get('asin', '')
+        query_text = item.get('noisy_query', '')
+        query_category = item.get('query_category', 'acl')
+        level = item.get('level', 0)
 
-    elif query_type == 'noisy':
-        # 从合并的 noisy_query.json 加载
-        noisy_file = f"{NOISY_QUERY_BASE}/{CATEGORY_NAME}/noisy_query.json"
-        if not os.path.exists(noisy_file):
-            log(f"  警告: Noisy 查询文件不存在: {noisy_file}")
-        else:
-            with open(noisy_file, 'r') as f:
-                content = f.read().strip()
+        user_asin_pairs.add((user_id, asin))
 
-            if content.startswith('['):
-                data = json.loads(content)
-            else:
-                # JSON Lines 格式
-                data = []
-                depth = 0
-                start = -1
-                for i, c in enumerate(content):
-                    if c == '{':
-                        if depth == 0:
-                            start = i
-                        depth += 1
-                    elif c == '}':
-                        depth -= 1
-                        if depth == 0 and start >= 0:
-                            try:
-                                data.append(json.loads(content[start:i+1]))
-                            except:
-                                pass
-                            start = -1
+        if query_text:
+            queries.append({
+                'user_id': user_id,
+                'asin': asin,
+                'query': query_text,
+                'query_category': query_category,
+                'level': level,
+                'query_type': 'noisy'
+            })
 
-            for item in data:
-                user_id = item.get('user_id', '')
-                asin = item.get('asin', '')
-                doc_ids_set.add(asin)
+    return queries, user_asin_pairs
 
-                query_text = item.get('noisy_query', '')
-                query_category = item.get('query_category', 'acl')
-                level = item.get('level', 0)
-                word_count = item.get('word_count', 0)
+def load_correct_queries_for_pairs(user_asin_pairs: Set[Tuple[str, str]], noisy_queries: List[Dict]) -> List[Dict]:
+    """只加载有 noisy 配对的 correct 查询（类别需匹配）"""
+    # 构建 (user_id, asin, query_category) -> noisy query 存在的集合
+    noisy_keys = set()
+    for q in noisy_queries:
+        noisy_keys.add((q['user_id'], q['asin'], q['query_category']))
 
-                if query_text:
-                    queries.append({
-                        'user_id': user_id,
-                        'asin': asin,
-                        'query': query_text,
-                        'query_category': query_category,
-                        'level': level,
-                        'word_count': word_count,
-                        'query_type': query_type
-                    })
+    queries = []
 
-    return queries, doc_ids_set
+    with open(QUERY_FILE, 'r') as f:
+        data = json.load(f)
+
+    for item in data:
+        user_id = item.get('user_id', '')
+        asin = item.get('asin', '')
+
+        if (user_id, asin) not in user_asin_pairs:
+            continue
+
+        acl_query = item.get('acl_query', {})
+        if acl_query:
+            query_text = acl_query.get('query', '')
+            level = acl_query.get('level', 0)
+            if query_text and (user_id, asin, 'acl') in noisy_keys:
+                queries.append({
+                    'user_id': user_id,
+                    'asin': asin,
+                    'query': query_text,
+                    'query_category': 'acl',
+                    'level': level,
+                    'query_type': 'correct'
+                })
+
+        ccomp_query = item.get('ccomp_query', {})
+        if ccomp_query:
+            query_text = ccomp_query.get('query', '')
+            level = ccomp_query.get('level', 0)
+            if query_text and (user_id, asin, 'ccomp') in noisy_keys:
+                queries.append({
+                    'user_id': user_id,
+                    'asin': asin,
+                    'query': query_text,
+                    'query_category': 'ccomp',
+                    'level': level,
+                    'query_type': 'correct'
+                })
+
+    return queries
+
+def load_correct_query_cache(retriever_name: str, query_category: str = 'acl') -> Dict:
+    """加载 correct 查询缓存（按 user_id 索引，值是 {query_text: embedding}）"""
+    cache_path = os.path.join(
+        QUERY_CACHE_BASE_DIR,
+        f'{query_category}_correct_query',
+        f'{retriever_name.lower()}__{query_category}_correct_cache.pkl'
+    )
+    if not os.path.exists(cache_path):
+        return None
+    with open(cache_path, 'rb') as f:
+        return pickle.load(f)
+
+def load_bm25_correct_cache(query_category: str = 'acl') -> Dict:
+    cache_path = os.path.join(
+        QUERY_CACHE_BASE_DIR,
+        f'{query_category}_correct_query',
+        f'bm25__{query_category}_correct_cache.pkl'
+    )
+    if not os.path.exists(cache_path):
+        return None
+    with open(cache_path, 'rb') as f:
+        return pickle.load(f)
+
+# Noisy 缓存文件名映射（配置名称 -> 实际文件名）
+NOISY_CACHE_NAME_MAP = {
+    'bge': 'BGE_.pkl',
+    'e5': 'E5_.pkl',
+    'minilm': 'MiniLM_.pkl',
+    'star': 'STAR_.pkl',
+    'gritlm': 'GRITLM_.pkl',
+    'bm25': 'bm25_.pkl',
+}
+
+def load_noisy_cache(retriever_name: str, query_category: str = 'acl') -> Dict:
+    """加载 noisy 查询缓存（按 user_id 索引）"""
+    cache_file = NOISY_CACHE_NAME_MAP.get(retriever_name.lower(), f'{retriever_name.upper()}_.pkl')
+    cache_path = os.path.join(
+        QUERY_CACHE_BASE_DIR,
+        f'{query_category}_noisy_query',
+        cache_file
+    )
+    if not os.path.exists(cache_path):
+        return None
+    with open(cache_path, 'rb') as f:
+        return pickle.load(f)
+
+def load_bm25_noisy_cache(query_category: str = 'acl') -> Dict:
+    cache_path = os.path.join(
+        QUERY_CACHE_BASE_DIR,
+        f'{query_category}_noisy_query',
+        f'bm25_.pkl'
+    )
+    if not os.path.exists(cache_path):
+        return None
+    with open(cache_path, 'rb') as f:
+        return pickle.load(f)
 
 def build_word_idf_dict(meta_file: str, sample_size: int = 50000) -> Dict[str, float]:
-    from collections import defaultdict
-    import gzip
-
     word_doc_freq = defaultdict(int)
     total_sampled = 0
 
     log(f"Building word IDF from corpus (sampling {sample_size} docs)...")
+    import gzip
     with gzip.open(meta_file, 'rt', encoding='utf-8') as f:
         for i, line in enumerate(f):
             if i >= sample_size:
@@ -266,18 +301,10 @@ def build_word_idf_dict(meta_file: str, sample_size: int = 50000) -> Dict[str, f
     log(f"  IDF vocabulary: {len(word_idf)} words, {total_sampled} docs sampled")
     return word_idf
 
-def compute_query_idf(query_text: str, word_idf: Dict[str, float]) -> float:
-    words = query_text.lower().split()
-    if not words:
-        return 0.0
-    idf_values = [word_idf.get(w, 5.0) for w in words]
-    return np.mean(idf_values)
-
 # ============ 搜索器 ============
 class DenseSearcher:
-    def __init__(self, embeddings: np.ndarray, doc_ids: List[str], retriever_name: str):
+    def __init__(self, embeddings: np.ndarray, doc_ids: List[str]):
         self.doc_ids = doc_ids
-        self.retriever_name = retriever_name
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms = np.where(norms == 0, 1, norms)
@@ -310,28 +337,129 @@ class BM25Searcher:
         return results
 
 # ============ 评估函数 ============
-def evaluate_retriever(retriever_name: str, queries: List[Dict], word_idf: Dict[str, float], k_values: List[int]) -> Dict:
+def evaluate_correct_queries(retriever_name: str, queries: List[Dict], k_values: List[int]) -> Dict:
+    """评估 correct 查询（使用 correct cache，按 user_id 索引）"""
     log(f"\n{'='*60}")
-    log(f"评估 {retriever_name.upper()}")
+    log(f"评估 CORRECT - {retriever_name.upper()}")
     log(f"{'='*60}")
 
     if retriever_name == 'bm25':
         bm25 = load_bm25_retriever()
         searcher = BM25Searcher(bm25)
+        # 加载 ACL 和 CCOMP 两种缓存
+        acl_cache = load_bm25_correct_cache('acl')
+        ccomp_cache = load_bm25_correct_cache('ccomp')
 
+        all_user_ids = [q['user_id'] for q in queries]
         all_query_texts = [q['query'] for q in queries]
         all_asins = [q['asin'] for q in queries]
+        all_categories = [q['query_category'] for q in queries]
 
         log(f"  查询数: {len(all_query_texts)}")
 
-        query_cache = load_bm25_query_cache('correct', 'acl')
+        log(f"  使用查询缓存...")
+        all_results = []
+        for user_id, query_text, category in zip(all_user_ids, all_query_texts, all_categories):
+            cache = acl_cache if category == 'acl' else ccomp_cache
+            if cache and user_id in cache and query_text in cache[user_id]:
+                all_results.append(cache[user_id][query_text])
+            else:
+                all_results.append(searcher.bm25.search(query_text, top_k=max(k_values)))
 
-        if query_cache is not None:
-            log(f"  使用查询缓存...")
+        all_metrics = []
+        for i, (retrieved, relevant_asin) in enumerate(zip(all_results, all_asins)):
+            retrieved_asins = [r[0] for r in retrieved]
+            metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
+            all_metrics.append(metrics)
+
+    else:
+        embeddings, doc_ids, dim = load_dense_retriever(retriever_name)
+        searcher = DenseSearcher(embeddings, doc_ids)
+        # 加载 ACL 和 CCOMP 两种缓存
+        acl_cache = load_correct_query_cache(retriever_name, 'acl')
+        ccomp_cache = load_correct_query_cache(retriever_name, 'ccomp')
+
+        all_user_ids = [q['user_id'] for q in queries]
+        all_query_texts = [q['query'] for q in queries]
+        all_asins = [q['asin'] for q in queries]
+        all_categories = [q['query_category'] for q in queries]
+
+        log(f"  查询数: {len(all_query_texts)}")
+
+        log(f"  使用查询缓存...")
+        query_embeddings = []
+        for user_id, query_text, category in zip(all_user_ids, all_query_texts, all_categories):
+            cache = acl_cache if category == 'acl' else ccomp_cache
+            if cache and user_id in cache and query_text in cache[user_id]:
+                query_embeddings.append(cache[user_id][query_text])
+            else:
+                query_embeddings.append(None)
+
+        valid_indices = [i for i, emb in enumerate(query_embeddings) if emb is not None]
+        valid_embeddings = [query_embeddings[i] for i in valid_indices]
+        valid_asins = [all_asins[i] for i in valid_indices]
+
+        log(f"  有效查询: {len(valid_embeddings)}")
+
+        if not valid_embeddings:
+            return None
+
+        results = searcher.search_batch(valid_embeddings, top_k=max(k_values))
+
+        all_metrics = []
+        for i, (retrieved, relevant_asin) in enumerate(zip(results, valid_asins)):
+            retrieved_asins = [r[0] for r in retrieved]
+            metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
+            all_metrics.append(metrics)
+
+        del embeddings
+        del searcher
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    overall_metrics = compute_average_metrics(all_metrics, k_values)
+
+    return {
+        'retriever': retriever_name,
+        'num_queries': len(all_metrics),
+        'metrics': overall_metrics
+    }
+
+def evaluate_noisy_queries(retriever_name: str, queries: List[Dict], k_values: List[int]) -> Dict:
+    """评估 noisy 查询（使用 noisy cache，按 user_id 索引）"""
+    log(f"\n{'='*60}")
+    log(f"评估 NOISY - {retriever_name.upper()}")
+    log(f"{'='*60}")
+
+    if retriever_name == 'bm25':
+        bm25 = load_bm25_retriever()
+        searcher = BM25Searcher(bm25)
+        # 加载 ACL 和 CCOMP 两种 noisy 缓存
+        acl_cache = load_bm25_noisy_cache('acl')
+        ccomp_cache = load_bm25_noisy_cache('ccomp')
+
+        all_query_texts = [q['query'] for q in queries]
+        all_asins = [q['asin'] for q in queries]
+        all_user_ids = [q['user_id'] for q in queries]
+        all_categories = [q['query_category'] for q in queries]
+
+        log(f"  查询数: {len(all_query_texts)}")
+
+        if acl_cache or ccomp_cache:
+            log(f"  使用 noisy 查询缓存...")
             all_results = []
-            for query_text in all_query_texts:
-                if query_text in query_cache:
-                    all_results.append(query_cache[query_text])
+            for user_id, query_text, category in zip(all_user_ids, all_query_texts, all_categories):
+                cache = acl_cache if category == 'acl' else ccomp_cache
+                if cache and user_id in cache:
+                    user_cache = cache[user_id]
+                    found = False
+                    for item in user_cache:
+                        if item['query'] == query_text:
+                            all_results.append(item['results'])
+                            found = True
+                            break
+                    if not found:
+                        all_results.append(searcher.bm25.search(query_text, top_k=max(k_values)))
                 else:
                     all_results.append(searcher.bm25.search(query_text, top_k=max(k_values)))
         else:
@@ -346,25 +474,37 @@ def evaluate_retriever(retriever_name: str, queries: List[Dict], word_idf: Dict[
 
     else:
         embeddings, doc_ids, dim = load_dense_retriever(retriever_name)
-        searcher = DenseSearcher(embeddings, doc_ids, retriever_name)
+        searcher = DenseSearcher(embeddings, doc_ids)
+        # 加载 ACL 和 CCOMP 两种 noisy 缓存
+        acl_cache = load_noisy_cache(retriever_name, 'acl')
+        ccomp_cache = load_noisy_cache(retriever_name, 'ccomp')
 
         all_query_texts = [q['query'] for q in queries]
         all_asins = [q['asin'] for q in queries]
+        all_user_ids = [q['user_id'] for q in queries]
+        all_categories = [q['query_category'] for q in queries]
 
         log(f"  查询数: {len(all_query_texts)}")
 
-        query_cache = load_query_cache(retriever_name, 'correct', 'acl')
-
-        if query_cache is not None:
-            log(f"  使用查询缓存...")
+        if acl_cache or ccomp_cache:
+            log(f"  使用 noisy 查询缓存...")
             query_embeddings = []
-            for qt in all_query_texts:
-                if qt in query_cache:
-                    query_embeddings.append(query_cache[qt])
+            for user_id, query_text, category in zip(all_user_ids, all_query_texts, all_categories):
+                cache = acl_cache if category == 'acl' else ccomp_cache
+                if cache and user_id in cache:
+                    user_cache = cache[user_id]
+                    found = False
+                    for item in user_cache:
+                        if item['query'] == query_text:
+                            query_embeddings.append(item['vector'])
+                            found = True
+                            break
+                    if not found:
+                        query_embeddings.append(None)
                 else:
                     query_embeddings.append(None)
         else:
-            log(f"  错误: 查询缓存不存在")
+            log(f"  错误: Noisy 查询缓存不存在")
             return None
 
         valid_indices = [i for i, emb in enumerate(query_embeddings) if emb is not None]
@@ -394,13 +534,12 @@ def evaluate_retriever(retriever_name: str, queries: List[Dict], word_idf: Dict[
     return {
         'retriever': retriever_name,
         'num_queries': len(all_metrics),
-        'metrics': overall_metrics,
-        'all_metrics': all_metrics
+        'metrics': overall_metrics
     }
 
-def print_results_table(all_results: List[Dict], k_values: List[int]):
-    log("\n" + "=" * 100)
-    log("评估结果汇总")
+def print_results_table(all_results: List[Dict], title: str):
+    log(f"\n{'='*100}")
+    log(title)
     log("=" * 100)
 
     metrics_to_show = ['P@1', 'P@3', 'P@5', 'P@10', 'N@10', 'MR@10', 'H@10']
@@ -424,7 +563,7 @@ def print_results_table(all_results: List[Dict], k_values: List[int]):
 
 def main():
     log("=" * 60)
-    log(f"评估 - Arts_Crafts_and_Sewing Correct vs Noisy 查询")
+    log(f"评估 - Pet_Supplies Correct vs Noisy 查询")
     log(f"类别: {CATEGORY_NAME}")
     log("=" * 60)
 
@@ -437,23 +576,19 @@ def main():
     word_idf = build_word_idf_dict(META_FILE, sample_size=50000)
 
     log("\n加载查询数据...")
-    queries_correct, doc_ids_set = load_queries('correct')
-    queries_noisy, _ = load_queries('noisy')
+    queries_noisy, user_asin_pairs = load_noisy_queries()
+    queries_correct = load_correct_queries_for_pairs(user_asin_pairs, queries_noisy)
 
-    log(f"  Correct 查询数: {len(queries_correct)}")
+    log(f"  有 noisy 配对的 correct 查询数: {len(queries_correct)}")
     log(f"  Noisy 查询数: {len(queries_noisy)}")
-    log(f"  相关文档数: {len(doc_ids_set)}")
+    log(f"  配对用户数: {len(user_asin_pairs)}")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    log("\n" + "=" * 60)
-    log("评估 CORRECT 查询")
-    log("=" * 60)
 
     correct_results = []
     for retriever_name in RETRIEVERS:
         try:
-            result = evaluate_retriever(retriever_name, queries_correct, word_idf, k_values)
+            result = evaluate_correct_queries(retriever_name, queries_correct, k_values)
             if result:
                 correct_results.append(result)
         except FileNotFoundError as e:
@@ -461,14 +596,10 @@ def main():
         except Exception as e:
             log(f"  错误 {retriever_name}: {e}")
 
-    log("\n" + "=" * 60)
-    log("评估 NOISY 查询")
-    log("=" * 60)
-
     noisy_results = []
     for retriever_name in RETRIEVERS:
         try:
-            result = evaluate_retriever(retriever_name, queries_noisy, word_idf, k_values)
+            result = evaluate_noisy_queries(retriever_name, queries_noisy, k_values)
             if result:
                 noisy_results.append(result)
         except FileNotFoundError as e:
@@ -476,18 +607,11 @@ def main():
         except Exception as e:
             log(f"  错误 {retriever_name}: {e}")
 
-    log("\n" + "=" * 60)
-    log("CORRECT 查询结果")
-    log("=" * 60)
-    print_results_table(correct_results, k_values)
-
-    log("\n" + "=" * 60)
-    log("NOISY 查询结果")
-    log("=" * 60)
-    print_results_table(noisy_results, k_values)
+    print_results_table(correct_results, "CORRECT 查询结果（有 noisy 配对）")
+    print_results_table(noisy_results, "NOISY 查询结果")
 
     # 计算 CORRECT vs NOISY 差异分析
-    def compute_difference_table(correct_results: List[Dict], noisy_results: List[Dict], k_values: List[int]):
+    def compute_difference_table(correct_results: List[Dict], noisy_results: List[Dict]):
         log(f"\n{'='*100}")
         log("CORRECT vs NOISY 差异分析（NOISY - CORRECT）")
         log("=" * 100)
@@ -513,26 +637,24 @@ def main():
             row = f"{retriever:<12}"
             for m in metrics_to_show:
                 diff = n_metrics.get(m, 0.0) - c_metrics.get(m, 0.0)
+                # 用颜色标记（+ 绿色，- 红色）但日志中只用符号
                 sign = "+" if diff > 0 else ""
                 row += f" {sign:>1}{diff:>9.4f}"
             log(row)
 
         log("-" * 100)
 
-    compute_difference_table(correct_results, noisy_results, k_values)
+    compute_difference_table(correct_results, noisy_results)
 
     output_file = os.path.join(OUTPUT_DIR, "correct_vs_noisy_results.json")
     results_to_save = {
         'timestamp': datetime.now().isoformat(),
         'category': CATEGORY_NAME,
-        'correct_results': [
-            {k: v for k, v in r.items() if k != 'all_metrics' and k != 'all_raw_metrics'}
-            for r in correct_results
-        ] if correct_results else [],
-        'noisy_results': [
-            {k: v for k, v in r.items() if k != 'all_metrics' and k != 'all_raw_metrics'}
-            for r in noisy_results
-        ] if noisy_results else [],
+        'num_paired_users': len(user_asin_pairs),
+        'num_correct_queries': len(queries_correct),
+        'num_noisy_queries': len(queries_noisy),
+        'correct_results': correct_results,
+        'noisy_results': noisy_results,
     }
     with open(output_file, 'w') as f:
         json.dump(results_to_save, f, indent=2, default=str)

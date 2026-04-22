@@ -50,6 +50,7 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 
 INPUT_FILE = "/workspace/result/personal_query/01_preference_extraction/Grocery_and_Gourmet_Food/stage1_filtered_users_reviews.json"
 LEVEL_FILE = "/workspace/result/personal_query/05_syntactic_analysis/Grocery_and_Gourmet_Food/level.json"
+QUERY_FILE = "/workspace/result/personal_query/06_query/Grocery_and_Gourmet_Food/query.json"
 OUTPUT_DIR = "/workspace/result/personal_query/04_writing_analysis/Grocery_and_Gourmet_Food"
 
 
@@ -575,6 +576,22 @@ def load_level_filtered_users(level_file: str) -> Set[str]:
     return filtered_users
 
 
+def load_users_from_query_file(query_file: str) -> Set[str]:
+    """从 query.json 加载用户ID集合"""
+    if not os.path.exists(query_file):
+        log_with_timestamp(f"WARNING: Query file not found: {query_file}, skipping query filter")
+        return set()
+    with open(query_file, 'r', encoding='utf-8') as f:
+        query_data = json.load(f)
+    user_ids = set()
+    for item in query_data:
+        uid = item.get('user_id')
+        if uid:
+            user_ids.add(uid)
+    log_with_timestamp(f"Found {len(user_ids)} users in query file")
+    return user_ids
+
+
 def load_completed_user_ids(output_file: str) -> Tuple[Set[str], List[dict]]:
     """加载已完成的用户ID和历史结果，支持 JSON array 和 JSON Lines 格式"""
     if not os.path.exists(output_file):
@@ -684,6 +701,9 @@ def main():
     # 加载 level 过滤后的用户
     level_users = load_level_filtered_users(LEVEL_FILE)
 
+    # 加载 query.json 中的用户
+    query_users = load_users_from_query_file(QUERY_FILE)
+
     user_ids = load_users_from_merged_file(INPUT_FILE)
 
     if not user_ids:
@@ -694,6 +714,11 @@ def main():
     if level_users:
         user_ids = [uid for uid in user_ids if uid in level_users]
         log_with_timestamp(f"After level filter: {len(user_ids)} users")
+
+    # 如果有 query 过滤，则取交集（确保只处理 query.json 中存在的用户）
+    if query_users:
+        user_ids = [uid for uid in user_ids if uid in query_users]
+        log_with_timestamp(f"After query filter: {len(user_ids)} users")
 
     if MAX_USERS:
         user_ids = user_ids[:MAX_USERS]

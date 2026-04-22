@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-基于 LLM 的查询语句噪声注入 - Arts_Crafts_and_Sewing
+基于 LLM 的查询语句噪声注入 - Grocery_and_Gourmet_Food
 """
 
 import sys
@@ -9,25 +9,29 @@ import time
 import re
 import os
 from datetime import datetime
+from typing import Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery')
 
 # ========================================
-# 硬编码参数
+# 配置加载
 # ========================================
-CATEGORY = "Grocery_and_Gourmet_Food"
+from config import get_category_config
 
-# Stage 6 查询文件
-ACL_QUERY_FILE = f'/root/result/personal_query/06_query/{CATEGORY}/acl_query.json'
-CCOMP_QUERY_FILE = f'/root/result/personal_query/06_query/{CATEGORY}/ccomp_query.json'
+CATEGORY = "Grocery_and_Gourmet_Food"
+CAT_CONFIG = get_category_config(CATEGORY)
+
+# Stage 6 查询文件（合并的 query.json）
+QUERY_FILE = CAT_CONFIG.get('query_file', f'/workspace/result/personal_query/06_query/{CATEGORY}/query.json')
 
 # Stage 4 用户错误文件
-USER_ERROR_FILE = f'/root/result/personal_query/04_writing_analysis/{CATEGORY}/acl_ccomp_error.json'
+USER_ERROR_FILE = CAT_CONFIG.get('user_error_file', f'/workspace/result/personal_query/04_writing_analysis/{CATEGORY}/acl_ccomp_error.json')
 
-# 输出文件
-ACL_NOISY_OUTPUT_FILE = f'/root/result/personal_query/07_inject_noisy/{CATEGORY}/acl_noisy_query.json'
-CCOMP_NOISY_OUTPUT_FILE = f'/root/result/personal_query/07_inject_noisy/{CATEGORY}/ccomp_noisy_query.json'
+# 输出文件 - 按类别分目录
+BASE_OUTPUT_DIR = "/workspace/result/personal_query/07_inject_noisy"
+CATEGORY_OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, CATEGORY)
+NOISY_OUTPUT_FILE = os.path.join(CATEGORY_OUTPUT_DIR, "noisy_query.json")
 
 # Prompt 配置
 NOISY_PROMPT_FILE = '/workspace/PersonalQuery/PersoanlQuery/07_inject_noisy/noisy_query_prompts.json'
@@ -305,20 +309,42 @@ def parse_noisy_response(text_content: str, original_query: str) -> dict:
 
 
 # ========================================
+# 增量写入辅助函数
+# ========================================
+def write_noisy_result_incremental(result_item: dict, output_file: str, query_category: str):
+    """将单个结果增量写入合并文件"""
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    # 新格式：直接从 user_data 中获取对应的 query 字段
+    if query_category == 'acl':
+        original_query_info = result_item['user_data'].get('acl_query', {})
+    else:
+        original_query_info = result_item['user_data'].get('ccomp_query', {})
+    output_data = {
+        'user_id': result_item['uid'],
+        'asin': result_item['asin'],
+        'query_category': query_category,
+        'ground_truth_query': result_item['original_query'],
+        'noisy_query': result_item['noisy_query'],
+        'injected_errors': result_item['injected_errors'],
+        'word_count': len(result_item['original_query'].split()),
+        'original_query_info': original_query_info,
+    }
+    # 追加到文件
+    with open(output_file, 'a', encoding='utf-8') as f:
+        json.dump(output_data, f, indent=2, ensure_ascii=False)
+        f.write('\n')
+
+
+# ========================================
 # 主函数
 # ========================================
 def main():
     log(f"=== 基于 LLM 的噪声注入开始 (Category: {CATEGORY}) ===")
 
-    log(f"加载 ACL 查询 from {ACL_QUERY_FILE}...")
-    with open(ACL_QUERY_FILE, 'r', encoding='utf-8') as f:
-        acl_queries = json.load(f)
-    log(f"加载了 {len(acl_queries)} 个用户的 ACL 查询")
-
-    log(f"加载 CCOMP 查询 from {CCOMP_QUERY_FILE}...")
-    with open(CCOMP_QUERY_FILE, 'r', encoding='utf-8') as f:
-        ccomp_queries = json.load(f)
-    log(f"加载了 {len(ccomp_queries)} 个用户的 CCOMP 查询")
+    log(f"加载查询 from {QUERY_FILE}...")
+    with open(QUERY_FILE, 'r', encoding='utf-8') as f:
+        all_queries = json.load(f)
+    log(f"加载了 {len(all_queries)} 个用户的查询")
 
     log(f"加载用户错误 from {USER_ERROR_FILE}...")
     raw_user_errors = load_user_errors(USER_ERROR_FILE)
@@ -333,27 +359,84 @@ def main():
 
     load_minimax_client()
 
-    # ACL
+    # 加载已完成的用户ID，避免重复处理
+    def load_completed_uids_by_category(file_path: str) -> Tuple[set, set]:
+        """读取已完成的用户ID，按query_category分类返回，支持 pretty-printed JSON 和 JSON Lines 格式"""
+        if not os.path.exists(file_path):
+            return set(), set()
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                if not content:
+                    return set(), set()
+                acl_uids = set()
+                ccomp_uids = set()
+                # 尝试 JSON array 格式
+                if content.startswith('['):
+                    data = json.loads(content)
+                    for item in data:
+                        if 'user_id' not in item:
+                            continue
+                        cat = item.get('query_category', '')
+                        if cat == 'acl':
+                            acl_uids.add(item['user_id'])
+                        elif cat == 'ccomp':
+                            ccomp_uids.add(item['user_id'])
+                # 处理 pretty-printed JSON（多个JSON对象用换行分隔，每个包含嵌套的{}）
+                elif content.startswith('{'):
+                    depth = 0
+                    start = -1
+                    for i, c in enumerate(content):
+                        if c == '{':
+                            if depth == 0:
+                                start = i
+                            depth += 1
+                        elif c == '}':
+                            depth -= 1
+                            if depth == 0 and start >= 0:
+                                try:
+                                    item = json.loads(content[start:i+1])
+                                    if 'user_id' in item:
+                                        cat = item.get('query_category', '')
+                                        if cat == 'acl':
+                                            acl_uids.add(item['user_id'])
+                                        elif cat == 'ccomp':
+                                            ccomp_uids.add(item['user_id'])
+                                except:
+                                    pass
+                                start = -1
+                return acl_uids, ccomp_uids
+        except Exception as e:
+            log(f"  读取已有结果失败 ({file_path}): {e}")
+            return set(), set()
+
+    completed_acl_uids, completed_ccomp_uids = load_completed_uids_by_category(NOISY_OUTPUT_FILE)
+    log(f"  ACL 已完成用户数: {len(completed_acl_uids)}")
+    log(f"  CCOMP 已完成用户数: {len(completed_ccomp_uids)}")
+
+    # ACL 任务构建（从合并的 query.json 中提取 acl_query）
     log("\n=== 处理 ACL 查询 ===")
     acl_tasks = []
-    for user_data in acl_queries:
+    for user_data in all_queries:
         uid = user_data['user_id']
+        if uid in completed_acl_uids:
+            continue
         errors = user_errors.get(uid, {})
         if not errors.get('acl'):
             continue
-        ground_truth_query = None
-        for q in user_data['queries']:
-            if q.get('is_ground_truth') and 'query' in q:
-                ground_truth_query = q['query']
-                break
-            elif q.get('is_ground_truth') and 'correct_query' in q:
-                ground_truth_query = q['correct_query']
-                break
+        # 新格式：嵌套的 acl_query 字段
+        acl_query_data = user_data.get('acl_query', {})
+        ground_truth_query = acl_query_data.get('query', '')
         if not ground_truth_query:
             continue
         acl_tasks.append({
-            'uid': uid, 'asin': user_data.get('asin', ''),
-            'ground_truth_query': ground_truth_query, 'errors': errors['acl'], 'user_data': user_data,
+            'uid': uid,
+            'asin': user_data.get('asin', ''),
+            'ground_truth_query': ground_truth_query,
+            'errors': errors['acl'],
+            'user_data': user_data,
+            'level': acl_query_data.get('level', 0),
+            'word_count': acl_query_data.get('word_count', 0),
         })
     # 限制用户数量
     acl_tasks = acl_tasks[:NUM_USERS_TO_TEST]
@@ -385,7 +468,6 @@ def main():
             'status': 'success', 'user_errors': errors, 'user_data': task['user_data'],
         }
 
-    log("\n=== 处理 ACL 查询 ===")
     acl_results = []
     acl_llm_errors = []
     acl_no_injection = []
@@ -396,6 +478,7 @@ def main():
             if r:
                 if r['status'] == 'success':
                     acl_results.append(r)
+                    write_noisy_result_incremental(r, NOISY_OUTPUT_FILE, 'acl')
                 elif r['status'] == 'llm_error':
                     acl_llm_errors.append(r['uid'])
                 elif r['status'] == 'no_injection':
@@ -403,27 +486,29 @@ def main():
                 log(f"  [ACL] 成功:{len(acl_results)} 无注入:{len(acl_no_injection)} LLM错误:{len(acl_llm_errors)} user={r['uid'][:20]}")
     log(f"ACL 完成: 成功注入 {len(acl_results)}, 无注入 {len(acl_no_injection)}, LLM错误 {len(acl_llm_errors)}")
 
-    # CCOMP
+    # CCOMP 任务构建
     log("\n=== 处理 CCOMP 查询 ===")
     ccomp_tasks = []
-    for user_data in ccomp_queries:
+    for user_data in all_queries:
         uid = user_data['user_id']
+        if uid in completed_ccomp_uids:
+            continue
         errors = user_errors.get(uid, {})
         if not errors.get('ccomp'):
             continue
-        ground_truth_query = None
-        for q in user_data['queries']:
-            if q.get('is_ground_truth') and 'query' in q:
-                ground_truth_query = q['query']
-                break
-            elif q.get('is_ground_truth') and 'correct_query' in q:
-                ground_truth_query = q['correct_query']
-                break
+        # 新格式：嵌套的 ccomp_query 字段
+        ccomp_query_data = user_data.get('ccomp_query', {})
+        ground_truth_query = ccomp_query_data.get('query', '')
         if not ground_truth_query:
             continue
         ccomp_tasks.append({
-            'uid': uid, 'asin': user_data.get('asin', ''),
-            'ground_truth_query': ground_truth_query, 'errors': errors['ccomp'], 'user_data': user_data,
+            'uid': uid,
+            'asin': user_data.get('asin', ''),
+            'ground_truth_query': ground_truth_query,
+            'errors': errors['ccomp'],
+            'user_data': user_data,
+            'level': ccomp_query_data.get('level', 0),
+            'word_count': ccomp_query_data.get('word_count', 0),
         })
     # 限制用户数量
     ccomp_tasks = ccomp_tasks[:NUM_USERS_TO_TEST]
@@ -455,7 +540,6 @@ def main():
             'status': 'success', 'user_errors': errors, 'user_data': task['user_data'],
         }
 
-    log("\n=== 处理 CCOMP 查询 ===")
     ccomp_results = []
     ccomp_llm_errors = []
     ccomp_no_injection = []
@@ -466,6 +550,7 @@ def main():
             if r:
                 if r['status'] == 'success':
                     ccomp_results.append(r)
+                    write_noisy_result_incremental(r, NOISY_OUTPUT_FILE, 'ccomp')
                 elif r['status'] == 'llm_error':
                     ccomp_llm_errors.append(r['uid'])
                 elif r['status'] == 'no_injection':
@@ -473,55 +558,18 @@ def main():
                 log(f"  [CCOMP] 成功注入:{len(ccomp_results)} 无注入:{len(ccomp_no_injection)} LLM错误:{len(ccomp_llm_errors)} user={r['uid'][:20]}")
     log(f"CCOMP 完成: 成功注入 {len(ccomp_results)}, 无注入 {len(ccomp_no_injection)}, LLM错误 {len(ccomp_llm_errors)}")
 
-    # 保存结果
-    os.makedirs(os.path.dirname(ACL_NOISY_OUTPUT_FILE), exist_ok=True)
-    os.makedirs(os.path.dirname(CCOMP_NOISY_OUTPUT_FILE), exist_ok=True)
-
-    acl_output = []
-    for r in acl_results:
-        original_query_info = None
-        for q in r['user_data']['queries']:
-            if q.get('is_ground_truth'):
-                original_query_info = q
-                break
-        acl_output.append({
-            'user_id': r['uid'], 'asin': r['asin'],
-            'ground_truth_query': r['original_query'], 'noisy_query': r['noisy_query'],
-            'injected_errors': r['injected_errors'], 'word_count': len(r['original_query'].split()),
-            'original_query_info': original_query_info,
-        })
-    with open(ACL_NOISY_OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        json.dump(acl_output, f, indent=2, ensure_ascii=False)
-
-    ccomp_output = []
-    for r in ccomp_results:
-        original_query_info = None
-        for q in r['user_data']['queries']:
-            if q.get('is_ground_truth'):
-                original_query_info = q
-                break
-        ccomp_output.append({
-            'user_id': r['uid'], 'asin': r['asin'],
-            'ground_truth_query': r['original_query'], 'noisy_query': r['noisy_query'],
-            'injected_errors': r['injected_errors'], 'word_count': len(r['original_query'].split()),
-            'original_query_info': original_query_info,
-        })
-    with open(CCOMP_NOISY_OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        json.dump(ccomp_output, f, indent=2, ensure_ascii=False)
-
     log(f"\n{'='*60}")
     log(f"==================== 统计结果 ====================")
     log(f"ACL 任务总数: {len(acl_tasks)}")
-    log(f"  - 成功注入噪声: {len(acl_results)} ({len(acl_results)/len(acl_tasks)*100:.1f}%)")
-    log(f"  - 无注入(查询未变或错误为空): {len(acl_no_injection)} ({len(acl_no_injection)/len(acl_tasks)*100:.1f}%)")
-    log(f"  - LLM调用/解析失败: {len(acl_llm_errors)} ({len(acl_llm_errors)/len(acl_tasks)*100:.1f}%)")
+    log(f"  - 成功注入噪声: {len(acl_results)} ({len(acl_results)/len(acl_tasks)*100:.1f}%)" if acl_tasks else "  - 成功注入噪声: 0")
+    log(f"  - 无注入(查询未变或错误为空): {len(acl_no_injection)} ({len(acl_no_injection)/len(acl_tasks)*100:.1f}%)" if acl_tasks else "  - 无注入: 0")
+    log(f"  - LLM调用/解析失败: {len(acl_llm_errors)} ({len(acl_llm_errors)/len(acl_tasks)*100:.1f}%)" if acl_tasks else "  - LLM错误: 0")
     log(f"CCOMP 任务总数: {len(ccomp_tasks)}")
-    log(f"  - 成功注入噪声: {len(ccomp_results)} ({len(ccomp_results)/len(ccomp_tasks)*100:.1f}%)")
-    log(f"  - 无注入(查询未变或错误为空): {len(ccomp_no_injection)} ({len(ccomp_no_injection)/len(ccomp_tasks)*100:.1f}%)")
-    log(f"  - LLM调用/解析失败: {len(ccomp_llm_errors)} ({len(ccomp_llm_errors)/len(ccomp_tasks)*100:.1f}%)")
+    log(f"  - 成功注入噪声: {len(ccomp_results)} ({len(ccomp_results)/len(ccomp_tasks)*100:.1f}%)" if ccomp_tasks else "  - 成功注入噪声: 0")
+    log(f"  - 无注入(查询未变或错误为空): {len(ccomp_no_injection)} ({len(ccomp_no_injection)/len(ccomp_tasks)*100:.1f}%)" if ccomp_tasks else "  - 无注入: 0")
+    log(f"  - LLM调用/解析失败: {len(ccomp_llm_errors)} ({len(ccomp_llm_errors)/len(ccomp_tasks)*100:.1f}%)" if ccomp_tasks else "  - LLM错误: 0")
     log(f"===============================================")
-    log(f"ACL 结果保存到: {ACL_NOISY_OUTPUT_FILE}")
-    log(f"CCOMP 结果保存到: {CCOMP_NOISY_OUTPUT_FILE}")
+    log(f"结果保存到: {NOISY_OUTPUT_FILE}")
 
 
 if __name__ == '__main__':
