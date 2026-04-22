@@ -85,8 +85,14 @@ def load_user_errors(error_file: str) -> dict:
     with open(error_file, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
+    # 支持数组格式（直接是用户列表）和字典格式（有 user_results 字段）
+    if isinstance(data, list):
+        users_list = data
+    else:
+        users_list = data.get('user_results', [])
+
     user_errors = {}
-    for user in data.get('user_results', []):
+    for user in users_list:
         uid = user['user_id']
         if user['total_errors'] == 0 or not user.get('detailed_results'):
             continue

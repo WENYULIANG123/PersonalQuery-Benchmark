@@ -23,7 +23,7 @@ import argparse
 import importlib.util
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -48,8 +48,9 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 # 硬编码参数
 # ============================================================================
 
-INPUT_FILE = "/root/result/personal_query/01_preference_extraction/Arts_Crafts_and_Sewing/stage1_filtered_users_reviews.json"
-OUTPUT_DIR = "/root/result/personal_query/04_writing_analysis/Arts_Crafts_and_Sewing"
+INPUT_FILE = "/workspace/result/personal_query/01_preference_extraction/Arts_Crafts_and_Sewing/stage1_filtered_users_reviews.json"
+LEVEL_FILE = "/workspace/result/personal_query/05_syntactic_analysis/Arts_Crafts_and_Sewing/level.json"
+OUTPUT_DIR = "/workspace/result/personal_query/04_writing_analysis/Arts_Crafts_and_Sewing"
 
 
 # ============================================================================
@@ -555,6 +556,96 @@ def load_users_from_merged_file(input_file: str) -> List[str]:
     return user_ids
 
 
+def load_level_filtered_users(level_file: str) -> Set[str]:
+    """从 level.json 加载用户，仅返回 acl_level > 0 或 ccomp_level > 0 的用户"""
+    log_with_timestamp(f"Loading users from level file: {level_file}...")
+    if not os.path.exists(level_file):
+        log_with_timestamp(f"WARNING: Level file not found: {level_file}, skipping level filter")
+        return set()
+    with open(level_file, 'r', encoding='utf-8') as f:
+        level_data = json.load(f)
+    filtered_users = set()
+    for item in level_data:
+        uid = item.get('user_id')
+        acl_level = item.get('acl_level', 0)
+        ccomp_level = item.get('ccomp_level', 0)
+        if uid and (acl_level > 0 or ccomp_level > 0):
+            filtered_users.add(uid)
+    log_with_timestamp(f"Found {len(filtered_users)} users with acl_level > 0 or ccomp_level > 0")
+    return filtered_users
+
+
+def load_completed_user_ids(output_file: str) -> Tuple[Set[str], List[dict]]:
+    """加载已完成的用户ID和历史结果，支持 JSON array 和 JSON Lines 格式"""
+    if not os.path.exists(output_file):
+        return set(), []
+
+    log_with_timestamp(f"Loading existing results from {output_file}...")
+    completed_ids = set()
+    existing_results = []
+
+    try:
+        with open(output_file, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+            if not content:
+                return set(), []
+
+            if content.startswith('['):
+                # JSON array format
+                data = json.loads(content)
+                for item in data:
+                    if 'user_id' in item:
+                        completed_ids.add(item['user_id'])
+                        existing_results.append(item)
+            elif content.startswith('{'):
+                # JSON Lines format (one JSON object per line)
+                for line in content.split('\n'):
+                    line = line.strip()
+                    if line:
+                        try:
+                            item = json.loads(line)
+                            if 'user_id' in item:
+                                completed_ids.add(item['user_id'])
+                                existing_results.append(item)
+                        except:
+                            continue
+
+        log_with_timestamp(f"  Found {len(completed_ids)} completed users")
+        return completed_ids, existing_results
+
+    except Exception as e:
+        log_with_timestamp(f"  Error loading existing results: {e}")
+        return set(), []
+
+
+def write_result_incremental(result: dict, output_file: str):
+    """将单个结果增量写入文件（JSON Lines 格式）"""
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    with open(output_file, 'a', encoding='utf-8') as f:
+        json.dump(result, f, ensure_ascii=False)
+        f.write('\n')
+
+
+def append_to_json_array(result: dict, output_file: str):
+    """将单个结果追加写入 JSON array 格式文件"""
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
+    if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+        with open(output_file, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+            if content.startswith('[') and content.endswith(']'):
+                data = json.loads(content) if content != '[]' else []
+            else:
+                data = []
+    else:
+        data = []
+
+    data.append(result)
+
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
 def validate_users_from_merged_file(input_file: str, user_ids: List[str]) -> Set[str]:
     """验证合并文件中的用户"""
     log_with_timestamp("Validating users from merged file...")
@@ -584,16 +675,25 @@ def main():
     log_with_timestamp("Stage 4: Combined ACL + CCOMP Error Extraction")
     log_with_timestamp("="*80)
     log_with_timestamp(f"Input file: {INPUT_FILE}")
+    log_with_timestamp(f"Level file: {LEVEL_FILE}")
     log_with_timestamp(f"Output directory: {OUTPUT_DIR}")
     log_with_timestamp(f"Max users: {MAX_USERS}")
     log_with_timestamp(f"Max reviews per user: {MAX_REVIEWS}")
     log_with_timestamp(f"Max workers: {MAX_WORKERS}")
+
+    # 加载 level 过滤后的用户
+    level_users = load_level_filtered_users(LEVEL_FILE)
 
     user_ids = load_users_from_merged_file(INPUT_FILE)
 
     if not user_ids:
         log_with_timestamp("ERROR: No users to process!")
         sys.exit(1)
+
+    # 如果有 level 过滤，则取交集
+    if level_users:
+        user_ids = [uid for uid in user_ids if uid in level_users]
+        log_with_timestamp(f"After level filter: {len(user_ids)} users")
 
     if MAX_USERS:
         user_ids = user_ids[:MAX_USERS]
@@ -606,6 +706,19 @@ def main():
         sys.exit(1)
 
     user_ids_to_process = sorted(list(existing_users))
+
+    # 加载已完成的用户，跳过重复
+    output_file = os.path.join(OUTPUT_DIR, "acl_ccomp_error.json")
+    completed_ids, existing_results = load_completed_user_ids(output_file)
+
+    # 初始化输出文件为空数组
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(existing_results if existing_results else [], f, ensure_ascii=False, indent=2)
+
+    if completed_ids:
+        original_count = len(user_ids_to_process)
+        user_ids_to_process = [uid for uid in user_ids_to_process if uid not in completed_ids]
+        log_with_timestamp(f"跳过 {len(completed_ids)} 个已完成用户，剩余 {len(user_ids_to_process)} 个待处理")
 
     analyzer = MergedErrorAnalyzer(
         analysis_dir=Path(OUTPUT_DIR),
@@ -621,6 +734,7 @@ def main():
 
     total_start = time.time()
     completed_count = 0
+    incremental_success = 0
 
     def process_one_user(user_id):
         return analyzer.process_user(user_id, None, MAX_REVIEWS)
@@ -636,6 +750,8 @@ def main():
                 results.append(result)
 
                 if result["status"] == "success":
+                    incremental_success += 1
+                    append_to_json_array(result, output_file)
                     log_with_timestamp(
                         f"  [{completed_count}/{len(user_ids_to_process)}] "
                         f"✓ {result['user_id']}: {result['reviews_processed']} reviews, "
@@ -697,6 +813,7 @@ def main():
             "timestamp": datetime.now().isoformat(),
             "total_users": len(user_ids_to_process),
             "processed_users": len(successful),
+            "incremental_success": incremental_success,
             "users_with_errors": len(users_with_errors),
             "failed_users": [r["user_id"] for r in failed],
             "total_reviews": total_reviews,
@@ -722,7 +839,9 @@ def main():
             ]
         }
 
-        summary_file = os.path.join(OUTPUT_DIR, "acl_ccomp_error.json")
+        # 保存详情结果（JSON Lines 格式，已在处理时流水写入）
+        # 保存统计摘要
+        summary_file = os.path.join(OUTPUT_DIR, "acl_ccomp_error_summary.json")
         with open(summary_file, 'w', encoding='utf-8') as f:
             json.dump(summary_data, f, ensure_ascii=False, indent=2)
         log_with_timestamp(f"Summary saved to {summary_file}")
