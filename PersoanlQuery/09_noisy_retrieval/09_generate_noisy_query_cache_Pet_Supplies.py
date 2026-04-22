@@ -8,8 +8,7 @@
 3. 保存缓存到磁盘以加速后续评估
 
 使用方法：
-    python3 09_generate_noisy_query_cache_Pet_Supplies.py
-    python3 09_generate_noisy_query_cache_Pet_Supplies.py --retrievers GRITLM BGE
+    python3 09_generate_noisy_query_cache_Pet_Supplies.py > /workspace/logs/09_generate_noisy_query_cache_Pet_Supplies.log 2> /workspace/logs/09_generate_noisy_query_cache_Pet_Supplies.err
 """
 
 import os
@@ -18,6 +17,7 @@ os.environ["HF_HOME"] = "/root/hf_models"
 import sys
 import json
 import pickle
+import io
 import time
 import argparse
 import numpy as np
@@ -156,6 +156,16 @@ def get_retriever(retriever_name: str):
     return retriever_class()
 
 
+class _StdoutToStderr:
+    """上下文管理器：将 stdout 重定向到 stderr"""
+    def __enter__(self):
+        self._original_stdout = sys.stdout
+        sys.stdout = sys.stderr
+        return self
+    def __exit__(self, *args):
+        sys.stdout = self._original_stdout
+
+
 def initialize_cache_dir():
     """初始化缓存目录"""
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -184,7 +194,8 @@ def _encode_and_save_cache(
 
     retriever_class = AVAILABLE_RETRIEVERS[retriever_name]
     log_with_timestamp(f"  初始化检索器 {retriever_name}...")
-    retriever = retriever_class()
+    with _StdoutToStderr():
+        retriever = retriever_class()
     log_with_timestamp(f"  ✓ 检索器初始化完成，模型已加载")
 
     cache = {}
