@@ -82,10 +82,10 @@ def compute_document_hash(documents: List[Dict]) -> str:
 
 def get_cache_paths(retriever_name: str, doc_hash: str, cache_dir: str) -> Dict[str, str]:
     """Get cache file paths for a retriever"""
-    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'gritlm']
+    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance', 'gritlm']
     # ColBERT 使用 token-level embeddings，需要特殊处理，不使用简单的 numpy 数组
     COLBERT_RETRIEVERS = ['colbert']
-    SPARSE_RETRIEVERS = ['bm25']
+    SPARSE_RETRIEVERS = ['bm25', 'splade']
 
     if retriever_name in DENSE_RETRIEVERS:
         base_path = os.path.join(cache_dir, f"{retriever_name}_{doc_hash}")
@@ -108,16 +108,17 @@ def get_cache_paths(retriever_name: str, doc_hash: str, cache_dir: str) -> Dict[
 
 def cache_exists(retriever_name: str, doc_hash: str, cache_dir: str) -> bool:
     """Check if retriever cache already exists"""
-    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'gritlm']
+    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance', 'gritlm']
     COLBERT_RETRIEVERS = ['colbert']
 
     if retriever_name in DENSE_RETRIEVERS:
         paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
         return os.path.exists(paths['config']) and os.path.exists(paths['embeddings'])
     elif retriever_name in COLBERT_RETRIEVERS:
-        # ColBERT 使用 pickle 保存
+        # ColBERT 使用索引目录 + pickle 保存
         paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
-        return os.path.exists(paths['pickle'])
+        colbert_index_dir = os.path.join(cache_dir, f"{retriever_name}_{doc_hash}_colbert_index")
+        return os.path.exists(paths['pickle']) and os.path.exists(colbert_index_dir)
     else:
         paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
         return os.path.exists(paths['pickle'])
@@ -129,7 +130,7 @@ def validate_retriever_cache(retriever_name: str, doc_hash: str, cache_dir: str,
     Returns:
         (is_valid, error_message)
     """
-    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'gritlm']
+    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance', 'gritlm']
     COLBERT_RETRIEVERS = ['colbert']
 
     log_with_timestamp(f"[VALIDATE] Checking cache integrity for {retriever_name}...")
@@ -176,9 +177,13 @@ def validate_retriever_cache(retriever_name: str, doc_hash: str, cache_dir: str,
 
     elif retriever_name in COLBERT_RETRIEVERS:
         paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
+        colbert_index_dir = os.path.join(cache_dir, f"{retriever_name}_{doc_hash}_colbert_index")
 
         if not os.path.exists(paths['pickle']):
             return False, f"Missing pickle file"
+
+        if not os.path.exists(colbert_index_dir):
+            return False, f"Missing ColBERT index directory"
 
         if os.path.getsize(paths['pickle']) == 0:
             return False, f"Empty pickle file"
@@ -192,6 +197,7 @@ def validate_retriever_cache(retriever_name: str, doc_hash: str, cache_dir: str,
                 return False, "Pickle data is None"
 
             log_with_timestamp(f"[VALIDATE] {retriever_name}: pickle file valid ✓")
+            log_with_timestamp(f"[VALIDATE] {retriever_name}: index directory valid ✓")
             return True, ""
 
         except Exception as e:
@@ -292,7 +298,7 @@ def _normalize_embeddings_for_save(embeddings, retriever_name: str) -> np.ndarra
 
 def save_retriever_to_cache(retriever_name: str, doc_hash: str, retriever: object, cache_dir: str) -> bool:
     """Save retriever to disk cache. Returns True if successful."""
-    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'gritlm']
+    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance', 'gritlm']
     COLBERT_RETRIEVERS = ['colbert']
 
     log_with_timestamp(f"[DEBUG] save_retriever_to_cache called for {retriever_name}")
@@ -363,26 +369,39 @@ def save_retriever_to_cache(retriever_name: str, doc_hash: str, retriever: objec
 
             return True
         elif retriever_name in COLBERT_RETRIEVERS:
-            # ColBERT 使用 token-level embeddings，需要特殊处理
-            log_with_timestamp(f"[CACHE_SAVE] Saving {retriever_name} with token-level embeddings (as pickle)...")
+            # ColBERT 新实现：索引已保存在临时目录，需要复制到缓存目录
+            log_with_timestamp(f"[CACHE_SAVE] Saving {retriever_name} index from temp directory...")
             paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
 
-            # ColBERT embeddings are list of tensors (possibly nested for multi-window)
-            # Move to CPU before saving
-            if hasattr(retriever, 'doc_embeddings') and retriever.doc_embeddings is not None:
-                log_with_timestamp(f"[DEBUG] Moving ColBERT embeddings to CPU before saving...")
-                doc_embeddings_cpu = []
-                for i, emb in enumerate(retriever.doc_embeddings):
-                    if isinstance(emb, list):
-                        # Multi-window: list of tensors
-                        doc_embeddings_cpu.append([w.cpu() for w in emb])
-                    else:
-                        # Single tensor
-                        doc_embeddings_cpu.append(emb.cpu())
-                retriever.doc_embeddings = doc_embeddings_cpu
-                log_with_timestamp(f"[DEBUG] ColBERT embeddings moved to CPU")
+            # ColBERT 索引文件路径
+            temp_index_path = getattr(retriever, '_temp_dir', None)
+            if temp_index_path and os.path.exists(temp_index_path):
+                # 复制整个索引目录到缓存
+                log_with_timestamp(f"[DEBUG] Copying ColBERT index from {temp_index_path} to {cache_dir}...")
+                import shutil
 
-            log_with_timestamp(f"[DEBUG] Saving ColBERT to {paths['pickle']}...")
+                # 目标索引目录
+                dest_index_dir = os.path.join(cache_dir, f"{retriever_name}_{doc_hash}_colbert_index")
+                if os.path.exists(dest_index_dir):
+                    shutil.rmtree(dest_index_dir)
+                shutil.copytree(temp_index_path, dest_index_dir)
+                log_with_timestamp(f"[DEBUG] Index copied to {dest_index_dir}")
+
+                # 更新 retriever 的索引路径
+                retriever.index_path = dest_index_dir
+                retriever._temp_dir = dest_index_dir  # 指向新的位置
+
+            log_with_timestamp(f"[DEBUG] Saving ColBERT config to {paths['pickle']}...")
+            # 清理 GPU 模型（不再需要）
+            if hasattr(retriever, 'model') and retriever.model is not None:
+                del retriever.model
+                retriever.model = None
+            if hasattr(retriever, 'tokenizer') and retriever.tokenizer is not None:
+                del retriever.tokenizer
+                retriever.tokenizer = None
+            if hasattr(retriever, 'searcher') and retriever.searcher is not None:
+                retriever.searcher = None
+
             with open(paths['pickle'], 'wb') as f:
                 pickle.dump(retriever, f)
 
@@ -391,14 +410,7 @@ def save_retriever_to_cache(retriever_name: str, doc_hash: str, retriever: objec
             log_with_timestamp(f"  → {paths['pickle']} ({size_mb:.1f}MB)")
             log_with_timestamp(f"[DEBUG] ColBERT save complete")
 
-            # 释放 GPU 模型权重和缓存
-            log_with_timestamp(f"[MEMORY] Releasing {retriever_name} model from GPU...")
-            if hasattr(retriever, 'model') and retriever.model is not None:
-                del retriever.model
-                retriever.model = None
-            if hasattr(retriever, 'tokenizer') and retriever.tokenizer is not None:
-                del retriever.tokenizer
-                retriever.tokenizer = None
+            # 释放 GPU 缓存
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
@@ -451,6 +463,12 @@ def build_retriever(retriever_name: str, documents: List[Dict], doc_hash: str, c
         elif retriever_name == 'colbert':
             retriever = retrievers.ColBERTRetriever()
             log_with_timestamp(f"[DEBUG] ColBERTRetriever instance created")
+        elif retriever_name == 'ance':
+            retriever = retrievers.ANCERetriever()
+            log_with_timestamp(f"[DEBUG] ANCERetriever instance created")
+        elif retriever_name == 'splade':
+            retriever = retrievers.SPLADERetriever()
+            log_with_timestamp(f"[DEBUG] SPLADERetriever instance created")
         else:
             return False, f"Unknown retriever type: {retriever_name}"
         
@@ -525,13 +543,11 @@ def main():
     log_with_timestamp(f"Document hash: {doc_hash}")
     log_with_timestamp(f"Cache directory: {cache_dir}")
     
-    # Define retrievers to build (按参数量从小到大排序: minilm < star < e5 < bge < gritlm)
-    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'gritlm']
+    # Define retrievers to build (按参数量从小到大排序: minilm < star < e5 < bge < ance < gritlm)
+    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance', 'gritlm']
     COLBERT_RETRIEVERS = ['colbert']  # 使用 token-level late interaction
-    SPARSE_RETRIEVERS = ['bm25']
-    # TODO: ColBERT 暂时禁用，token-level embeddings 数据量过大（300k docs × 200 tokens × 768 dim ≈ 176GB+）
-    # ALL_RETRIEVERS = DENSE_RETRIEVERS + COLBERT_RETRIEVERS + SPARSE_RETRIEVERS
-    ALL_RETRIEVERS = DENSE_RETRIEVERS + SPARSE_RETRIEVERS
+    SPARSE_RETRIEVERS = ['bm25', 'splade']
+    ALL_RETRIEVERS = DENSE_RETRIEVERS + COLBERT_RETRIEVERS + SPARSE_RETRIEVERS
 
     log_with_timestamp(f"\nBuilding {len(ALL_RETRIEVERS)} retrievers:")
     log_with_timestamp(f"  Dense: {DENSE_RETRIEVERS}")

@@ -729,25 +729,36 @@ class BGERetriever:
 
 
 class ColBERTRetriever:
-    """ColBERTv2: Token-level Late Interaction (MaxSim) with colbert-ir/colbertv2.0"""
-    def __init__(self, model_name: str = "colbert-ir/colbertv2.0"):
-        """
-        使用真正的 ColBERTv2 模型：colbert-ir/colbertv2.0
+    """ColBERTv2: 使用官方 ColBERT Indexer/Searcher 进行高效索引构建和搜索
 
-        不截断策略：使用滑动窗口处理长文档
+    使用官方 ColBERT 的 Indexer 构建量化索引 (2-bit)，大幅节省显存。
+    索引文件保存到磁盘，搜索时加载索引进行 Late Interaction 搜索。
+    """
+    def __init__(self, model_name: str = "colbert-ir/colbertv2.0", nbits: int = 2):
+        """
+        Args:
+            model_name: ColBERT 模型名称
+            nbits: 量化位数，默认 2-bit（大幅节省存储空间）
         """
         self.model_name = model_name
+        self.nbits = nbits
         self.model = None
         self.tokenizer = None
-        self.doc_embeddings = None  # List of token embeddings (可能是多个窗口)
-        self.doc_ids = []
+        self.doc_ids = []  # 原始 asin 列表
         self.all_metadata = None
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        # 窗口配置（ColBERTv2 标准）
-        self.window_size = 512  # 每个窗口的最大长度
-        self.window_stride = 256  # 窗口之间的步长（重叠50%）
-        self.max_query_length = 512  # 查询也使用512，保证不截断
+        # 索引相关
+        self.index_path = None
+        self.checkpoint_path = None
+        self.searcher = None
+
+        # 查询编码相关
+        self.max_query_length = 512
+
+        # ID 映射：integer_id -> asin
+        self._pid_to_asin = {}
+        self._asin_to_pid = {}
 
     def _get_model(self):
         if self.model is None:
@@ -759,204 +770,160 @@ class ColBERTRetriever:
             self.model.eval()
         return self.model
 
-    def _encode_text(self, text: str, max_length: int = None, use_sliding_window: bool = False):
-        """
-        编码文本为 token-level embeddings
-
-        Args:
-            text: 输入文本
-            max_length: 最大长度（仅当不使用滑动窗口时生效）
-            use_sliding_window: 是否使用滑动窗口处理长文本
-
-        Returns:
-            如果 use_sliding_window=False: [seq_len, hidden_size]
-            如果 use_sliding_window=True: List of [seq_len, hidden_size] (多个窗口)
-        """
-        # 先 tokenize 不截断，获取真实长度
-        encoded_full = self.tokenizer(
+    def _encode_text(self, text: str):
+        """编码文本为 token-level embeddings"""
+        encoded = self.tokenizer(
             text,
-            truncation=False,
+            truncation=True,
+            max_length=512,
+            padding='max_length',
             return_tensors='pt'
         )
 
-        input_ids = encoded_full['input_ids'][0]
-        actual_length = len(input_ids)
+        input_ids = encoded['input_ids'].to(self.device)
+        attention_mask = encoded['attention_mask'].to(self.device)
 
-        # 如果文本较短或者不使用滑动窗口，直接处理
-        if not use_sliding_window or actual_length <= self.window_size:
-            if max_length is None:
-                max_length = self.window_size
+        with torch.no_grad():
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            token_embeddings = outputs.last_hidden_state[0]
 
-            # 截断到 max_length（但优先保证不截断）
-            encoded = self.tokenizer(
-                text,
-                max_length=max_length,
-                truncation=True,
-                padding='max_length',
-                return_tensors='pt'
-            )
+        attention_mask_expanded = attention_mask[0].unsqueeze(-1).expand(token_embeddings.size()).float()
+        token_embeddings = token_embeddings * attention_mask_expanded
 
-            input_ids = encoded['input_ids'].to(self.device)
-            attention_mask = encoded['attention_mask'].to(self.device)
-
-            with torch.no_grad():
-                outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
-                token_embeddings = outputs.last_hidden_state[0]
-
-            attention_mask_expanded = attention_mask[0].unsqueeze(-1).expand(token_embeddings.size()).float()
-            token_embeddings = token_embeddings * attention_mask_expanded
-
-            return token_embeddings
-
-        # 使用滑动窗口处理长文本（保证完全不截断）
-        windows_embeddings = []
-
-        # 计算窗口数量
-        num_windows = (actual_length - self.window_size) // self.window_stride + 1
-
-        for i in range(num_windows):
-            start_idx = i * self.window_stride
-            end_idx = min(start_idx + self.window_size, actual_length)
-
-            # 提取窗口的 token IDs
-            window_ids = input_ids[start_idx:end_idx]
-
-            # 编码这个窗口
-            encoded_window = self.tokenizer(
-                text,
-                max_length=end_idx - start_idx,
-                truncation=True,
-                padding='max_length',
-                return_tensors='pt'
-            )
-
-            input_ids_window = encoded_window['input_ids'].to(self.device)
-            attention_mask_window = encoded_window['attention_mask'].to(self.device)
-
-            with torch.no_grad():
-                outputs = self.model(input_ids=input_ids_window, attention_mask=attention_mask_window)
-                window_embeddings = outputs.last_hidden_state[0]
-
-            attention_mask_expanded = attention_mask_window[0].unsqueeze(-1).expand(window_embeddings.size()).float()
-            window_embeddings = window_embeddings * attention_mask_expanded
-
-            windows_embeddings.append(window_embeddings)
-
-        return windows_embeddings  # 返回多个窗口的 embeddings
+        return token_embeddings
 
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
         """
-        构建 ColBERT 索引：token-level embeddings
+        使用 ColBERT 官方 Indexer 构建量化索引
 
-        使用滑动窗口策略，保证完全不截断长文档
+        索引保存到磁盘，不占用显存。
         """
-        log_with_timestamp("  Building ColBERTv2 index with sliding window (no truncation)...")
+        log_with_timestamp("  Building ColBERTv2 index with official Indexer...")
 
-        # 清理 GPU 缓存，释放之前模型的内存
+        # 清理 GPU 缓存
         if torch.cuda.is_available():
-            log_with_timestamp("  Clearing GPU cache before ColBERT loading...")
+            log_with_timestamp("  Clearing GPU cache...")
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
-
-        model = self._get_model()
 
         self.doc_ids = [doc.get('asin', '') for doc in documents]
         self.all_metadata = all_metadata
 
-        # 使用增强的文档文本构建
+        # 构建 ID 映射：integer pid <-> asin
+        self._pid_to_asin = {i: asin for i, asin in enumerate(self.doc_ids)}
+        self._asin_to_pid = {asin: i for i, asin in enumerate(self.doc_ids)}
+
+        # 创建临时目录用于 ColBERT 索引
+        import tempfile
+        import shutil
+        self._temp_dir = tempfile.mkdtemp(prefix="colbert_")
+        doc_tsv_path = os.path.join(self._temp_dir, "doc.tsv")
+
+        # 写入文档 TSV 格式（使用整数 pid）
+        log_with_timestamp(f"  Writing documents to TSV: {doc_tsv_path}")
         texts = [build_document_text(doc, all_metadata) for doc in documents]
+        with open(doc_tsv_path, 'w', encoding='utf-8') as f:
+            for pid, text in enumerate(texts):
+                # 清理文本：移除换行符、tab符和多余空白
+                text = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').strip()
+                if not text:  # 如果文本为空，使用占位符
+                    text = f"product {pid}"
+                # ColBERT TSV 格式: pid\ttext (pid 必须是整数)
+                f.write(f"{pid}\t{text}\n")
 
-        # 编码每个文档为 token-level embeddings（使用滑动窗口）
-        self.doc_embeddings = []
-        window_stats = {'single_window': 0, 'multi_window': 0, 'max_windows': 0}
+        # 使用 ColBERT 官方 Indexer
+        from colbert.infra import Run, RunConfig, ColBERTConfig
+        from colbert import Indexer
+        from colbert.data import Collection
+        from tqdm import tqdm
+        import threading
+        import time
 
-        for i, text in enumerate(texts):
-            if (i + 1) % 10 == 0:
-                log_with_timestamp(f"    Encoding document {i+1}/{len(texts)}...")
+        log_with_timestamp(f"  Building ColBERT index with nbits={self.nbits}...")
 
-            # 使用滑动窗口编码（use_sliding_window=True 保证不截断）
-            token_emb = self._encode_text(text, use_sliding_window=True)
+        # 设置索引路径
+        self.index_path = os.path.join(self._temp_dir, "index")
 
-            # 统计窗口使用情况
-            if isinstance(token_emb, list):
-                window_stats['multi_window'] += 1
-                window_stats['max_windows'] = max(window_stats['max_windows'], len(token_emb))
-            else:
-                window_stats['single_window'] += 1
+        nranks = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        exp_name = "colbert_index"
 
-            self.doc_embeddings.append(token_emb)
+        # 创建 tqdm 进度条来跟踪索引进度
+        pbar = tqdm(total=100, desc="  ColBERT indexing", unit="%", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]")
 
-            # 每1000个文档清理一次GPU缓存
-            if (i + 1) % 1000 == 0 and torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        # ColBERT 索引是同步的，使用线程更新进度（因为 ColBERT 内部不提供回调）
+        progress_value = [0]
+        stop_flag = [False]
 
-        log_with_timestamp(f"  ColBERTv2 index built with {len(self.doc_ids)} docs:")
-        log_with_timestamp(f"    - Single window: {window_stats['single_window']} docs")
-        log_with_timestamp(f"    - Multi window: {window_stats['multi_window']} docs")
-        log_with_timestamp(f"    - Max windows per doc: {window_stats['max_windows']}")
+        def update_progress():
+            """模拟进度更新（实际进度由 ColBERT 内部控制）"""
+            while not stop_flag[0]:
+                time.sleep(5)
+                if progress_value[0] < 85:  # 编码阶段进度
+                    progress_value[0] += 3
+                    pbar.update(3)
+                elif progress_value[0] < 95:  # 聚类阶段
+                    progress_value[0] += 2
+                    pbar.update(2)
 
-        # THREAD SAFETY FIX: Pre-move all embeddings to device during fit()
-        # This avoids concurrent .to(device) calls in search() which cause "Already borrowed" errors
-        log_with_timestamp("  Moving embeddings to device for thread safety...")
-        self.doc_embeddings = [
-            [w.to(self.device) for w in emb] if isinstance(emb, list)
-            else emb.to(self.device)
-            for emb in self.doc_embeddings
-        ]
-        log_with_timestamp(f"  All embeddings moved to {self.device}")
+        progress_thread = threading.Thread(target=update_progress, daemon=True)
+        progress_thread.start()
+
+        try:
+            with Run().context(RunConfig(nranks=nranks, experiment=exp_name, root=self._temp_dir)):
+                config = ColBERTConfig(nbits=self.nbits, root=self._temp_dir)
+                indexer = Indexer(checkpoint=self.model_name, config=config)
+                indexer.index(name=exp_name, collection=doc_tsv_path, overwrite=True)
+
+            # 完成
+            stop_flag[0] = True
+            pbar.update(100 - pbar.n)
+            pbar.close()
+        except Exception as e:
+            stop_flag[0] = True
+            pbar.close()
+            raise e
+
+        log_with_timestamp(f"  ColBERT index built and saved to: {self.index_path}")
+        log_with_timestamp(f"  Total documents indexed: {len(self.doc_ids)}")
+
+        # 清理临时文件（保留索引）
+        if os.path.exists(doc_tsv_path):
+            os.remove(doc_tsv_path)
+
+    def _get_searcher(self):
+        """获取 ColBERT Searcher（延迟加载）"""
+        if self.searcher is None:
+            from colbert.infra import Run, RunConfig, ColBERTConfig
+            from colbert import Searcher
+
+            log_with_timestamp(f"  Loading ColBERT searcher from: {self.index_path}")
+
+            exp_name = "colbert_index"
+            with Run().context(RunConfig(experiment=exp_name, root=self._temp_dir)):
+                config = ColBERTConfig(root=self._temp_dir)
+                self.searcher = Searcher(index=exp_name, config=config)
+
+        return self.searcher
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """
-        使用改进的 Late Interaction (MaxSim) 搜索
-
-        改进点：
-        1. 使用更长的查询长度 (512 tokens) - 保证不截断查询
-        2. 只对 embeddings 进行 L2 归一化一次（不在每次比较时重复归一化）
-        3. 使用 mean() 而不是 sum() 来标准化分数（避免查询长度偏差）
-        4. 支持多窗口文档（完全不截断长文档）
+        使用 ColBERT 官方 Searcher 进行 Late Interaction 搜索
         """
-        model = self._get_model()
+        searcher = self._get_searcher()
 
-        # 编码查询为 token-level embeddings，保证不截断（max_length=512）
-        query_emb = self._encode_text(query, max_length=self.max_query_length, use_sliding_window=False)
-        query_emb = query_emb.to(self.device)  # [query_len, hidden_size]
+        # 使用 ColBERT Searcher 搜索
+        results = searcher.search(query, k=top_k)
 
-        # 只在编码后进行一次 L2 归一化
-        query_emb_normalized = query_emb / query_emb.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-
-        scores = []
-        for i, doc_emb in enumerate(self.doc_embeddings):
-            # 处理单窗口或多窗口文档
-            if isinstance(doc_emb, list):
-                # 多窗口文档：计算每个窗口的分数，取最大值
-                window_scores = []
-                for window_emb in doc_emb:
-                    # 归一化窗口 embeddings
-                    window_emb_normalized = window_emb / window_emb.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-
-                    # MaxSim: 计算这个窗口的分数
-                    sim_matrix = torch.mm(query_emb_normalized, window_emb_normalized.t())
-                    max_sim_per_query_token, _ = sim_matrix.max(dim=1)
-                    window_score = max_sim_per_query_token.mean().item()
-                    window_scores.append(window_score)
-
-                # 取所有窗口的最大分数（文档只要有一个窗口匹配就算匹配）
-                score = max(window_scores)
-            else:
-                # 单窗口文档：直接计算
-                # 归一化文档 embeddings
-                doc_emb_normalized = doc_emb / doc_emb.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-
-                # MaxSim: 计算每个 query token 与所有 doc tokens 的最大相似度
-                sim_matrix = torch.mm(query_emb_normalized, doc_emb_normalized.t())
-                max_sim_per_query_token, _ = sim_matrix.max(dim=1)
-                score = max_sim_per_query_token.mean().item()
-
-            scores.append((self.doc_ids[i], score))
+        # 解析结果: [(integer_pid, rank, score), ...]
+        # ColBERT 返回的是 integer pid，需要映射回 asin
+        output = []
+        for pid, rank, score in zip(results[0], results[1], results[2]):
+            asin = self._pid_to_asin.get(pid, str(pid))
+            output.append((asin, float(score)))
 
         # 按分数降序排序
-        results = sorted(scores, key=lambda x: -x[1])
-        return results[:top_k]
+        output.sort(key=lambda x: -x[1])
+        return output[:top_k]
 
 
 class TFIDFRetriever:
