@@ -2,8 +2,8 @@
   "_comment": "07_inject_noisy 路径配置文件",
   "base_paths": {
     "root": "/root",
-    "result": "/root/result/personal_query",
-    "test_result": "/root/test/result/personal_query",
+    "result": "/workspace/result/personal_query",
+    "test_result": "/workspace/result/personal_query",
     "workspace": "/workspace/PersonalQuery"
   },
   "categories": {
@@ -30,6 +30,14 @@
       "user_error_file": "{result}/04_writing_analysis/Pet_Supplies/acl_ccomp_error.json",
       "acl_noisy_output": "{result}/07_inject_noisy/Pet_Supplies/acl_noisy_query.json",
       "ccomp_noisy_output": "{result}/07_inject_noisy/Pet_Supplies/ccomp_noisy_query.json"
+    },
+    "Baby_Products": {
+      "name": "Baby_Products",
+      "acl_query_file": "/workspace/result/personal_query/06_query/Baby_Products/query.json",
+      "ccomp_query_file": "/workspace/result/personal_query/06_query/Baby_Products/query.json",
+      "user_error_file": "/workspace/result/personal_query/04_writing_analysis/Baby_Products/acl_ccomp_error.json",
+      "acl_noisy_output": "/workspace/result/personal_query/07_inject_noisy/Baby_Products/acl_noisy_query.json",
+      "ccomp_noisy_output": "/workspace/result/personal_query/07_inject_noisy/Baby_Products/ccomp_noisy_query.json"
     }
   }
 }
