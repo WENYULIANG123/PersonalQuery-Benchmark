@@ -22,9 +22,6 @@ if "HF_HOME" not in os.environ:
 if "HF_HUB_CACHE" not in os.environ:
     os.environ["HF_HUB_CACHE"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
 
-# 离线模式（设置为 "0" 允许从网络下载）
-os.environ["HF_HUB_OFFLINE"] = "0"
-os.environ["TRANSFORMERS_OFFLINE"] = "0"
 
 # Add utils path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
