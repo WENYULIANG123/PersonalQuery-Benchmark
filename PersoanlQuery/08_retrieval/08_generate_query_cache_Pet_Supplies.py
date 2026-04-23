@@ -18,7 +18,7 @@
 """
 
 import os
-os.environ["HF_HOME"] = "/root/hf_models"
+os.environ["HF_HOME"] = "/workspace/hf_models"
 
 import sys
 import json
@@ -39,7 +39,8 @@ sys.path.insert(0, str(personquery_root))
 
 from utils.retrievers import (
     E5Retriever, BGERetriever,
-    STARRetriever, MiniLMRetriever, GritLMRetriever, BM25
+    STARRetriever, MiniLMRetriever, GritLMRetriever, BM25,
+    ANCERetriever, SPLADERetriever
 )
 
 # ============ 配置加载 ============
@@ -64,8 +65,13 @@ AVAILABLE_RETRIEVERS = {
     'E5': E5Retriever,
     'MiniLM': MiniLMRetriever,
     'STAR': STARRetriever,
+    'ANCE': ANCERetriever,
+    'SPLADE': SPLADERetriever,
     'BM25': None,  # BM25 单独处理
 }
+
+# Sparse 检索器（缓存格式为 dict 而不是 numpy array）
+SPARSE_RETRIEVERS = {'SPLADE'}
 
 def log_with_timestamp(msg: str):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
@@ -504,47 +510,52 @@ def load_user_queries(user_id: str, modes: Optional[List[str]] = None) -> Dict[s
 
     return result
 
-def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str = "", user_id: str = "", mode: str = "") -> Dict[str, np.ndarray]:
+def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str = "", user_id: str = "", mode: str = "") -> Dict[str, any]:
     """Encode queries and return cache dict with query embeddings
-    
+
     Args:
         retriever_instance: Initialized retriever with encode_query method
         queries: List of query dicts with 'query' key
         retriever_name: Name of retriever (for logging)
         user_id: User ID (for logging)
         mode: Query mode - clean or noisy (for logging)
-        
+
     Returns:
-        Dict mapping query_text -> embedding (numpy array)
+        Dict mapping query_text -> embedding (numpy array for dense, dict for sparse)
     """
     cache = {}
     failed_count = 0
-    
+    is_sparse = retriever_name in SPARSE_RETRIEVERS
+
     for i, q in enumerate(queries):
         query_text = q.get('query', '')
         if not query_text:
             continue
-        
+
         if query_text in cache:
             continue
-        
+
         try:
-            embedding = retriever_instance.encode_query(query_text)
-            
-            if not isinstance(embedding, np.ndarray):
-                if isinstance(embedding, torch.Tensor):
-                    embedding = embedding.cpu().numpy()
-                else:
-                    embedding = np.array(embedding)
-            
-            cache[query_text] = embedding
-            
+            encoding = retriever_instance.encode_query(query_text)
+
+            # Sparse 检索器（SPLADE）返回 dict，保持原格式
+            if is_sparse:
+                cache[query_text] = encoding
+            else:
+                # Dense 检索器返回 numpy array 或 tensor
+                if not isinstance(encoding, np.ndarray):
+                    if isinstance(encoding, torch.Tensor):
+                        encoding = encoding.cpu().numpy()
+                    else:
+                        encoding = np.array(encoding)
+                cache[query_text] = encoding
+
             progress = i + 1
             progress_pct = (progress / len(queries)) * 100
-            
+
             if progress % 5 == 0 or progress == len(queries):
                 log_with_timestamp(f"      编码进度 [{retriever_name}|{user_id}|{mode}]: {progress}/{len(queries)} ({progress_pct:.1f}%)")
-        
+
         except Exception as e:
             error_msg = str(e)
             log_with_timestamp(f"      ❌ 编码失败 [{retriever_name}|{user_id}|{mode}] 查询: {query_text[:40]}... 错误: {error_msg[:100]}")
@@ -553,10 +564,10 @@ def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str 
             log_with_timestamp(f"      ⚠️  当前检索器: {retriever_name}, 用户: {user_id}, 模式: {mode}")
             import sys
             sys.exit(1)
-    
+
     if failed_count > 0:
         log_with_timestamp(f"      ⚠️  共有 {failed_count} 个查询编码失败")
-    
+
     return cache
 
 def clear_cache() -> int:
@@ -1002,8 +1013,8 @@ def generate_cache_for_all_retrievers(
 
 def main():
     # ==================== 硬编码配置 ====================
-    # 检索器列表：核心5个 + GritLM
-    RETRIEVER_NAMES = ['GRITLM', 'BGE', 'E5', 'MiniLM', 'STAR']  # GRITLM 优先
+    # 检索器列表：核心5个 + GritLM + ANCE + SPLADE
+    RETRIEVER_NAMES = ['GRITLM', 'BGE', 'E5', 'MiniLM', 'STAR', 'ANCE', 'SPLADE']  # GRITLM 优先
     # 是否清理旧缓存
     CLEAR_CACHE_BEFORE = True
     # 数据源：persona_generated_queries.json
