@@ -1218,6 +1218,226 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: L
         'all_query_records': all_query_records
     }
 
+
+def load_splade_retriever():
+    """加载 SPLADE 检索器（稀疏向量格式）"""
+    from utils.retrievers import SPLADERetriever
+
+    splade_path = None
+    for f in os.listdir(CACHE_DIR):
+        if f.startswith('splade_') and f.endswith('.pkl'):
+            splade_path = os.path.join(CACHE_DIR, f)
+            break
+    if splade_path is None:
+        raise FileNotFoundError("SPLADE cache not found")
+
+    log(f"  [splade] 加载: {os.path.getsize(splade_path)/1024/1024:.1f} MB")
+    with open(splade_path, 'rb') as f:
+        retriever = pickle.load(f)
+    return retriever
+
+
+def load_splade_query_cache(query_type: str = 'correct', query_category: str = 'acl') -> Dict:
+    """加载 SPLADE 查询缓存
+
+    Returns:
+        Dict: {user_id: {query_text: {doc_idx: score}}} - 稀疏分数格式
+    """
+    cache_path = os.path.join(
+        QUERY_CACHE_BASE_DIR,
+        f'{query_category}_{query_type}_query',
+        f'splade__{query_category}_{query_type}_cache.pkl'
+    )
+    if not os.path.exists(cache_path):
+        return None
+    with open(cache_path, 'rb') as f:
+        return pickle.load(f)
+
+
+def evaluate_splade_retriever(user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = 'correct', query_category: str = 'acl') -> Dict:
+    """评估 SPLADE 检索器
+
+    SPLADE 查询缓存格式: {user_id: {query_text: {doc_idx: score}}}
+    返回的是稀疏分数字典，需要转换为排序后的检索结果
+    """
+    global GROUP_FIELD, UNIQUE_LEVELS
+    GROUP_FIELD = query_category
+
+    log(f"\n{'='*60}")
+    log(f"检索器: SPLADE (稀疏) - {query_category.upper()}/{query_type.upper()}")
+    log(f"{'='*60}")
+
+    # 加载 SPLADE 检索器和 doc_ids
+    retriever = load_splade_retriever()
+    doc_ids = retriever.doc_ids  # SPLADE 检索器有 doc_ids 属性
+
+    # 加载查询缓存
+    log(f"  加载 SPLADE 查询缓存...")
+    query_cache = load_splade_query_cache(query_type, query_category)
+
+    if query_cache is None:
+        raise FileNotFoundError("SPLADE query cache not found")
+
+    matched_users = list(user_queries.keys())
+    log(f"  用户数: {len(matched_users)}")
+
+    eval_start = time.time()
+
+    # 分组统计
+    group_groups = {g: [] for g in UNIQUE_LEVELS}
+    all_metrics = []
+
+    word_bins = [(0, 15), (15, 20), (20, 25), (25, 30), (30, float('inf'))]
+    word_bin_labels = ['很短(1-15)', '短(15-20)', '中(20-25)', '长(25-30)', '很长(30+)']
+    ratio_bins = [(0.0, 0.05), (0.05, 0.1), (0.1, 0.2), (0.2, 0.5), (0.5, 1.0)]
+    ratio_bin_labels = ['很低(0-0.05)', '低(0.05-0.1)', '中(0.1-0.2)', '高(0.2-0.5)', '很高(0.5+)']
+    word_count_groups = {label: [] for label in word_bin_labels}
+    group_ratio_groups = {label: [] for label in ratio_bin_labels}
+
+    # IDF 分层分组
+    idf_bin_groups = {label: [] for label in IDF_BIN_LABELS}
+    idf_group_cross = defaultdict(list)
+    all_query_records = []
+
+    for user_idx, user_id in enumerate(matched_users):
+        queries = user_queries[user_id]
+        cached_queries = query_cache.get(user_id, {})
+
+        for q in queries:
+            query_text = q['query']
+            relevant_asin = q['asin']
+            word_count = q.get('word_count', 0)
+            group_ratio = q.get(f'{GROUP_FIELD}_ratio', 0.0)
+            q_group = q.get(GROUP_FIELD, 0)
+
+            if query_text not in cached_queries:
+                continue
+
+            # 获取稀疏分数: {doc_idx: score}
+            sparse_scores = cached_queries[query_text]
+
+            # 将稀疏分数转换为排序后的检索结果 [(doc_idx, score), ...]
+            # 排序是降序（分数高的在前）
+            sorted_scores = sorted(sparse_scores.items(), key=lambda x: x[1], reverse=True)
+
+            # 转换为 asin 列表
+            retrieved_asins = []
+            retrieved_scores = []
+            for doc_idx, score in sorted_scores:
+                if doc_idx < len(doc_ids):
+                    retrieved_asins.append(doc_ids[doc_idx])
+                    retrieved_scores.append((doc_ids[doc_idx], score))
+
+            retrieved_asins = [r[0] for r in retrieved_scores[:max(k_values)]]
+
+            metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
+            all_metrics.append(metrics)
+            group_groups[q_group].append(metrics)
+
+            # 计算 IDF
+            q_idf = compute_query_idf(query_text, word_idf) if word_idf else 0.0
+
+            # 记录原始数据
+            all_query_records.append({
+                'user_id': user_id,
+                'asin': relevant_asin,
+                f'{GROUP_FIELD}': q_group,
+                'mean_idf': q_idf,
+                'query_length': word_count,
+                f'{GROUP_FIELD}_ratio': group_ratio,
+                'p_at1': float(metrics.get('P@1', 0.0)),
+                'p_at3': float(metrics.get('P@3', 0.0)),
+                'p_at5': float(metrics.get('P@5', 0.0)),
+                'p_at10': float(metrics.get('P@10', 0.0)),
+                'n_at10': float(metrics.get('N@10', 0.0)),
+                'mrr_at10': float(metrics.get('MR@10', 0.0)),
+                'hit_at10': float(metrics.get('H@10', 0.0)),
+            })
+
+            # 分组统计
+            for (low, high), label in zip(word_bins, word_bin_labels):
+                if low <= word_count < high:
+                    word_count_groups[label].append(metrics)
+                    break
+
+            for (low, high), label in zip(ratio_bins, ratio_bin_labels):
+                if low <= group_ratio < high:
+                    group_ratio_groups[label].append(metrics)
+                    break
+
+            for (low, high), label in zip(IDF_BINS, IDF_BIN_LABELS):
+                if low <= q_idf < high:
+                    idf_bin_groups[label].append(metrics)
+                    idf_group_cross[(label, q_group)].append(metrics)
+                    break
+
+        if (user_idx + 1) % 100 == 0:
+            elapsed = time.time() - eval_start
+            log(f"    进度: {user_idx+1}/{len(matched_users)} ({100*(user_idx+1)/len(matched_users):.1f}%)")
+
+    eval_time = time.time() - eval_start
+    log(f"  评估完成，总耗时: {eval_time:.1f}秒")
+    overall_metrics = compute_average_metrics(all_metrics, k_values)
+
+    group_metrics = {}
+    group_counts = {}
+    for group in UNIQUE_LEVELS:
+        if group_groups[group]:
+            group_metrics[group] = compute_average_metrics(group_groups[group], k_values)
+            group_counts[group] = len(group_groups[group])
+        else:
+            group_metrics[group] = {k: 0.0 for k in [f'P@{i}' for i in k_values] + [f'N@{i}' for i in k_values] + [f'MR@{i}' for i in k_values] + [f'H@{i}' for i in k_values]}
+            group_counts[group] = 0
+
+    # 计算 word_count 分组统计
+    word_count_analysis = {}
+    for label in word_bin_labels:
+        if word_count_groups[label]:
+            word_count_analysis[label] = {
+                'count': len(word_count_groups[label]),
+                'metrics': compute_average_metrics(word_count_groups[label], k_values)
+            }
+
+    # 计算 group_ratio 分组统计
+    group_ratio_analysis = {}
+    for label in ratio_bin_labels:
+        if group_ratio_groups[label]:
+            group_ratio_analysis[label] = {
+                'count': len(group_ratio_groups[label]),
+                'metrics': compute_average_metrics(group_ratio_groups[label], k_values)
+            }
+
+    # 计算 IDF 分组统计
+    idf_analysis = {}
+    for label in IDF_BIN_LABELS:
+        if idf_bin_groups[label]:
+            idf_analysis[label] = {
+                'count': len(idf_bin_groups[label]),
+                'metrics': compute_average_metrics(idf_bin_groups[label], k_values)
+            }
+
+    # 计算 IDF × group 交叉分组统计
+    idf_group_analysis = {}
+    for (idf_label, group_val), metrics_list in idf_group_cross.items():
+        if metrics_list:
+            idf_group_analysis[(idf_label, group_val)] = {
+                'count': len(metrics_list),
+                'metrics': compute_average_metrics(metrics_list, k_values)
+            }
+
+    return {
+        'retriever': 'splade', 'dim': 0, 'type': 'sparse', 'num_users': len(matched_users),
+        'num_queries': len(all_metrics), 'eval_time_seconds': eval_time,
+        'metrics': overall_metrics, 'group_metrics': group_metrics, 'group_counts': group_counts,
+        'raw_metrics_per_group': group_groups, 'all_raw_metrics': all_metrics,
+        'word_count_analysis': word_count_analysis,
+        'group_ratio_analysis': group_ratio_analysis,
+        'idf_analysis': idf_analysis,
+        'idf_group_cross': idf_group_analysis,
+        'all_query_records': all_query_records
+    }
+
+
 # ============ 表格打印 ============
 
 
@@ -1420,20 +1640,16 @@ def run_paired_ttest_analysis(all_results_by_category_and_type: Dict, word_idf: 
     return all_results
 
 
-# ============ 实验 2: Query 长度和 IDF 的对称性验证 ============
+# ============ 实验 2: Query 长度和 IDF 的统计分布 ============
 def run_symmetry_check(acl_df: pd.DataFrame, ccomp_df: pd.DataFrame, word_idf: Dict[str, float]):
-    """实验 2: 验证 ACL_k 和 CCOMP_k 的长度/IDF 对称性
+    """实验 2: 统计 ACL 和 CCOMP 各 level 的查询长度和 IDF 分布
 
-    对每对 (ACL_k, CCOMP_k) query，计算：
-    - len_diff = len_acl - len_ccomp
-    - idf_diff = idf_acl - idf_ccomp
-
-    期望: mean len_diff ≈ 0, mean idf_diff ≈ 0
+    直接计算 ACL0/1/2/3 和 CCOMP0/1/2/3 各组的平均长度和平均 IDF
     """
     log("\n" + "=" * 100)
-    log("实验 2: Query 长度和 IDF 的对称性验证")
+    log("实验 2: Query 长度和 IDF 统计分布")
     log("=" * 100)
-    log("目的: 验证 ACL_k 和 CCOMP_k 长度/IDF 是否可比（无系统性偏斜）")
+    log("目的: 统计 ACL 和 CCOMP 各 level 的查询长度和 IDF 分布")
     log("")
 
     # 计算 IDF
@@ -1441,65 +1657,63 @@ def run_symmetry_check(acl_df: pd.DataFrame, ccomp_df: pd.DataFrame, word_idf: D
     acl_df['mean_idf'] = acl_df['query'].apply(lambda q: compute_query_idf_simple(q, word_idf))
     ccomp_df['mean_idf'] = ccomp_df['query'].apply(lambda q: compute_query_idf_simple(q, word_idf))
 
-    # 配对: 按 (user_id, asin, level)
-    merged = pd.merge(
-        acl_df, ccomp_df,
-        on=['user_id', 'asin', 'level'],
-        suffixes=('_acl', '_ccomp')
-    )
-
-    if merged.empty:
-        log("  警告: 无法配对 ACL 和 CCOMP 查询，跳过对称性检验")
-        return None
-
-    log(f"  配对数: {len(merged)}")
-    log("")
-
-    # 计算差值
-    merged['len_diff'] = merged['word_count_acl'] - merged['word_count_ccomp']
-    merged['idf_diff'] = merged['mean_idf_acl'] - merged['mean_idf_ccomp']
-
-    # 按 level 报告
-    log(f"{'Level':<8} {'N':<10} {'Mean_len_diff':<14} {'Std_len':<10} {'Mean_idf_diff':<14} {'Std_idf':<10}")
-    log("-" * 80)
-
     symmetry_results = []
-    for level in sorted(merged['level'].unique()):
-        subset = merged[merged['level'] == level]
-        n = len(subset)
 
-        mean_len_diff = subset['len_diff'].mean()
-        std_len_diff = subset['len_diff'].std()
-        mean_idf_diff = subset['idf_diff'].mean()
-        std_idf_diff = subset['idf_diff'].std()
+    # ========== ACL Family ==========
+    log("\n--- ACL Family ---")
+    log(f"\n{'Level':<10} {'N':<10} {'Mean_len':<12} {'Std_len':<10} {'Mean_IDF':<12} {'Std_IDF':<10}")
+    log("-" * 70)
 
-        log(f"{level:<8} {n:<10} {mean_len_diff:+14.2f} {std_len_diff:<10.2f} {mean_idf_diff:+14.4f} {std_idf_diff:<10.4f}")
+    for level in sorted(acl_df['level'].unique()):
+        level_data = acl_df[acl_df['level'] == level]
+        n = len(level_data)
+        mean_len = level_data['word_count'].mean()
+        std_len = level_data['word_count'].std()
+        mean_idf = level_data['mean_idf'].mean()
+        std_idf = level_data['mean_idf'].std()
+
+        log(f"ACL{level:<7} {n:<10} {mean_len:<12.2f} {std_len:<10.2f} {mean_idf:<12.4f} {std_idf:<10.4f}")
 
         symmetry_results.append({
+            'family': 'ACL',
             'level': level,
             'n': n,
-            'mean_len_diff': mean_len_diff,
-            'std_len_diff': std_len_diff,
-            'mean_idf_diff': mean_idf_diff,
-            'std_idf_diff': std_idf_diff
+            'mean_len': mean_len,
+            'std_len': std_len,
+            'mean_idf': mean_idf,
+            'std_idf': std_idf
         })
 
-    # 总体对称性
-    log("-" * 80)
-    overall_len_diff = merged['len_diff'].mean()
-    overall_std_len = merged['len_diff'].std()
-    overall_idf_diff = merged['idf_diff'].mean()
-    overall_std_idf = merged['idf_diff'].std()
-    log(f"{'Overall':<8} {len(merged):<10} {overall_len_diff:+14.2f} {overall_std_len:<10.2f} {overall_idf_diff:+14.4f} {overall_std_idf:<10.4f}")
+    # ========== CCOMP Family ==========
+    log("\n--- CCOMP Family ---")
+    log(f"\n{'Level':<10} {'N':<10} {'Mean_len':<12} {'Std_len':<10} {'Mean_IDF':<12} {'Std_IDF':<10}")
+    log("-" * 70)
+
+    for level in sorted(ccomp_df['level'].unique()):
+        level_data = ccomp_df[ccomp_df['level'] == level]
+        n = len(level_data)
+        mean_len = level_data['word_count'].mean()
+        std_len = level_data['word_count'].std()
+        mean_idf = level_data['mean_idf'].mean()
+        std_idf = level_data['mean_idf'].std()
+
+        log(f"CCOMP{level:<5} {n:<10} {mean_len:<12.2f} {std_len:<10.2f} {mean_idf:<12.4f} {std_idf:<10.4f}")
+
+        symmetry_results.append({
+            'family': 'CCOMP',
+            'level': level,
+            'n': n,
+            'mean_len': mean_len,
+            'std_len': std_len,
+            'mean_idf': mean_idf,
+            'std_idf': std_idf
+        })
 
     log("")
     log("  解读:")
-    log("  • |Mean len_diff| < 0.5 词 → 长度基本对称 ✓")
-    log("  • |Mean idf_diff| < 0.1 → IDF 基本对称 ✓")
-    if abs(overall_len_diff) > 1.0:
-        log(f"  ⚠️ 警告: ACL 平均比 CCOMP 长 {overall_len_diff:.1f} 词，存在长度 confound!")
-    if abs(overall_idf_diff) > 0.2:
-        log("  ⚠️ 警告: ACL 和 CCOMP 的 IDF 分布存在系统性差异!")
+    log("  • 查看各 level 的 Mean_len 是否有显著差异")
+    log("  • 查看各 level 的 Mean_IDF 是否有显著差异")
+    log("  • 如果某 level 与其他 level 差异过大，可能存在 confound")
 
     return symmetry_results
 
@@ -1858,6 +2072,17 @@ def main():
                 query_type_results.append(result)
             except Exception as e:
                 log(f"  BM25 错误: {e}")
+
+            # 评估 SPLADE
+            try:
+                result = evaluate_splade_retriever(user_queries, user_to_group, k_values, word_idf, query_type, query_category)
+                result['query_type'] = query_type
+                result['query_category'] = query_category
+                query_type_results.append(result)
+            except FileNotFoundError as e:
+                log(f"  跳过 SPLADE: {e}")
+            except Exception as e:
+                log(f"  SPLADE 错误: {e}")
 
             all_results_by_type[query_type] = query_type_results
 
