@@ -186,8 +186,9 @@ def main():
     # ========================================
     # 汇总统计
     # ========================================
+    num_categories = len(category_stats)
     log("\n" + "=" * 70)
-    log("汇总统计（三个类别）")
+    log(f"汇总统计（{num_categories}个类别）")
     log("=" * 70)
 
     total_acl_by_level = defaultdict(int)

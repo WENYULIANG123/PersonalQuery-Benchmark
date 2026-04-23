@@ -15,8 +15,12 @@ import os
 import gzip
 import re
 import sys
+import warnings
 from datetime import datetime
 from typing import List, Dict, Tuple, Set, Optional
+
+# Suppress BeautifulSoup warning about file-like strings
+warnings.filterwarnings("ignore", message=".*looks more like a filename.*")
 
 import numpy as np
 import pandas as pd
@@ -64,7 +68,8 @@ def clean_data(item) -> str:
         # Explicitly pass 'lxml' to avoid BeautifulSoup warnings about URL-like strings
         import warnings
         with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=UserWarning, message=".*MarkupResemblesLocatorWarning.*")
+            warnings.filterwarnings("ignore", message=".*MarkupResemblesLocatorWarning.*")
+            warnings.filterwarnings("ignore", category=FutureWarning, message=".*looks more like a filename.*")
             item = ' '.join(parser(item, "lxml").text.split())
     elif isinstance(item, list):
         item = ' '.join(str(x) for x in item if x)

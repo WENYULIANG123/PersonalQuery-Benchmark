@@ -1211,13 +1211,11 @@ class GritLMRetriever:
 class ANCERetriever:
     """
     ANCE (Approximate Nearest Neighbor Negative Contrastive Learning) retriever.
-    
+
     ANCE uses a contrastive learning approach with negative sampling to learn
     high-quality dense embeddings for retrieval.
-    
-    Using intfloat/e5-base-v2 as a publicly available alternative.
     """
-    def __init__(self, model_name: str = "intfloat/e5-base-v2"):
+    def __init__(self, model_name: str = "castorini/ance-msmarco-passage"):
         self.model_name = model_name
         self.model = None
         self.doc_embeddings = None
@@ -1242,7 +1240,7 @@ class ANCERetriever:
         self.all_metadata = all_metadata
         texts = [build_document_text(doc, all_metadata) for doc in documents]
 
-        self.doc_embeddings = model.encode(texts, show_progress_bar=True, batch_size=2048)
+        self.doc_embeddings = model.encode(texts, show_progress_bar=True, batch_size=512)
         log_with_timestamp(f"  ANCE index built with {len(self.doc_ids)} docs")
 
     def encode_query(self, query: str) -> np.ndarray:
@@ -1897,9 +1895,10 @@ class SPLADERetriever:
             from transformers import AutoModelForMaskedLM, AutoTokenizer
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             self.model = AutoModelForMaskedLM.from_pretrained(self.model_name)
+            self.model = self.model.half()  # Use FP16 to reduce memory
             self.model = self.model.to(self.device)
             self.model.eval()
-            log_with_timestamp(f"  SPLADE++ model loaded")
+            log_with_timestamp(f"  SPLADE++ model loaded (FP16)")
 
     def _encode_text(self, text: str) -> Dict[str, float]:
         """Encode text to sparse vector (term -> weight)"""
@@ -1941,15 +1940,60 @@ class SPLADERetriever:
         self.doc_ids = [doc.get('asin', '') for doc in documents]
         self.all_metadata = all_metadata
 
-        # Build document vectors
+        # Batch processing for GPU efficiency
+        import torch.nn.functional as F
+        batch_size = 128  # Increased with FP16
         doc_vectors = []
-        for i, doc in enumerate(documents):
-            if (i + 1) % 10000 == 0:
-                log_with_timestamp(f"    Processed {i + 1}/{len(documents)}")
 
-            text = build_document_text(doc, all_metadata)
-            sparse_vec = self._encode_text(text)
-            doc_vectors.append(sparse_vec)
+        # Process documents in batches, building texts on-the-fly
+        n_batches = (len(documents) + batch_size - 1) // batch_size
+        for batch_idx in tqdm(range(n_batches), desc="  SPLADE Encoding"):
+            batch_start = batch_idx * batch_size
+            batch_end = min(batch_start + batch_size, len(documents))
+            batch_docs = documents[batch_start:batch_end]
+
+            # Build texts for this batch
+            batch_texts = [build_document_text(doc, all_metadata) for doc in batch_docs]
+
+            # Tokenize batch
+            inputs = self.tokenizer(
+                batch_texts,
+                return_tensors='pt',
+                truncation=True,
+                max_length=512,
+                padding=True
+            ).to(self.device)
+
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                logits = outputs.logits  # [batch, seq_len, vocab_size]
+
+                # SPLADE++: ReLU(log(1 + x)) + max pooling
+                weights = F.relu(logits)
+                weights = torch.log(1 + weights)
+                # Max pooling over sequence length dimension: [batch, vocab_size]
+                weights, _ = weights.max(dim=1)
+
+                # Convert each row in batch to sparse dict efficiently
+                # Only transfer non-zero terms from GPU to CPU (massive speedup)
+                threshold = 0.01
+                mask = weights > threshold
+                indices = mask.nonzero(as_tuple=False)  # [num_nonzero, 2] (batch_idx, vocab_idx)
+                nonzero_values = weights[mask]  # [num_nonzero]
+
+                # Group by batch index
+                batch_indices = indices[:, 0]  # batch idx for each nonzero term
+                vocab_indices = indices[:, 1]  # vocab idx for each nonzero term
+
+                # Split into per-document sparse vectors on CPU
+                for b in range(weights.shape[0]):
+                    doc_mask = batch_indices == b
+                    doc_vocab = vocab_indices[doc_mask].cpu().tolist()
+                    doc_vals = nonzero_values[doc_mask].cpu().tolist()
+                    doc_vectors.append(dict(zip(doc_vocab, doc_vals)))
+
+            if (batch_end) % 10000 == 0:
+                log_with_timestamp(f"  SPLADE Encoding: {batch_end}/{len(documents)}")
 
         self.doc_vectors = doc_vectors
         log_with_timestamp(f"  SPLADE++ index built with {len(self.doc_ids)} docs")

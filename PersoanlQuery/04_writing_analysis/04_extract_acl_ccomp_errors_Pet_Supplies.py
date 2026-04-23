@@ -835,42 +835,7 @@ def main():
         # 只保存有错误的用户
         users_with_errors = [r for r in successful if r["total_errors"] > 0]
 
-        summary_data = {
-            "timestamp": datetime.now().isoformat(),
-            "total_users": len(user_ids_to_process),
-            "processed_users": len(successful),
-            "incremental_success": incremental_success,
-            "users_with_errors": len(users_with_errors),
-            "failed_users": [r["user_id"] for r in failed],
-            "total_reviews": total_reviews,
-            "total_acl_errors": total_acl_errors,
-            "total_ccomp_errors": total_ccomp_errors,
-            "total_errors": total_errors,
-            "acl_error_type_distribution": dict(all_acl_error_types),
-            "ccomp_error_type_distribution": dict(all_ccomp_error_types),
-            "acl_region_type_distribution": dict(all_acl_region_types),
-            "ccomp_region_type_distribution": dict(all_ccomp_region_types),
-            "user_results": [
-                {
-                    "user_id": r["user_id"],
-                    "reviews_processed": r["reviews_processed"],
-                    "acl_error_count": r["acl_error_count"],
-                    "ccomp_error_count": r["ccomp_error_count"],
-                    "total_errors": r["total_errors"],
-                    "acl_error_types": r["acl_error_types"],
-                    "ccomp_error_types": r["ccomp_error_types"],
-                    "detailed_results": r.get("detailed_results", [])
-                }
-                for r in users_with_errors
-            ]
-        }
-
         # 保存详情结果（JSON Lines 格式，已在处理时流水写入）
-        # 保存统计摘要
-        summary_file = os.path.join(OUTPUT_DIR, "acl_ccomp_error_summary.json")
-        with open(summary_file, 'w', encoding='utf-8') as f:
-            json.dump(summary_data, f, ensure_ascii=False, indent=2)
-        log_with_timestamp(f"Summary saved to {summary_file}")
 
     if len(successful) == 0:
         log_with_timestamp("ERROR: No users were successfully processed!")

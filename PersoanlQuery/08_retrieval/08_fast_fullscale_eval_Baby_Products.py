@@ -2000,15 +2000,15 @@ def fit_within_family_ols_centered(
     if len(subdf) < 20:
         return None, None
 
-    # level 设为分类变量，L1 做 reference
-    subdf["level"] = pd.Categorical(subdf["level"], categories=[1, 2, 3], ordered=True)
+    # level 设为分类变量，L0 做 reference
+    subdf["level"] = pd.Categorical(subdf["level"], categories=[0, 1, 2, 3], ordered=True)
 
     # 中心化
     subdf["len_c"] = subdf[len_col] - subdf[len_col].mean()
     subdf["idf_c"] = subdf[idf_col] - subdf[idf_col].mean()
 
     model = smf.ols(
-        f"{metric_col} ~ C(level, Treatment(reference=1)) + len_c + idf_c",
+        f"{metric_col} ~ C(level, Treatment(reference=0)) + len_c + idf_c",
         data=subdf
     ).fit()
 
@@ -2016,43 +2016,68 @@ def fit_within_family_ols_centered(
     pvals = model.pvalues
     conf = model.conf_int()
 
-    key_l2 = "C(level, Treatment(reference=1))[T.2]"
-    key_l3 = "C(level, Treatment(reference=1))[T.3]"
+    key_l1 = "C(level, Treatment(reference=0))[T.1]"
+    key_l2 = "C(level, Treatment(reference=0))[T.2]"
+    key_l3 = "C(level, Treatment(reference=0))[T.3]"
 
+    beta_l1 = params.get(key_l1, float("nan"))
     beta_l2 = params.get(key_l2, float("nan"))
     beta_l3 = params.get(key_l3, float("nan"))
+    p_l1 = pvals.get(key_l1, float("nan"))
     p_l2 = pvals.get(key_l2, float("nan"))
     p_l3 = pvals.get(key_l3, float("nan"))
 
+    ci_l1 = conf.loc[key_l1].tolist() if key_l1 in conf.index else [float("nan"), float("nan")]
     ci_l2 = conf.loc[key_l2].tolist() if key_l2 in conf.index else [float("nan"), float("nan")]
     ci_l3 = conf.loc[key_l3].tolist() if key_l3 in conf.index else [float("nan"), float("nan")]
 
+    # L3 vs L1
+    l3_minus_l1 = beta_l3 - beta_l1
+    try:
+        test = model.t_test(f"{key_l3} - {key_l1} = 0")
+        p_l3_vs_l1 = float(test.pvalue)
+    except Exception:
+        p_l3_vs_l1 = float("nan")
+
+    # L3 vs L2
     l3_minus_l2 = beta_l3 - beta_l2
     try:
         test = model.t_test(f"{key_l3} - {key_l2} = 0")
         p_l3_vs_l2 = float(test.pvalue)
-        ci_l3_vs_l2 = test.conf_int().tolist()[0]
     except Exception:
         p_l3_vs_l2 = float("nan")
-        ci_l3_vs_l2 = [float("nan"), float("nan")]
+
+    # L2 vs L1
+    l2_minus_l1 = beta_l2 - beta_l1
+    try:
+        test = model.t_test(f"{key_l2} - {key_l1} = 0")
+        p_l2_vs_l1 = float(test.pvalue)
+    except Exception:
+        p_l2_vs_l1 = float("nan")
 
     result = {
         "n": len(subdf),
         "r2": model.rsquared,
-        "intercept_l1_at_mean_covariates": params.get("Intercept", float("nan")),
-        "p_intercept_l1": pvals.get("Intercept", float("nan")),
-        "delta_l2_vs_l1": beta_l2,
-        "p_l2_vs_l1": p_l2,
-        "ci_l2_vs_l1_low": ci_l2[0],
-        "ci_l2_vs_l1_high": ci_l2[1],
-        "delta_l3_vs_l1": beta_l3,
-        "p_l3_vs_l1": p_l3,
-        "ci_l3_vs_l1_low": ci_l3[0],
-        "ci_l3_vs_l1_high": ci_l3[1],
+        "intercept_l0_at_mean_covariates": params.get("Intercept", float("nan")),
+        "p_intercept_l0": pvals.get("Intercept", float("nan")),
+        "delta_l1_vs_l0": beta_l1,
+        "p_l1_vs_l0": p_l1,
+        "ci_l1_vs_l0_low": ci_l1[0],
+        "ci_l1_vs_l0_high": ci_l1[1],
+        "delta_l2_vs_l0": beta_l2,
+        "p_l2_vs_l0": p_l2,
+        "ci_l2_vs_l0_low": ci_l2[0],
+        "ci_l2_vs_l0_high": ci_l2[1],
+        "delta_l3_vs_l0": beta_l3,
+        "p_l3_vs_l0": p_l3,
+        "ci_l3_vs_l0_low": ci_l3[0],
+        "ci_l3_vs_l0_high": ci_l3[1],
+        "delta_l2_vs_l1": l2_minus_l1,
+        "p_l2_vs_l1": p_l2_vs_l1,
+        "delta_l3_vs_l1": l3_minus_l1,
+        "p_l3_vs_l1": p_l3_vs_l1,
         "delta_l3_vs_l2": l3_minus_l2,
         "p_l3_vs_l2": p_l3_vs_l2,
-        "ci_l3_vs_l2_low": ci_l3_vs_l2[0],
-        "ci_l3_vs_l2_high": ci_l3_vs_l2[1],
         "coef_len_c": params.get("len_c", float("nan")),
         "p_len_c": pvals.get("len_c", float("nan")),
         "coef_idf_c": params.get("idf_c", float("nan")),
@@ -2101,7 +2126,11 @@ def sign_with_threshold(x: float, threshold: float = 0.01) -> str:
 
 def add_direction_columns(results_df: pd.DataFrame, threshold: float = 0.01):
     out = results_df.copy()
+    out["dir_l1_vs_l0"] = out["delta_l1_vs_l0"].apply(lambda x: "+" if x > 0 else "-" if x < 0 else "0" if x == 0 else "NA")
+    out["dir_l2_vs_l0"] = out["delta_l2_vs_l0"].apply(lambda x: "+" if x > 0 else "-" if x < 0 else "0" if x == 0 else "NA")
+    out["dir_l3_vs_l0"] = out["delta_l3_vs_l0"].apply(lambda x: "+" if x > 0 else "-" if x < 0 else "0" if x == 0 else "NA")
     out["dir_l2_vs_l1"] = out["delta_l2_vs_l1"].apply(lambda x: "+" if x > 0 else "-" if x < 0 else "0" if x == 0 else "NA")
+    out["dir_l3_vs_l1"] = out["delta_l3_vs_l1"].apply(lambda x: "+" if x > 0 else "-" if x < 0 else "0" if x == 0 else "NA")
     out["dir_l3_vs_l2"] = out["delta_l3_vs_l2"].apply(lambda x: "+" if x > 0 else "-" if x < 0 else "0" if x == 0 else "NA")
     return out
 
@@ -2111,7 +2140,7 @@ def run_within_family_ols_analysis(all_results_by_category_and_type: Dict):
     log("\n" + "=" * 100)
     log("实验 4: Within-Family OLS (ACL/CCOMP 分别分析)")
     log("=" * 100)
-    log("模型: p10 ~ C(level) + len_c + idf_c (level=1 作为 reference, covariates 中心化)")
+    log("模型: p10 ~ C(level) + len_c + idf_c (level=0 作为 reference, covariates 中心化)")
     log("")
 
     # 重新组织 all_results_by_category_and_type 数据
@@ -2127,7 +2156,7 @@ def run_within_family_ols_analysis(all_results_by_category_and_type: Dict):
             retriever = r['retriever']
             for rec in r.get('all_query_records', []):
                 level = rec.get('acl', rec.get('ccomp', 0))
-                if level not in [1, 2, 3]:
+                if level not in [0, 1, 2, 3]:
                     continue
                 all_query_records.append({
                     'domain': CATEGORY_NAME,
@@ -2156,35 +2185,47 @@ def run_within_family_ols_analysis(all_results_by_category_and_type: Dict):
             continue
 
         log(f"\n--- {family} Within-Family OLS (Centered) ---")
-        log(f"{'Retriever':<12} {'N':<6} {'R2':<6} {'L2vsL1':<10} {'p':<8} {'L3vsL1':<10} {'p':<8} {'L3vsL2':<10} {'p':<8} {'dir_L2':<6} {'dir_L3':<6}")
-        log("-" * 100)
+        log(f"{'Retriever':<12} {'N':<6} {'R2':<6} {'L1vsL0':<10} {'p':<8} {'L2vsL0':<10} {'p':<8} {'L3vsL0':<10} {'p':<8} {'L2vsL1':<10} {'p':<8} {'L3vsL1':<10} {'p':<8} {'L3vsL2':<10} {'p':<8}")
+        log("-" * 150)
 
         for _, row in fam_df.iterrows():
             retriever = row['retriever']
             n = row['n']
             r2 = row['r2']
-            delta_l2 = row.get('delta_l2_vs_l1', float('nan'))
-            p_l2 = row.get('p_l2_vs_l1', float('nan'))
-            delta_l3 = row.get('delta_l3_vs_l1', float('nan'))
-            p_l3 = row.get('p_l3_vs_l1', float('nan'))
+
+            # L1vsL0
+            delta_l1 = row.get('delta_l1_vs_l0', float('nan'))
+            p_l1 = row.get('p_l1_vs_l0', float('nan'))
+            # L2vsL0
+            delta_l2 = row.get('delta_l2_vs_l0', float('nan'))
+            p_l2 = row.get('p_l2_vs_l0', float('nan'))
+            # L3vsL0
+            delta_l3 = row.get('delta_l3_vs_l0', float('nan'))
+            p_l3 = row.get('p_l3_vs_l0', float('nan'))
+            # L2vsL1
+            delta_l2_l1 = row.get('delta_l2_vs_l1', float('nan'))
+            p_l2_l1 = row.get('p_l2_vs_l1', float('nan'))
+            # L3vsL1
+            delta_l3_l1 = row.get('delta_l3_vs_l1', float('nan'))
+            p_l3_l1 = row.get('p_l3_vs_l1', float('nan'))
+            # L3vsL2
             delta_l3_l2 = row.get('delta_l3_vs_l2', float('nan'))
             p_l3_l2 = row.get('p_l3_vs_l2', float('nan'))
 
+            d1_str = f"{delta_l1:+.4f}" if not pd.isna(delta_l1) else "NaN"
+            p1_str = f"{p_l1:.3e}" if not pd.isna(p_l1) and p_l1 < 0.001 else f"{p_l1:.4f}" if not pd.isna(p_l1) else "NaN"
             d2_str = f"{delta_l2:+.4f}" if not pd.isna(delta_l2) else "NaN"
             p2_str = f"{p_l2:.3e}" if not pd.isna(p_l2) and p_l2 < 0.001 else f"{p_l2:.4f}" if not pd.isna(p_l2) else "NaN"
             d3_str = f"{delta_l3:+.4f}" if not pd.isna(delta_l3) else "NaN"
             p3_str = f"{p_l3:.3e}" if not pd.isna(p_l3) and p_l3 < 0.001 else f"{p_l3:.4f}" if not pd.isna(p_l3) else "NaN"
+            d21_str = f"{delta_l2_l1:+.4f}" if not pd.isna(delta_l2_l1) else "NaN"
+            p21_str = f"{p_l2_l1:.3e}" if not pd.isna(p_l2_l1) and p_l2_l1 < 0.001 else f"{p_l2_l1:.4f}" if not pd.isna(p_l2_l1) else "NaN"
+            d31_str = f"{delta_l3_l1:+.4f}" if not pd.isna(delta_l3_l1) else "NaN"
+            p31_str = f"{p_l3_l1:.3e}" if not pd.isna(p_l3_l1) and p_l3_l1 < 0.001 else f"{p_l3_l1:.4f}" if not pd.isna(p_l3_l1) else "NaN"
             d32_str = f"{delta_l3_l2:+.4f}" if not pd.isna(delta_l3_l2) else "NaN"
             p32_str = f"{p_l3_l2:.3e}" if not pd.isna(p_l3_l2) and p_l3_l2 < 0.001 else f"{p_l3_l2:.4f}" if not pd.isna(p_l3_l2) else "NaN"
 
-            sig_l2 = "*" if not pd.isna(p_l2) and p_l2 < 0.05 else ""
-            sig_l3 = "*" if not pd.isna(p_l3) and p_l3 < 0.05 else ""
-            sig_l3_l2 = "*" if not pd.isna(p_l3_l2) and p_l3_l2 < 0.05 else ""
-
-            dir_l2 = row.get('dir_l2_vs_l1', 'NA')
-            dir_l3 = row.get('dir_l3_vs_l2', 'NA')
-
-            log(f"{retriever:<12} {n:<6} {r2:<6.3f} {d2_str:<10}{sig_l2} {p2_str:<8} {d3_str:<10}{sig_l3} {p3_str:<8} {d32_str:<10}{sig_l3_l2} {p32_str:<8} {dir_l2:<6} {dir_l3:<6}")
+            log(f"{retriever:<12} {n:<6} {r2:<6.3f} {d1_str:<10} {p1_str:<8} {d2_str:<10} {p2_str:<8} {d3_str:<10} {p3_str:<8} {d21_str:<10} {p21_str:<8} {d31_str:<10} {p31_str:<8} {d32_str:<10} {p32_str:<8}")
 
     # 保存结果
     output_file = os.path.join(OUTPUT_DIR, "within_family_ols_results.csv")

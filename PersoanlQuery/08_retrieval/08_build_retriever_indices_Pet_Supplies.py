@@ -18,13 +18,13 @@ from datetime import datetime
 
 # 确保 HF_HOME 和 HF_HUB_CACHE 指向正确的缓存目录
 if "HF_HOME" not in os.environ:
-    os.environ["HF_HOME"] = "/root/hf_models"
+    os.environ["HF_HOME"] = "/workspace/hf_models"
 if "HF_HUB_CACHE" not in os.environ:
-    os.environ["HF_HUB_CACHE"] = "/root/hf_models"
+    os.environ["HF_HUB_CACHE"] = "/workspace/hf_models"
 
 # 完全离线模式 - 避免 HuggingFace 网络验证
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
+# os.environ["HF_HUB_OFFLINE"] = "1"
+# os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 # Add utils path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -448,6 +448,12 @@ def build_retriever(retriever_name: str, documents: List[Dict], doc_hash: str, c
         elif retriever_name == 'gritlm':
             retriever = retrievers.GritLMRetriever()
             log_with_timestamp(f"[DEBUG] GritLMRetriever instance created")
+        elif retriever_name == 'ance':
+            retriever = retrievers.ANCERetriever()
+            log_with_timestamp(f"[DEBUG] ANCERetriever instance created")
+        elif retriever_name == 'splade':
+            retriever = retrievers.SPLADERetriever()
+            log_with_timestamp(f"[DEBUG] SPLADERetriever instance created")
         elif retriever_name == 'colbert':
             retriever = retrievers.ColBERTRetriever()
             log_with_timestamp(f"[DEBUG] ColBERTRetriever instance created")
@@ -527,7 +533,7 @@ def main():
     
     # Define retrievers to build (按参数量从小到大排序: minilm < star < e5 < bge < ance < gritlm)
     DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance', 'gritlm']
-    COLBERT_RETRIEVERS = ['colbert']  # 使用 token-level late interaction
+    COLBERT_RETRIEVERS = []  # ['colbert']  # 使用 token-level late interaction (暂时禁用)
     SPARSE_RETRIEVERS = ['bm25', 'splade']
     # TODO: ColBERT 暂时禁用，token-level embeddings 数据量过大（300k docs × 200 tokens × 768 dim ≈ 176GB+）
     ALL_RETRIEVERS = DENSE_RETRIEVERS + COLBERT_RETRIEVERS + SPARSE_RETRIEVERS
