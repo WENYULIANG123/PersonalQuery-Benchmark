@@ -537,9 +537,9 @@ def evaluate_noisy_queries(retriever_name: str, queries: List[Dict], k_values: L
         'metrics': overall_metrics
     }
 
-def print_results_table(all_results: List[Dict], title: str):
+def print_results_table(all_results: List[Dict], title: str, category: str = ""):
     log(f"\n{'='*100}")
-    log(title)
+    log(f"{title} {f'[{category}]' if category else ''}")
     log("=" * 100)
 
     metrics_to_show = ['P@1', 'P@3', 'P@5', 'P@10', 'N@10', 'MR@10', 'H@10']
@@ -607,13 +607,13 @@ def main():
         except Exception as e:
             log(f"  错误 {retriever_name}: {e}")
 
-    print_results_table(correct_results, "CORRECT 查询结果（有 noisy 配对）")
-    print_results_table(noisy_results, "NOISY 查询结果")
+    print_results_table(correct_results, "CORRECT 查询结果（有 noisy 配对）", CATEGORY_NAME)
+    print_results_table(noisy_results, "NOISY 查询结果", CATEGORY_NAME)
 
     # 计算 CORRECT vs NOISY 差异分析
-    def compute_difference_table(correct_results: List[Dict], noisy_results: List[Dict]):
+    def compute_difference_table(correct_results: List[Dict], noisy_results: List[Dict], category: str = ""):
         log(f"\n{'='*100}")
-        log("CORRECT vs NOISY 差异分析（NOISY - CORRECT）")
+        log(f"CORRECT vs NOISY 差异分析（NOISY - CORRECT） {f'[{category}]' if category else ''}")
         log("=" * 100)
 
         metrics_to_show = ['P@1', 'P@3', 'P@5', 'P@10', 'N@10', 'MR@10', 'H@10']
@@ -644,7 +644,7 @@ def main():
 
         log("-" * 100)
 
-    compute_difference_table(correct_results, noisy_results)
+    compute_difference_table(correct_results, noisy_results, CATEGORY_NAME)
 
     output_file = os.path.join(OUTPUT_DIR, "correct_vs_noisy_results.json")
     results_to_save = {

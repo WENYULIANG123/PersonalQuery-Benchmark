@@ -534,12 +534,21 @@ def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str 
     return cache
 
 def clear_cache() -> int:
-    """删除旧的查询缓存文件"""
+    """删除旧的查询缓存文件（保留 noisy 查询缓存）"""
     if not os.path.exists(CACHE_DIR):
         return 0
 
+    # noisy 查询缓存目录，不删除
+    NOISY_DIRS = {'acl_noisy_query', 'ccomp_noisy_query', 'stage6_noisy_query', 'stage7_noisy_query', 'persona_noisy_query'}
+
     deleted_count = 0
     for root, _, files in os.walk(CACHE_DIR):
+        # 获取相对于 CACHE_DIR 的路径
+        rel_path = os.path.relpath(root, CACHE_DIR)
+        # 如果在 noisy 目录下，跳过
+        if rel_path in NOISY_DIRS or any(rel_path.startswith(f"{n}/") for n in NOISY_DIRS):
+            continue
+
         for name in files:
             if name.endswith('.pkl') or name.endswith('.json'):
                 filepath = os.path.join(root, name)
@@ -550,7 +559,7 @@ def clear_cache() -> int:
                     log_with_timestamp(f"  ⚠️  删除失败: {filepath} - {e}")
 
     if deleted_count > 0:
-        log_with_timestamp(f"✓ 已清理旧缓存: {deleted_count} 个文件")
+        log_with_timestamp(f"✓ 已清理旧缓存: {deleted_count} 个文件（保留 noisy 查询缓存）")
     return deleted_count
 
 def initialize_cache_dir():
