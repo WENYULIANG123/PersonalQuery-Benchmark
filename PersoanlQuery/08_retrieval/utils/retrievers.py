@@ -2199,10 +2199,9 @@ class SPLADERetriever:
             log_with_timestamp(f"  Loading SPLADE++ model: {self.model_name}")
             from transformers import AutoModelForMaskedLM, AutoTokenizer
             import os
-            hf_home = os.environ.get("HF_HOME", "/home/wlia0047/ar57_scratch/wenyu/hf_models")
-            model_path = os.path.join(hf_home, self.model_name)
-            self.tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
-            self.model = AutoModelForMaskedLM.from_pretrained(model_path, local_files_only=True)
+            # Use model_name directly so transformers handles cache automatically
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            self.model = AutoModelForMaskedLM.from_pretrained(self.model_name)
             self.model = self.model.half()  # Use FP16 to reduce memory
             self.model = self.model.to(self.device)
             self.model.eval()

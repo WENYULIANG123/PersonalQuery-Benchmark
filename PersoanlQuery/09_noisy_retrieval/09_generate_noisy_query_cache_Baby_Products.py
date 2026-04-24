@@ -12,7 +12,7 @@
 """
 
 import os
-os.environ["HF_HOME"] = "/root/hf_models"
+os.environ["HF_HOME"] = "/home/wlia0047/ar57_scratch/wenyu/hf_home"
 
 import sys
 import json
@@ -36,7 +36,8 @@ sys.path.insert(0, str(personquery_root))
 
 from utils.retrievers import (
     E5Retriever, BGERetriever,
-    STARRetriever, MiniLMRetriever, GritLMRetriever, BM25
+    STARRetriever, MiniLMRetriever, GritLMRetriever, BM25,
+    ANCERetriever, SPLADERetriever
 )
 from config import get_category_config, get_global_paths
 
@@ -58,6 +59,8 @@ AVAILABLE_RETRIEVERS = {
     'E5': E5Retriever,
     'MiniLM': MiniLMRetriever,
     'STAR': STARRetriever,
+    'ANCE': ANCERetriever,
+    'SPLADE': SPLADERetriever,
     'BM25': None,
 }
 
@@ -192,6 +195,10 @@ def _encode_and_save_cache(
         # BM25 使用不同的处理方式
         return _encode_and_save_bm25_cache(queries, by_user, mode)
 
+    # SPLADE 使用不同的缓存格式
+    if retriever_name == 'SPLADE':
+        return _encode_and_save_splade_cache(queries, by_user, mode)
+
     retriever_class = AVAILABLE_RETRIEVERS[retriever_name]
     log_with_timestamp(f"  初始化检索器 {retriever_name}...")
     with _StdoutToStderr():
@@ -227,8 +234,7 @@ def _encode_and_save_cache(
             except Exception as e:
                 log_with_timestamp(f"      ❌ 编码失败 [{retriever_name}] 查询: {text[:40]}... 错误: {str(e)[:100]}")
                 failed_count += 1
-                import sys
-                sys.exit(1)
+                continue  # 不退出，继续处理其他查询
 
         if user_cache:
             cache[user_id] = user_cache
@@ -242,6 +248,55 @@ def _encode_and_save_cache(
 
     if failed_count > 0:
         log_with_timestamp(f"      ⚠️  共有 {failed_count} 个查询编码失败")
+
+    return len(cache)
+
+
+def _encode_and_save_splade_cache(
+    queries: List[Dict],
+    by_user: Dict[str, List[Dict]],
+    mode: str,
+) -> int:
+    """为 SPLADE 编码并保存查询缓存（稀疏向量格式）"""
+    from utils.retrievers import SPLADERetriever
+
+    log_with_timestamp(f"  初始化检索器 SPLADE...")
+    with _StdoutToStderr():
+        retriever = SPLADERetriever()
+    log_with_timestamp(f"  ✓ SPLADE 检索器初始化完成，模型已加载")
+
+    # SPLADE 缓存格式：{user_id: {query_text: sparse_vec_dict}}
+    cache = {}
+    failed_count = 0
+
+    for user_id, user_queries in by_user.items():
+        user_cache = {}
+        for q in user_queries:
+            try:
+                text = q.get('query', '')
+                if not text:
+                    continue
+                # SPLADE 返回 Dict[str, float] (sparse vector)
+                sparse_vec = retriever.encode_query(text)
+                user_cache[text] = sparse_vec
+            except Exception as e:
+                log_with_timestamp(f"      ❌ SPLADE 编码失败: {text[:40]}... 错误: {str(e)[:100]}")
+                failed_count += 1
+                continue
+
+        if user_cache:
+            cache[user_id] = user_cache
+
+    if cache:
+        # SPLADE 使用特殊路径格式，与评估代码兼容
+        cache_file = os.path.join(CACHE_DIR, f"{mode}_query", f"splade__{mode}_cache.pkl")
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+        with open(cache_file, 'wb') as f:
+            pickle.dump(cache, f)
+        log_with_timestamp(f"  ✓ SPLADE 缓存已保存: {cache_file}")
+
+    if failed_count > 0:
+        log_with_timestamp(f"      ⚠️  SPLADE 共有 {failed_count} 个查询编码失败")
 
     return len(cache)
 
