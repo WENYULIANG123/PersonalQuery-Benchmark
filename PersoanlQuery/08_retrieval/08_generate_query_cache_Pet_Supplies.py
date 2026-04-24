@@ -18,7 +18,9 @@
 """
 
 import os
-os.environ["HF_HOME"] = "/workspace/hf_models"
+os.environ["HF_HOME"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import sys
 import json
@@ -527,6 +529,61 @@ def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str 
     failed_count = 0
     is_sparse = retriever_name in SPARSE_RETRIEVERS
 
+    # 使用批处理加速（所有支持 encode_queries 的检索器）
+    if hasattr(retriever_instance, 'encode_queries'):
+        try:
+            query_texts = [q.get('query', '') for q in queries]
+            query_texts = [qt for qt in query_texts if qt and qt not in cache]
+
+            if not query_texts:
+                return cache
+
+            log_with_timestamp(f"      使用批处理编码 {len(query_texts)} 条查询...")
+            batch_size = 1024
+            n_batches = (len(query_texts) + batch_size - 1) // batch_size
+
+            for batch_idx in range(n_batches):
+                batch_start = batch_idx * batch_size
+                batch_end = min(batch_start + batch_size, len(query_texts))
+                batch_texts = query_texts[batch_start:batch_end]
+
+                try:
+                    batch_results = retriever_instance.encode_queries(batch_texts, batch_size=batch_size)
+
+                    for query_text, encoding in zip(batch_texts, batch_results):
+                        if is_sparse:
+                            cache[query_text] = encoding
+                        else:
+                            if not isinstance(encoding, np.ndarray):
+                                if isinstance(encoding, torch.Tensor):
+                                    encoding = encoding.cpu().numpy()
+                                else:
+                                    encoding = np.array(encoding)
+                            cache[query_text] = encoding
+
+                    progress = batch_end
+                    progress_pct = (progress / len(queries)) * 100
+                    if progress % 5 == 0 or progress == len(queries):
+                        log_with_timestamp(f"      编码进度 [{retriever_name}|{user_id}|{mode}]: {progress}/{len(queries)} ({progress_pct:.1f}%)")
+
+                except Exception as e:
+                    log_with_timestamp(f"      ❌ 批处理编码失败: {e}")
+                    # Fall back to individual encoding
+                    for query_text in batch_texts:
+                        try:
+                            encoding = retriever_instance.encode_query(query_text)
+                            cache[query_text] = encoding
+                        except Exception as e2:
+                            log_with_timestamp(f"      ❌ 编码失败 [{retriever_name}|{user_id}|{mode}] 查询: {query_text[:40]}... 错误: {e2}")
+                            import sys
+                            sys.exit(1)
+
+            return cache
+
+        except Exception as e:
+            log_with_timestamp(f"      ⚠️  批处理不可用，回退到逐条编码: {e}")
+
+    # 默认逐条编码（非 SPLADE 或批处理不可用）
     for i, q in enumerate(queries):
         query_text = q.get('query', '')
         if not query_text:
@@ -823,18 +880,31 @@ def generate_cache_from_persona_source(retriever_names: Optional[List[str]] = No
         log_with_timestamp(f"【{stats['retrievers_processed'] + 1}/{len(retriever_names)}】正在处理检索器: {retriever_name}")
         log_with_timestamp(f"{'='*80}")
 
-        for query_type, queries, by_user, mode in query_types:
-            if queries:
-                total = _encode_and_save_cache(
-                    retriever_name,
-                    queries,
-                    by_user,
-                    mode,
-                )
-                stats['total_cached'] += total
-                log_with_timestamp(f"  ✓ {query_type} {mode} 缓存: {total} 条")
-            else:
-                log_with_timestamp(f"  (无 {query_type} {mode} 查询，跳过)")
+        # BM25 特殊处理（使用 search 而不是 encode_query）
+        if retriever_name == 'BM25':
+            for query_type, queries, by_user, mode in query_types:
+                if queries:
+                    log_with_timestamp(f"  开始生成 BM25 查询缓存 ({mode})...")
+                    bm25 = load_bm25_retriever()
+                    cache = generate_bm25_query_cache_for_mode(queries, mode, top_k=100)
+                    save_bm25_query_cache(cache, mode)
+                    stats['total_cached'] += len(cache)
+                    log_with_timestamp(f"  ✓ {query_type} {mode} BM25 缓存: {len(cache)} 条")
+                else:
+                    log_with_timestamp(f"  (无 {query_type} {mode} 查询，跳过)")
+        else:
+            for query_type, queries, by_user, mode in query_types:
+                if queries:
+                    total = _encode_and_save_cache(
+                        retriever_name,
+                        queries,
+                        by_user,
+                        mode,
+                    )
+                    stats['total_cached'] += total
+                    log_with_timestamp(f"  ✓ {query_type} {mode} 缓存: {total} 条")
+                else:
+                    log_with_timestamp(f"  (无 {query_type} {mode} 查询，跳过)")
 
         log_with_timestamp(f"✓ 检索器 {retriever_name} 处理完成\n")
         stats['retrievers_processed'] += 1
@@ -1013,14 +1083,12 @@ def generate_cache_for_all_retrievers(
 
 def main():
     # ==================== 硬编码配置 ====================
-    # 检索器列表：核心5个 + GritLM + ANCE + SPLADE
-    RETRIEVER_NAMES = ['GRITLM', 'BGE', 'E5', 'MiniLM', 'STAR', 'ANCE', 'SPLADE']  # GRITLM 优先
+    # 检索器列表：核心5个 + ANCE + SPLADE + BM25
+    RETRIEVER_NAMES = ['BGE', 'E5', 'MiniLM', 'STAR', 'ANCE', 'SPLADE', 'BM25']
     # 是否清理旧缓存
     CLEAR_CACHE_BEFORE = True
     # 数据源：persona_generated_queries.json
     PERSONA_SOURCE = True
-    # 是否生成 BM25 查询缓存
-    GENERATE_BM25_CACHE = True
     # =================================================
 
     # 打印环境变量
@@ -1035,17 +1103,12 @@ def main():
             clear_cache()
         initialize_cache_dir()
 
-        # 生成密集检索器查询缓存
+        # 生成密集检索器查询缓存（包括 BM25）
         stats = generate_cache_from_persona_source(
             retriever_names=RETRIEVER_NAMES,
             clear_cache_before=False,  # 目录已初始化
         )
 
-        # 生成 BM25 查询缓存
-        if GENERATE_BM25_CACHE:
-            log_with_timestamp("")
-            bm25_stats = generate_bm25_cache_from_persona_source()
-            log_with_timestamp(f"✓ BM25 查询缓存生成完成: {bm25_stats['total_cached']} 条")
         return
 
     # 默认旧逻辑（保留但不使用）

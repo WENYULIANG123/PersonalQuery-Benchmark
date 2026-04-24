@@ -38,7 +38,7 @@ CATEGORIES = [
     "Baby_Products"
 ]
 
-BASE_DIR = "/workspace/result/personal_query/05_syntactic_analysis"
+BASE_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis"
 
 # ========================================
 # 日志
@@ -65,6 +65,11 @@ def main():
         acl_file = f"{BASE_DIR}/{category}/acl_user_profiles.json"
         ccomp_file = f"{BASE_DIR}/{category}/ccomp_user_profiles.json"
         attr_file = f"{BASE_DIR}/{category}/attr_density_user_profiles.json"
+
+        # 跳过不存在的类别
+        if not os.path.exists(acl_file):
+            log(f"⚠️  跳过 {category}：数据文件不存在")
+            continue
 
         # 加载 ACL 数据
         log(f"加载 ACL 用户画像: {acl_file}")

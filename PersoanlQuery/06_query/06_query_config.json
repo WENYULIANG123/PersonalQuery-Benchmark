@@ -1,10 +1,10 @@
 {
   "_comment": "06_query 路径配置文件",
   "base_paths": {
-    "root": "/root",
-    "result": "/root/result/personal_query",
-    "test_result": "/workspace/result/personal_query",
-    "workspace": "/workspace/PersonalQuery"
+    "root": "/home/wlia0047/ar57/wenyu",
+    "result": "/home/wlia0047/ar57/wenyu/result/personal_query",
+    "test_result": "/home/wlia0047/ar57/wenyu/result/personal_query",
+    "workspace": "/home/wlia0047/ar57/wenyu"
   },
   "categories": {
     "Arts_Crafts_and_Sewing": {

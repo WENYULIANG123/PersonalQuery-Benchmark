@@ -20,7 +20,7 @@ def resolve_path(path_template: str) -> str:
     """解析路径模板，将 {key} 替换为实际值"""
     config = get_config()
     result = path_template
-    for key in ['test_result', 'result', 'workspace', 'root', 'amazon_reviews']:
+    for key in ['test_result', 'result', 'workspace', 'root', 'amazon_reviews', 'scratch_result']:
         placeholder = f'{{{key}}}'
         if placeholder in result:
             result = result.replace(placeholder, config['base_paths'][key])

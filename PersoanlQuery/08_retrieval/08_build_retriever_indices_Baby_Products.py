@@ -22,6 +22,8 @@ if "HF_HOME" not in os.environ:
 if "HF_HUB_CACHE" not in os.environ:
     os.environ["HF_HUB_CACHE"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
 
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 # Add utils path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -82,7 +84,7 @@ def get_cache_paths(retriever_name: str, doc_hash: str, cache_dir: str) -> Dict[
     DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance']
     # ColBERT 使用 token-level embeddings，需要特殊处理，不使用简单的 numpy 数组
     COLBERT_RETRIEVERS = ['colbert']
-    SPARSE_RETRIEVERS = ['bm25']
+    SPARSE_RETRIEVERS = ['bm25', 'splade']
 
     if retriever_name in DENSE_RETRIEVERS:
         base_path = os.path.join(cache_dir, f"{retriever_name}_{doc_hash}")
@@ -291,6 +293,7 @@ def save_retriever_to_cache(retriever_name: str, doc_hash: str, retriever: objec
     """Save retriever to disk cache. Returns True if successful."""
     DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance']
     COLBERT_RETRIEVERS = ['colbert']
+    SPARSE_RETRIEVERS = ['bm25', 'splade']
 
     log_with_timestamp(f"[DEBUG] save_retriever_to_cache called for {retriever_name}")
 
@@ -402,18 +405,44 @@ def save_retriever_to_cache(retriever_name: str, doc_hash: str, retriever: objec
             log_with_timestamp(f"[MEMORY] GPU memory released for {retriever_name}")
 
             return True
-        else:
+        elif retriever_name in SPARSE_RETRIEVERS:
+            # BM25 和 SPLADE 都使用 pickle 保存
             log_with_timestamp(f"[CACHE_SAVE] Saving {retriever_name} (sparse retriever)...")
             paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
             log_with_timestamp(f"[DEBUG] Saving to {paths['pickle']}...")
-            
+
+            # SPLADE 需要在 pickle 前删除模型（FP16 CUDA tensor 无法 pickle）
+            # 但保留 doc_vectors（已转换为 CPU float dict）
+            if retriever_name == 'splade' and hasattr(retriever, 'model') and retriever.model is not None:
+                log_with_timestamp(f"[DEBUG] Clearing SPLADE model/tokenizer before pickle...")
+                if hasattr(retriever, 'model') and retriever.model is not None:
+                    del retriever.model
+                    retriever.model = None
+                if hasattr(retriever, 'tokenizer') and retriever.tokenizer is not None:
+                    del retriever.tokenizer
+                    retriever.tokenizer = None
+                log_with_timestamp(f"[DEBUG] SPLADE model/tokenizer cleared, doc_vectors preserved")
+
             with open(paths['pickle'], 'wb') as f:
                 pickle.dump(retriever, f)
-            
+
             log_with_timestamp(f"[DEBUG] File saved, getting size...")
             size_mb = os.path.getsize(paths['pickle']) / (1024 * 1024)
             log_with_timestamp(f"  → {paths['pickle']} ({size_mb:.1f}MB)")
             log_with_timestamp(f"[DEBUG] Sparse retriever save complete")
+            return True
+        else:
+            log_with_timestamp(f"[CACHE_SAVE] Saving {retriever_name}...")
+            paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
+            log_with_timestamp(f"[DEBUG] Saving to {paths['pickle']}...")
+
+            with open(paths['pickle'], 'wb') as f:
+                pickle.dump(retriever, f)
+
+            log_with_timestamp(f"[DEBUG] File saved, getting size...")
+            size_mb = os.path.getsize(paths['pickle']) / (1024 * 1024)
+            log_with_timestamp(f"  → {paths['pickle']} ({size_mb:.1f}MB)")
+            log_with_timestamp(f"[DEBUG] Retriever save complete")
             return True
     except Exception as e:
         log_with_timestamp(f"[ERROR] Error saving {retriever_name}: {type(e).__name__}: {e}")
@@ -451,6 +480,9 @@ def build_retriever(retriever_name: str, documents: List[Dict], doc_hash: str, c
         elif retriever_name == 'colbert':
             retriever = retrievers.ColBERTRetriever()
             log_with_timestamp(f"[DEBUG] ColBERTRetriever instance created")
+        elif retriever_name == 'splade':
+            retriever = retrievers.SPLADERetriever()
+            log_with_timestamp(f"[DEBUG] SPLADERetriever instance created")
         else:
             return False, f"Unknown retriever type: {retriever_name}"
         
@@ -528,7 +560,7 @@ def main():
     # Define retrievers to build (按参数量从小到大排序: minilm < star < e5 < bge < gritlm < ance)
     DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance']
     COLBERT_RETRIEVERS = ['colbert']  # 使用 token-level late interaction
-    SPARSE_RETRIEVERS = ['bm25']
+    SPARSE_RETRIEVERS = ['bm25', 'splade']
     # TODO: ColBERT 暂时禁用，token-level embeddings 数据量过大（300k docs × 200 tokens × 768 dim ≈ 176GB+）
     # ALL_RETRIEVERS = DENSE_RETRIEVERS + COLBERT_RETRIEVERS + SPARSE_RETRIEVERS
     ALL_RETRIEVERS = DENSE_RETRIEVERS + SPARSE_RETRIEVERS

@@ -18,7 +18,7 @@ import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery')
+sys.path.insert(0, '/home/wlia0047/ar57/wenyu/PersoanlQuery')
 
 # ========================================
 # 加载配置
@@ -29,6 +29,9 @@ CATEGORY = "Pet_Supplies"
 _cat_config = get_category_config(CATEGORY)
 
 LEVEL_FILE = _cat_config['level_file']
+ACL_USER_PROFILES_FILE = _cat_config['acl_user_profiles_file']
+CCOMP_USER_PROFILES_FILE = _cat_config['ccomp_user_profiles_file']
+ATTR_DENSITY_PROFILES_FILE = _cat_config['attr_density_profiles_file']
 ATTR_VALUES_FILE = _cat_config['attr_values_file']
 OUTPUT_FILE = _cat_config['output_file']
 
@@ -486,6 +489,30 @@ def main():
     user_level_map = {u['user_id']: {'acl_level': u['acl_level'], 'ccomp_level': u['ccomp_level']} for u in level_data}
     log(f"加载了 {len(user_level_map)} 个用户的等级")
 
+    # 加载 ACL 用户画像
+    log(f"加载ACL用户画像 from {ACL_USER_PROFILES_FILE}...")
+    with open(ACL_USER_PROFILES_FILE, 'r') as f:
+        acl_user_profiles = json.load(f)
+    log(f"加载了 {len(acl_user_profiles)} 个ACL用户画像")
+
+    # 加载 CCOMP 用户画像
+    log(f"加载CCOMP用户画像 from {CCOMP_USER_PROFILES_FILE}...")
+    with open(CCOMP_USER_PROFILES_FILE, 'r') as f:
+        ccomp_user_profiles = json.load(f)
+    log(f"加载了 {len(ccomp_user_profiles)} 个CCOMP用户画像")
+
+    # 加载 attr_density 用户画像
+    log(f"加载attr_density用户画像 from {ATTR_DENSITY_PROFILES_FILE}...")
+    with open(ATTR_DENSITY_PROFILES_FILE, 'r') as f:
+        attr_density_profiles = json.load(f)
+    user_wpa_map = {}
+    for p in attr_density_profiles:
+        uid = p.get('user_id')
+        wpa = p.get('words_per_attribute')
+        if uid and wpa is not None:
+            user_wpa_map[uid] = float(wpa)
+    log(f"加载了 {len(user_wpa_map)} 个attr_density用户画像")
+
     # 加载属性值文件
     log(f"加载属性值 from {ATTR_VALUES_FILE}...")
     with open(ATTR_VALUES_FILE, 'r') as f:
@@ -500,9 +527,13 @@ def main():
                 user_prod_map[uid].append(p)
     log(f"加载了 {len(user_prod_map)} 个用户的属性产品")
 
-    # 构建用户数据（仅使用 level 和 product 数据）
-    all_user_ids = set(user_level_map.keys()) & set(user_prod_map.keys())
-    log(f"同时存在于level和attr_values的用户数: {len(all_user_ids)}")
+    # 构建用户画像 map
+    acl_profile_map = {p['user_id']: p for p in acl_user_profiles}
+    ccomp_profile_map = {p['user_id']: p for p in ccomp_user_profiles}
+
+    # 构建用户数据
+    all_user_ids = set(user_level_map.keys()) & set(acl_profile_map.keys()) & set(ccomp_profile_map.keys()) & set(user_wpa_map.keys())
+    log(f"同时存在于level、ACL、CCOMP和attr_density的用户数: {len(all_user_ids)}")
 
     all_user_data = []
     for uid in all_user_ids:

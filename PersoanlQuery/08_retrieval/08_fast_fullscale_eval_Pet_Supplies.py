@@ -865,90 +865,80 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_gr
     # 收集所有 query 原始数据用于 OLS 回归
     all_query_records = []
 
+    # 第一步：收集所有用户的查询信息
+    log(f"  收集所有查询信息...")
+    all_query_data = []  # [(user_id, query_embedding, relevant_asin, word_count, group_ratio, q_group, q_idf)]
+
     for user_idx, user_id in enumerate(matched_users):
         queries = user_queries[user_id]
         cached_queries = query_cache[user_id]
-        group = user_to_group.get(user_id, 0)
-
-        query_embeddings = []
-        query_asins = []
-        query_texts = []
-        query_word_counts = []
-        query_group_ratios = []
-        query_idf_values = []
-        query_groups = []  # 每条查询自己的group值
 
         for q in queries:
             query_text = q['query']
             relevant_asin = q['asin']
             word_count = q.get('word_count', 0)
             group_ratio = q.get(f'{GROUP_FIELD}_ratio', 0.0)
-            q_group = q.get(GROUP_FIELD, 0)  # 每条查询自己的group值
+            q_group = q.get(GROUP_FIELD, 0)
             if query_text in cached_queries:
-                query_embeddings.append(cached_queries[query_text])
-                query_asins.append(relevant_asin)
-                query_texts.append(query_text)
-                query_word_counts.append(word_count)
-                query_group_ratios.append(group_ratio)
-                query_groups.append(q_group)
-                # 计算 IDF
                 q_idf = compute_query_idf(query_text, word_idf) if word_idf else 0.0
-                query_idf_values.append(q_idf)
+                all_query_data.append((user_id, cached_queries[query_text], relevant_asin, word_count, group_ratio, q_group, q_idf))
 
-        if not query_embeddings:
-            continue
+    log(f"  总查询数: {len(all_query_data)}")
 
-        results = searcher.search_batch(query_embeddings, top_k=max(k_values))
+    # 第二步：一次性批量搜索所有查询
+    log(f"  批量搜索所有查询...")
+    if all_query_data:
+        all_embeddings = [q[1] for q in all_query_data]
+        results = searcher.search_batch(all_embeddings, top_k=max(k_values))
 
-        for i, (retrieved, relevant_asin) in enumerate(zip(results, query_asins)):
-            retrieved_asins = [r[0] for r in retrieved]
-            metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
-            group = query_groups[i]  # 使用该查询自己的group值
-            all_metrics.append(metrics)
-            group_groups[group].append(metrics)
+    # 第三步：遍历搜索结果，进行分组统计
+    log(f"  处理结果并分组统计...")
+    for i, (result, (user_id, _, relevant_asin, word_count, group_ratio, q_group, q_idf)) in enumerate(zip(results, all_query_data)):
+        retrieved_asins = [r[0] for r in result]
+        metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
+        all_metrics.append(metrics)
+        group_groups[q_group].append(metrics)
 
-            # 记录每条 query 的原始数据（用于 OLS 回归和 Paired Difference 分析）
-            all_query_records.append({
-                'user_id': user_id,
-                'asin': relevant_asin,
-                f'{GROUP_FIELD}': group,
-                'mean_idf': query_idf_values[i],
-                'query_length': query_word_counts[i],
-                f'{GROUP_FIELD}_ratio': query_group_ratios[i],
-                'p_at1': float(metrics.get('P@1', 0.0)),
-                'p_at3': float(metrics.get('P@3', 0.0)),
-                'p_at5': float(metrics.get('P@5', 0.0)),
-                'p_at10': float(metrics.get('P@10', 0.0)),
-                'n_at10': float(metrics.get('N@10', 0.0)),
-                'mrr_at10': float(metrics.get('MR@10', 0.0)),
-                'hit_at10': float(metrics.get('H@10', 0.0)),
-            })
+        # 记录每条 query 的原始数据
+        all_query_records.append({
+            'user_id': user_id,
+            'asin': relevant_asin,
+            f'{GROUP_FIELD}': q_group,
+            'mean_idf': q_idf,
+            'query_length': word_count,
+            f'{GROUP_FIELD}_ratio': group_ratio,
+            'p_at1': float(metrics.get('P@1', 0.0)),
+            'p_at3': float(metrics.get('P@3', 0.0)),
+            'p_at5': float(metrics.get('P@5', 0.0)),
+            'p_at10': float(metrics.get('P@10', 0.0)),
+            'n_at10': float(metrics.get('N@10', 0.0)),
+            'mrr_at10': float(metrics.get('MR@10', 0.0)),
+            'hit_at10': float(metrics.get('H@10', 0.0)),
+        })
 
-            # word_count 分组
-            wc = query_word_counts[i]
-            for (low, high), label in zip(word_bins, word_bin_labels):
-                if low <= wc < high:
-                    word_count_groups[label].append(metrics)
-                    break
+        # word_count 分组
+        for (low, high), label in zip(word_bins, word_bin_labels):
+            if low <= word_count < high:
+                word_count_groups[label].append(metrics)
+                break
 
-            # group_ratio (POS proxy) 分组
-            cr = query_group_ratios[i]
-            for (low, high), label in zip(ratio_bins, ratio_bin_labels):
-                if low <= cr < high:
-                    group_ratio_groups[label].append(metrics)
-                    break
+        # group_ratio 分组
+        for (low, high), label in zip(ratio_bins, ratio_bin_labels):
+            if low <= group_ratio < high:
+                group_ratio_groups[label].append(metrics)
+                break
 
-            # IDF 分组
-            q_idf = query_idf_values[i]
-            for (low, high), label in zip(IDF_BINS, IDF_BIN_LABELS):
-                if low <= q_idf < high:
-                    idf_bin_groups[label].append(metrics)
-                    idf_group_cross[(label, group)].append(metrics)
-                    break
+        # IDF 分组
+        for (low, high), label in zip(IDF_BINS, IDF_BIN_LABELS):
+            if low <= q_idf < high:
+                idf_bin_groups[label].append(metrics)
+                idf_group_cross[(label, q_group)].append(metrics)
+                break
 
-        if (user_idx + 1) % 100 == 0:
-            elapsed = time.time() - eval_start
-            log(f"    进度: {user_idx+1}/{len(matched_users)} ({100*(user_idx+1)/len(matched_users):.1f}%)")
+        if (i + 1) % 500 == 0:
+            log(f"    进度: {i+1}/{len(all_query_data)} ({100*(i+1)/len(all_query_data):.1f}%)")
+
+    log(f"    进度: {len(all_query_data)}/{len(all_query_data)} (100.0%)")
 
     eval_time = time.time() - eval_start
     overall_metrics = compute_average_metrics(all_metrics, k_values)
@@ -1257,8 +1247,8 @@ def load_splade_query_cache(query_type: str = 'correct', query_category: str = '
 def evaluate_splade_retriever(user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = 'correct', query_category: str = 'acl') -> Dict:
     """评估 SPLADE 检索器
 
-    SPLADE 查询缓存格式: {user_id: {query_text: {doc_idx: score}}}
-    返回的是稀疏分数字典，需要转换为排序后的检索结果
+    由于 SPLADE 的 doc_vectors 没有被 pickle 保存（会导致文件过大），
+    我们直接调用 search() 方法进行检索，而不是依赖缓存。
     """
     global GROUP_FIELD, UNIQUE_LEVELS
     GROUP_FIELD = query_category
@@ -1267,19 +1257,44 @@ def evaluate_splade_retriever(user_queries: Dict, user_to_group: Dict, k_values:
     log(f"检索器: SPLADE (稀疏) - {query_category.upper()}/{query_type.upper()}")
     log(f"{'='*60}")
 
-    # 加载 SPLADE 检索器和 doc_ids
+    # 加载 SPLADE 检索器
     retriever = load_splade_retriever()
-    doc_ids = retriever.doc_ids  # SPLADE 检索器有 doc_ids 属性
+    doc_ids = retriever.doc_ids
 
-    # 加载查询缓存
-    log(f"  加载 SPLADE 查询缓存...")
-    query_cache = load_splade_query_cache(query_type, query_category)
+    # SPLADE 的 doc_vectors 没有被 pickle 保存，需要先调用 fit() 重建索引
+    if retriever.doc_vectors is None:
+        log(f"  [SPLADE] doc_vectors 未保存，正在重建索引...")
+        # 加载文档数据来构建索引
+        corpus_file = CAT_CONFIG.get('corpus_file', '')
+        if os.path.exists(corpus_file):
+            documents = []
+            with gzip.open(corpus_file, 'rt', encoding='utf-8') as f:
+                for line in f:
+                    doc = json.loads(line)
+                    if 'asin' in doc and 'title' in doc:
+                        documents.append(doc)
+                    if len(documents) >= 500000:  # 限制文档数
+                        break
+            log(f"  加载了 {len(documents)} 个文档，正在构建 SPLADE 索引...")
+            retriever.fit(documents, None)
+            log(f"  [SPLADE] 索引构建完成")
+        else:
+            raise FileNotFoundError(f"SPLADE 索引重建失败: 找不到语料文件 {corpus_file}")
 
-    if query_cache is None:
-        raise FileNotFoundError("SPLADE query cache not found")
+    # 加载 SPLADE 查询缓存（预编码的查询向量）
+    splade_cache = load_splade_query_cache(query_type, query_category)
 
-    matched_users = list(user_queries.keys())
-    log(f"  用户数: {len(matched_users)}")
+    # 只使用有缓存的用户
+    if splade_cache:
+        matched_users = [uid for uid in user_queries.keys() if uid in splade_cache]
+        log(f"  用户数: {len(matched_users)} (缓存: {len(splade_cache)} 条)")
+    else:
+        matched_users = list(user_queries.keys())
+        log(f"  用户数: {len(matched_users)}")
+        log(f"  [SPLADE] 未找到查询缓存，将实时编码查询")
+
+    # 确保倒排索引已构建（触发 lazy initialization）
+    retriever.search(["dummy"], top_k=1)
 
     eval_start = time.time()
 
@@ -1299,77 +1314,169 @@ def evaluate_splade_retriever(user_queries: Dict, user_to_group: Dict, k_values:
     idf_group_cross = defaultdict(list)
     all_query_records = []
 
+    # 构建 asin -> doc_idx 映射
+    asin_to_idx = {asin: idx for idx, asin in enumerate(doc_ids)}
+
+    # 获取最大 k 值
+    max_k = max(k_values)
+
+    # 收集所有查询用于批量评分
+    all_q_data = []
     for user_idx, user_id in enumerate(matched_users):
         queries = user_queries[user_id]
-        cached_queries = query_cache.get(user_id, {})
-
         for q in queries:
             query_text = q['query']
-            relevant_asin = q['asin']
-            word_count = q.get('word_count', 0)
-            group_ratio = q.get(f'{GROUP_FIELD}_ratio', 0.0)
-            q_group = q.get(GROUP_FIELD, 0)
+            if splade_cache and user_id in splade_cache and query_text in splade_cache[user_id]:
+                all_q_data.append({
+                    'user_id': user_id,
+                    'query': query_text,
+                    'relevant_asin': q['asin'],
+                    'word_count': q.get('word_count', 0),
+                    'group_ratio': q.get(f'{GROUP_FIELD}_ratio', 0.0),
+                    'q_group': q.get(GROUP_FIELD, 0),
+                    'q_vec': splade_cache[user_id][query_text]
+                })
 
-            if query_text not in cached_queries:
+    log(f"  批量评分: {len(all_q_data)} 个查询")
+
+    # 预热：确保倒排索引已构建
+    inverted_index = retriever._inverted_index
+    n_docs = len(retriever.doc_ids)
+    log(f"  构建稀疏矩阵...")
+
+    # 构建 term×doc 的稀疏矩阵 (CSR格式)
+    from scipy import sparse
+    import numpy as np
+
+    # 从倒排索引构建: term_id -> [(doc_idx, weight)]
+    row_indices = []
+    col_indices = []
+    data_values = []
+    invalid_count = 0
+    for term_id, doc_list in inverted_index.items():
+        for doc_idx, d_weight in doc_list:
+            if doc_idx >= n_docs:
+                invalid_count += 1
                 continue
+            row_indices.append(term_id)
+            col_indices.append(doc_idx)
+            data_values.append(d_weight)
+    if invalid_count > 0:
+        log(f"  [警告] 跳过 {invalid_count} 个超出范围的 doc_idx")
 
-            # 获取稀疏分数: {doc_idx: score}
-            sparse_scores = cached_queries[query_text]
+    # 获取最大term_id确定矩阵维度
+    max_term_id = max(inverted_index.keys()) if inverted_index else 0
+    n_terms = max_term_id + 1
 
-            # 将稀疏分数转换为排序后的检索结果 [(doc_idx, score), ...]
-            # 排序是降序（分数高的在前）
-            sorted_scores = sorted(sparse_scores.items(), key=lambda x: x[1], reverse=True)
+    # 构建稀疏矩阵 (term × doc)
+    doc_matrix = sparse.csr_matrix(
+        (data_values, (row_indices, col_indices)),
+        shape=(n_terms, n_docs),
+        dtype=np.float32
+    )
+    log(f"  稀疏矩阵构建完成: {n_terms} terms × {n_docs} docs, {len(data_values)} non-zeros")
 
-            # 转换为 asin 列表
-            retrieved_asins = []
-            retrieved_scores = []
-            for doc_idx, score in sorted_scores:
-                if doc_idx < len(doc_ids):
-                    retrieved_asins.append(doc_ids[doc_idx])
-                    retrieved_scores.append((doc_ids[doc_idx], score))
+    # 构建查询矩阵 (n_queries × n_terms)
+    log(f"  构建查询矩阵...")
+    q_rows = []
+    q_cols = []
+    q_data = []
+    q_idx_map = {}
 
-            retrieved_asins = [r[0] for r in retrieved_scores[:max(k_values)]]
+    for q_idx, q_data_item in enumerate(all_q_data):
+        for term_id, q_weight in q_data_item['q_vec'].items():
+            q_rows.append(q_idx)
+            q_cols.append(term_id)
+            q_data.append(q_weight)
+        q_idx_map[q_idx] = q_data_item
 
-            metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
-            all_metrics.append(metrics)
-            group_groups[q_group].append(metrics)
+    n_queries = len(all_q_data)
+    query_matrix = sparse.csr_matrix(
+        (q_data, (q_rows, q_cols)),
+        shape=(n_queries, n_terms),
+        dtype=np.float32
+    )
+    log(f"  查询矩阵构建完成: {n_queries} queries × {n_terms} terms, {len(q_data)} non-zeros")
 
-            # 计算 IDF
-            q_idf = compute_query_idf(query_text, word_idf) if word_idf else 0.0
+    # 矩阵乘法: (n_queries × n_terms) @ (n_terms × n_docs) = (n_queries × n_docs)
+    log(f"  执行矩阵乘法...")
+    score_matrix = query_matrix @ doc_matrix  # 稀疏×稀疏 = 稀疏
+    log(f"  矩阵乘法完成: {score_matrix.shape}")
 
-            # 记录原始数据
-            all_query_records.append({
-                'user_id': user_id,
-                'asin': relevant_asin,
-                f'{GROUP_FIELD}': q_group,
-                'mean_idf': q_idf,
-                'query_length': word_count,
-                f'{GROUP_FIELD}_ratio': group_ratio,
-                'p_at1': float(metrics.get('P@1', 0.0)),
-                'p_at3': float(metrics.get('P@3', 0.0)),
-                'p_at5': float(metrics.get('P@5', 0.0)),
-                'p_at10': float(metrics.get('P@10', 0.0)),
-                'n_at10': float(metrics.get('N@10', 0.0)),
-                'mrr_at10': float(metrics.get('MR@10', 0.0)),
-                'hit_at10': float(metrics.get('H@10', 0.0)),
-            })
+    # 提取每行的top_k
+    log(f"  提取top_k结果...")
+    batch_scores = []
+    for i in range(n_queries):
+        if (i + 1) % 500 == 0:
+            log(f"    Top-k提取进度: {i+1}/{n_queries}")
+        # 获取这一行的稀疏向量
+        row = score_matrix.getrow(i)
+        scores = row.toarray().flatten()
+        # 确保 scores 长度与 doc_ids 一致
+        if len(scores) < len(retriever.doc_ids):
+            scores = np.pad(scores, (0, len(retriever.doc_ids) - len(scores)), mode='constant')
+        top_indices = np.argsort(scores)[::-1][:max_k]
+        batch_scores.append([(retriever.doc_ids[idx], float(scores[idx])) for idx in top_indices])
 
-            # 分组统计
-            for (low, high), label in zip(word_bins, word_bin_labels):
-                if low <= word_count < high:
-                    word_count_groups[label].append(metrics)
-                    break
+    # 重新组织结果用于后续统计
+    q_idx = 0
+    for user_idx, user_id in enumerate(matched_users):
+        queries = user_queries[user_id]
+        for q in queries:
+            # 只有在缓存中的查询才有batch_scores条目
+            if splade_cache and user_id in splade_cache and q['query'] in splade_cache[user_id]:
+                query_text = q['query']
+                relevant_asin = q['asin']
+                word_count = q.get('word_count', 0)
+                group_ratio = q.get(f'{GROUP_FIELD}_ratio', 0.0)
+                q_group = q.get(GROUP_FIELD, 0)
 
-            for (low, high), label in zip(ratio_bins, ratio_bin_labels):
-                if low <= group_ratio < high:
-                    group_ratio_groups[label].append(metrics)
-                    break
+                retrieved_with_scores = batch_scores[q_idx]
+                q_idx += 1
 
-            for (low, high), label in zip(IDF_BINS, IDF_BIN_LABELS):
-                if low <= q_idf < high:
-                    idf_bin_groups[label].append(metrics)
-                    idf_group_cross[(label, q_group)].append(metrics)
-                    break
+                # 转换为评估格式
+                retrieved_asins = [asin for asin, score in retrieved_with_scores]
+
+                metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
+                all_metrics.append(metrics)
+                group_groups[q_group].append(metrics)
+
+                # 计算 IDF
+                q_idf = compute_query_idf(query_text, word_idf) if word_idf else 0.0
+
+                # 记录原始数据
+                all_query_records.append({
+                    'user_id': user_id,
+                    'asin': relevant_asin,
+                    f'{GROUP_FIELD}': q_group,
+                    'mean_idf': q_idf,
+                    'query_length': word_count,
+                    f'{GROUP_FIELD}_ratio': group_ratio,
+                    'p_at1': float(metrics.get('P@1', 0.0)),
+                    'p_at3': float(metrics.get('P@3', 0.0)),
+                    'p_at5': float(metrics.get('P@5', 0.0)),
+                    'p_at10': float(metrics.get('P@10', 0.0)),
+                    'n_at10': float(metrics.get('N@10', 0.0)),
+                    'mrr_at10': float(metrics.get('MR@10', 0.0)),
+                    'hit_at10': float(metrics.get('H@10', 0.0)),
+                })
+
+                # 分组统计
+                for (low, high), label in zip(word_bins, word_bin_labels):
+                    if low <= word_count < high:
+                        word_count_groups[label].append(metrics)
+                        break
+
+                for (low, high), label in zip(ratio_bins, ratio_bin_labels):
+                    if low <= group_ratio < high:
+                        group_ratio_groups[label].append(metrics)
+                        break
+
+                for (low, high), label in zip(IDF_BINS, IDF_BIN_LABELS):
+                    if low <= q_idf < high:
+                        idf_bin_groups[label].append(metrics)
+                        idf_group_cross[(label, q_group)].append(metrics)
+                        break
 
         if (user_idx + 1) % 100 == 0:
             elapsed = time.time() - eval_start

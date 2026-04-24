@@ -194,9 +194,9 @@ def build_user_output(
 
 def main() -> None:
     # ============ 硬编码参数 ============
-    REVIEW_FILE = "/root/test/Amazon-Reviews-2023/Baby_Products.jsonl.gz"
-    META_FILE = "/root/test/Amazon-Reviews-2023/meta_Baby_Products.jsonl.gz"
-    OUTPUT_DIR = "/root/result/personal_query/00_data_preparation/Baby_Products"
+    REVIEW_FILE = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2023/Baby_Products.jsonl.gz"
+    META_FILE = "/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2023/meta_Baby_Products.jsonl.gz"
+    OUTPUT_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/00_data_preparation/Baby_Products"
     MIN_WORDS = 15            # 每句话最少词数
     MAX_WORDS = 35            # 每句话最多词数
     MIN_LONG_SENTENCES = 10   # 每个用户最少长句子数（词数在 MIN_WORDS 和 MAX_WORDS 之间）

@@ -260,19 +260,19 @@ class DenseRetriever:
         
         self.doc_embeddings = embeddings
         log_with_timestamp(f"  Dense index built with {len(self.doc_ids)} docs (device: {self.device})")
-    
+
     def encode_query(self, query: str) -> np.ndarray:
         """Encode query using dense embeddings
-        
+
         Args:
             query: Query text
-            
+
         Returns:
             numpy array of shape (embedding_dim,)
         """
         if not hasattr(self, 'device'):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         model = self._get_model()
 
         with _model_inference_lock:
@@ -286,6 +286,35 @@ class DenseRetriever:
             query_embedding = query_embedding.cpu().numpy()
 
         return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
+
+    def encode_queries(self, queries: List[str], batch_size: int = 1024) -> np.ndarray:
+        """Encode multiple queries in batch for efficiency
+
+        Args:
+            queries: List of query texts
+            batch_size: Number of queries to process at once
+
+        Returns:
+            numpy array of shape (len(queries), embedding_dim)
+        """
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        model = self._get_model()
+
+        with _model_inference_lock:
+            embeddings = model.encode(
+                queries,
+                batch_size=batch_size,
+                truncation=True,
+                max_length=512,
+                show_progress_bar=False
+            )
+
+        if isinstance(embeddings, torch.Tensor):
+            embeddings = embeddings.cpu().numpy()
+
+        return embeddings
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using dense vectors with optimized top-k extraction"""
@@ -499,6 +528,35 @@ class E5Retriever:
 
         return query_embedding
 
+    def encode_queries(self, queries: List[str], batch_size: int = 1024) -> np.ndarray:
+        """Encode multiple queries in batch for efficiency
+
+        Args:
+            queries: List of query texts
+            batch_size: Number of queries to process at once
+
+        Returns:
+            numpy array of shape (len(queries), embedding_dim)
+        """
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        model = self._get_model()
+
+        queries_with_prefix = [self._add_instruction(q, is_query=True) for q in queries]
+
+        with _model_inference_lock:
+            embeddings = model.encode(
+                queries_with_prefix,
+                batch_size=batch_size,
+                convert_to_tensor=True
+            )
+
+        if isinstance(embeddings, torch.Tensor):
+            embeddings = embeddings.cpu().numpy()
+
+        return embeddings
+
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using E5 with batch processing for single-window documents"""
         if not hasattr(self, 'device'):
@@ -675,16 +733,16 @@ class BGERetriever:
 
     def encode_query(self, query: str) -> np.ndarray:
         """Encode query using BGE embeddings
-        
+
         Args:
             query: Query text
-            
+
         Returns:
             numpy array of shape (embedding_dim,)
         """
         if not hasattr(self, 'device'):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         model = self._get_model()
 
         with _model_inference_lock:
@@ -698,6 +756,35 @@ class BGERetriever:
             query_embedding = query_embedding.cpu().numpy()
 
         return query_embedding
+
+    def encode_queries(self, queries: List[str], batch_size: int = 1024) -> np.ndarray:
+        """Encode multiple queries in batch for efficiency
+
+        Args:
+            queries: List of query texts
+            batch_size: Number of queries to process at once
+
+        Returns:
+            numpy array of shape (len(queries), embedding_dim)
+        """
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        model = self._get_model()
+
+        queries_with_prefix = [self._add_instruction(q, is_query=True) for q in queries]
+
+        with _model_inference_lock:
+            embeddings = model.encode(
+                queries_with_prefix,
+                batch_size=batch_size,
+                convert_to_tensor=True
+            )
+
+        if isinstance(embeddings, torch.Tensor):
+            embeddings = embeddings.cpu().numpy()
+
+        return embeddings
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using BGE with batched similarity computation (optimized with window pooling)"""
@@ -1027,7 +1114,7 @@ class DirichletPriorRetriever:
             self.vocab.update(doc_tokens)
 
         # 计算集合语言模型 P(w|C)
-        from collections import Counter
+        from collections import Counter, defaultdict
         collection_counts = Counter()
         total_collection_tokens = 0
 
@@ -1214,6 +1301,10 @@ class ANCERetriever:
 
     ANCE uses a contrastive learning approach with negative sampling to learn
     high-quality dense embeddings for retrieval.
+
+    Enhanced with:
+    - Document instruction prefix (passage: ) for better query-document alignment
+    - Sliding window encoding to avoid 512 token truncation
     """
     def __init__(self, model_name: str = "castorini/ance-msmarco-passage"):
         self.model_name = model_name
@@ -1223,6 +1314,15 @@ class ANCERetriever:
         self.all_metadata = None
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+        # 滑动窗口配置
+        self.max_seq_length = 512
+        self.window_stride = 256
+
+        # 单窗口和多窗口文档的索引
+        self.single_window_indices = []
+        self.multi_window_indices = []
+        self.single_window_embeddings = None
+
     def _get_model(self):
         if self.model is None:
             log_with_timestamp(f"  Loading ANCE-compatible model: {self.model_name}")
@@ -1231,76 +1331,227 @@ class ANCERetriever:
             log_with_timestamp(f"  Using device: {self.device}")
         return self.model
 
+    def _add_instruction(self, text: str, is_query: bool = False) -> str:
+        """ANCE 使用 query: 和 passage: instruction 前缀"""
+        if is_query:
+            return "query: " + text
+        else:
+            return "passage: " + text
+
+    def _encode_text_with_sliding_window(self, text: str, add_prefix: bool = True):
+        """
+        使用滑动窗口编码文本，保证不截断
+
+        Args:
+            text: 输入文本
+            add_prefix: 是否添加 passage: 前缀
+
+        Returns:
+            如果文本 <= max_seq_length: 单个 embedding [dim]
+            如果文本 > max_seq_length: 多个窗口的 embeddings [num_windows, dim]
+        """
+        model = self._get_model()
+
+        # 添加前缀
+        if add_prefix:
+            text_with_prefix = self._add_instruction(text, is_query=False)
+        else:
+            text_with_prefix = text
+
+        # 使用 tokenizer 获取真实 token 数量（不截断）
+        tokens = model.tokenizer(
+            text_with_prefix,
+            truncation=False,
+            return_tensors='pt'
+        )
+
+        num_tokens = len(tokens['input_ids'][0])
+
+        # 如果文本较短，直接编码
+        if num_tokens <= self.max_seq_length:
+            result = model.encode(
+                [text_with_prefix],
+                convert_to_tensor=True,
+                show_progress_bar=False
+            )
+            return result[0]
+        else:
+            # 长文本：使用滑动窗口
+            num_windows = (num_tokens - self.max_seq_length) // self.window_stride + 1
+
+            window_embeddings = []
+            for i in range(num_windows):
+                start_token = i * self.window_stride
+                end_token = min(start_token + self.max_seq_length, num_tokens)
+
+                window_tokens = {
+                    'input_ids': tokens['input_ids'][0][start_token:end_token].unsqueeze(0),
+                    'attention_mask': tokens['attention_mask'][0][start_token:end_token].unsqueeze(0)
+                }
+
+                window_text = model.tokenizer.decode(
+                    window_tokens['input_ids'][0],
+                    skip_special_tokens=True
+                )
+
+                window_embedding = model.encode(
+                    [window_text],
+                    convert_to_tensor=True,
+                    show_progress_bar=False
+                )[0]
+
+                window_embeddings.append(window_embedding)
+
+            return torch.stack(window_embeddings)
+
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
-        """Build ANCE index using enhanced document text"""
-        log_with_timestamp("  Building ANCE-compatible index...")
+        """Build ANCE index with BATCHED encoding for efficiency.
+
+        Two-phase approach:
+        1. Fast tokenization scan: separate single-window vs multi-window docs
+        2. Batch encode: single-window docs batched, multi-window docs grouped by num_windows
+        """
+        log_with_timestamp("  Building ANCE-compatible index with sliding window (per-doc processing like E5/BGE)...")
         model = self._get_model()
 
         self.doc_ids = [doc.get('asin', '') for doc in documents]
         self.all_metadata = all_metadata
         texts = [build_document_text(doc, all_metadata) for doc in documents]
 
-        self.doc_embeddings = model.encode(texts, show_progress_bar=True, batch_size=512)
-        log_with_timestamp(f"  ANCE index built with {len(self.doc_ids)} docs")
+        # Per-doc sliding window processing (like E5/BGE)
+        doc_embeddings_list = []
+        single_window_indices = []
+        multi_window_indices = []
+        window_stats = {'single_window': 0, 'multi_window': 0, 'max_windows': 0}
+
+        for i, text in tqdm(enumerate(texts), total=len(texts), desc="  ANCE Encoding"):
+            doc_emb = self._encode_text_with_sliding_window(text, add_prefix=True)
+
+            if doc_emb.dim() == 1:
+                window_stats['single_window'] += 1
+                single_window_indices.append(i)
+            else:
+                window_stats['multi_window'] += 1
+                multi_window_indices.append(i)
+                num_windows = doc_emb.shape[0]
+                window_stats['max_windows'] = max(window_stats['max_windows'], num_windows)
+
+            doc_embeddings_list.append(doc_emb)
+
+        self.doc_embeddings = doc_embeddings_list
+        self.single_window_indices = single_window_indices
+        self.multi_window_indices = multi_window_indices
+
+        if single_window_indices:
+            single_embeddings = torch.stack([doc_embeddings_list[i] for i in single_window_indices])
+            if self.device.type == 'cuda':
+                single_embeddings = single_embeddings.to(self.device)
+            self.single_window_embeddings = single_embeddings
+        else:
+            self.single_window_embeddings = None
+
+        log_with_timestamp(f"  ANCE index built with {len(self.doc_ids)} docs:")
+        log_with_timestamp(f"    - Single window: {window_stats['single_window']} docs")
+        log_with_timestamp(f"    - Multi window: {window_stats['multi_window']} docs (max {window_stats['max_windows']} windows)")
+        log_with_timestamp(f"    - Device: {self.device}")
 
     def encode_query(self, query: str) -> np.ndarray:
         """Encode query using ANCE embeddings
-        
+
         Args:
             query: Query text
-            
+
         Returns:
             numpy array of shape (embedding_dim,)
         """
         if not hasattr(self, 'device'):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         model = self._get_model()
 
         with _model_inference_lock:
+            query_with_prefix = self._add_instruction(query, is_query=True)
             query_embedding = model.encode(
-                ["query: " + query]
-            )
+                [query_with_prefix],
+                convert_to_tensor=True
+            )[0]
 
         if isinstance(query_embedding, torch.Tensor):
             query_embedding = query_embedding.cpu().numpy()
 
-        return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
+        return query_embedding
 
-    def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """Search using ANCE embeddings"""
+    def encode_queries(self, queries: List[str], batch_size: int = 1024) -> np.ndarray:
+        """Encode multiple queries in batch for efficiency
+
+        Args:
+            queries: List of query texts
+            batch_size: Number of queries to process at once
+
+        Returns:
+            numpy array of shape (len(queries), embedding_dim)
+        """
         if not hasattr(self, 'device'):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
+        model = self._get_model()
+
+        queries_with_prefix = [self._add_instruction(q, is_query=True) for q in queries]
+
+        with _model_inference_lock:
+            embeddings = model.encode(
+                queries_with_prefix,
+                batch_size=batch_size,
+                convert_to_tensor=True
+            )
+
+        if isinstance(embeddings, torch.Tensor):
+            embeddings = embeddings.cpu().numpy()
+
+        return embeddings
+
+    def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+        """Search using ANCE with sliding window support"""
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
         model = self._get_model()
 
         with _model_inference_lock:
+            query_with_prefix = self._add_instruction(query, is_query=True)
             query_embedding = model.encode(
-                ["query: " + query],
-                truncation=True,
-                max_length=512
-            )
+                [query_with_prefix],
+                convert_to_tensor=True
+            )[0]
 
-        if isinstance(query_embedding, np.ndarray):
-            query_embedding = torch.from_numpy(query_embedding).float().to(self.device)
-        
+        # Ensure query is on GPU for fast computation
+        query_embedding = query_embedding.to(self.device)
+
         from sentence_transformers import util
-        doc_embeddings = self.doc_embeddings
-        
-        if isinstance(doc_embeddings, np.ndarray):
-            doc_embeddings = torch.from_numpy(doc_embeddings).float().to(query_embedding.device)
-        if torch.is_tensor(doc_embeddings):
-            if doc_embeddings.device != query_embedding.device:
-                doc_embeddings = doc_embeddings.to(query_embedding.device)
-        
-        scores = util.cos_sim(query_embedding, doc_embeddings)[0]
-        
-        # Optimized: Use torch.topk instead of full sort (O(n log k) vs O(n log n))
-        # This provides ~250ms speedup by avoiding sorting all 302k documents
-        topk_values, topk_indices = torch.topk(scores, k=min(top_k, len(self.doc_ids)))
-        results = [(self.doc_ids[idx.item()], topk_values[i].item()) 
-                   for i, idx in enumerate(topk_indices)]
-        return results
+        all_scores = [0.0] * len(self.doc_ids)
+
+        # 单窗口文档：批量计算
+        if hasattr(self, 'single_window_embeddings') and self.single_window_embeddings is not None:
+            single_emb = self.single_window_embeddings
+            # Move to GPU for computation if not already there
+            if single_emb.device.type == 'cpu':
+                single_emb = single_emb.to(self.device)
+            batch_scores = util.cos_sim(query_embedding, single_emb)[0]
+            for idx, doc_idx in enumerate(self.single_window_indices):
+                all_scores[doc_idx] = batch_scores[idx].item()
+
+        # 多窗口文档：取所有窗口的最大分数
+        for i in self.multi_window_indices:
+            doc_emb = self.doc_embeddings[i]
+            # Move to GPU for computation if not already there
+            if doc_emb.device.type == 'cpu':
+                doc_emb = doc_emb.to(self.device)
+            window_scores = util.cos_sim(query_embedding, doc_emb)[0]
+            all_scores[i] = window_scores.max().item()
+
+        results = [(self.doc_ids[i], all_scores[i]) for i in range(len(self.doc_ids))]
+        results.sort(key=lambda x: -x[1])
+        return results[:top_k]
 
 
 class STARRetriever:
@@ -1340,16 +1591,16 @@ class STARRetriever:
 
     def encode_query(self, query: str) -> np.ndarray:
         """Encode query using STAR embeddings
-        
+
         Args:
             query: Query text
-            
+
         Returns:
             numpy array of shape (embedding_dim,)
         """
         if not hasattr(self, 'device'):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         model = self._get_model()
 
         with _model_inference_lock:
@@ -1361,6 +1612,33 @@ class STARRetriever:
             query_embedding = query_embedding.cpu().numpy()
 
         return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
+
+    def encode_queries(self, queries: List[str], batch_size: int = 1024) -> np.ndarray:
+        """Encode multiple queries in batch for efficiency
+
+        Args:
+            queries: List of query texts
+            batch_size: Number of queries to process at once
+
+        Returns:
+            numpy array of shape (len(queries), embedding_dim)
+        """
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        model = self._get_model()
+
+        with _model_inference_lock:
+            embeddings = model.encode(
+                queries,
+                batch_size=batch_size,
+                show_progress_bar=False
+            )
+
+        if isinstance(embeddings, torch.Tensor):
+            embeddings = embeddings.cpu().numpy()
+
+        return embeddings
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using STAR embeddings"""
@@ -1444,6 +1722,33 @@ class MiniLMRetriever:
             query_embedding = query_embedding.cpu().numpy()
 
         return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
+
+    def encode_queries(self, queries: List[str], batch_size: int = 1024) -> np.ndarray:
+        """Encode multiple queries in batch for efficiency
+
+        Args:
+            queries: List of query texts
+            batch_size: Number of queries to process at once
+
+        Returns:
+            numpy array of shape (len(queries), embedding_dim)
+        """
+        if not hasattr(self, 'device'):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        model = self._get_model()
+
+        with _model_inference_lock:
+            embeddings = model.encode(
+                queries,
+                batch_size=batch_size,
+                show_progress_bar=False
+            )
+
+        if isinstance(embeddings, torch.Tensor):
+            embeddings = embeddings.cpu().numpy()
+
+        return embeddings
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using MiniLM embeddings"""
@@ -1893,8 +2198,11 @@ class SPLADERetriever:
         if self.model is None:
             log_with_timestamp(f"  Loading SPLADE++ model: {self.model_name}")
             from transformers import AutoModelForMaskedLM, AutoTokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self.model = AutoModelForMaskedLM.from_pretrained(self.model_name)
+            import os
+            hf_home = os.environ.get("HF_HOME", "/home/wlia0047/ar57_scratch/wenyu/hf_models")
+            model_path = os.path.join(hf_home, self.model_name)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+            self.model = AutoModelForMaskedLM.from_pretrained(model_path, local_files_only=True)
             self.model = self.model.half()  # Use FP16 to reduce memory
             self.model = self.model.to(self.device)
             self.model.eval()
@@ -1931,6 +2239,69 @@ class SPLADERetriever:
                     sparse_vec[idx] = w.item()
 
             return sparse_vec
+
+    def encode_query(self, query: str) -> Dict[str, float]:
+        """Encode query to sparse vector for retrieval
+
+        Args:
+            query: Query text
+
+        Returns:
+            Dict mapping term_idx -> weight (sparse representation)
+        """
+        self._get_model()
+        return self._encode_text(query)
+
+    def encode_queries(self, queries: List[str], batch_size: int = 1024) -> List[Dict[str, float]]:
+        """Encode multiple queries in batch for efficiency
+
+        Args:
+            queries: List of query texts
+            batch_size: Number of queries to process at once
+
+        Returns:
+            List of dicts mapping term_idx -> weight (sparse representation)
+        """
+        self._get_model()
+        import torch.nn.functional as F
+
+        results = []
+        n_batches = (len(queries) + batch_size - 1) // batch_size
+        threshold = 0.01
+
+        for batch_idx in tqdm(range(n_batches), desc="SPLADE Enc"):
+            batch_start = batch_idx * batch_size
+            batch_end = min(batch_start + batch_size, len(queries))
+            batch_queries = queries[batch_start:batch_end]
+
+            inputs = self.tokenizer(
+                batch_queries,
+                return_tensors='pt',
+                truncation=True,
+                max_length=512,
+                padding=True
+            ).to(self.device)
+
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                logits = outputs.logits  # [batch, seq_len, vocab_size]
+
+                weights = F.relu(logits)
+                weights = torch.log(1 + weights)
+                weights, _ = weights.max(dim=1)  # [batch, vocab_size]
+
+                # Efficient sparse vector construction - process each query
+                for b in range(weights.shape[0]):
+                    w_b = weights[b]
+                    mask_b = w_b > threshold
+                    # Use nonzero directly with as_tuple=True for efficiency
+                    indices = mask_b.nonzero(as_tuple=True)[0]
+                    vals = w_b[mask_b]
+                    # Build dict efficiently using cpu().numpy() once per batch item
+                    sparse_vec = dict(zip(indices.tolist(), vals.tolist()))
+                    results.append(sparse_vec)
+
+        return results
 
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
         """Build SPLADE++ index"""
@@ -2000,36 +2371,47 @@ class SPLADERetriever:
 
     def _encode_query(self, query: str) -> Dict[str, float]:
         """Encode query to sparse vector"""
+        self._get_model()
         return self._encode_text(query)
 
     def search(self, queries: List[str], top_k: int = 10) -> List[List[Tuple[str, float]]]:
-        """Search using SPLADE++ sparse vectors with dot product"""
+        """Search using SPLADE++ sparse vectors with dot product
+
+        Uses inverted index for efficient sparse computation:
+        - Build inverted index (term -> [(doc_idx, weight)]) on first call
+        - Subsequent calls reuse the cached index
+        """
         if self.doc_vectors is None:
             log_with_timestamp("  ERROR: SPLADE index not built!")
             return [[] for _ in queries]
+
+        from collections import defaultdict
+
+        # Build inverted index on first call (lazy initialization)
+        if not hasattr(self, '_inverted_index') or self._inverted_index is None:
+            log_with_timestamp(f"  [SPLADE] Building inverted index for {len(self.doc_vectors)} docs...")
+            self._inverted_index: Dict[int, List[Tuple[int, float]]] = {}
+            for doc_idx, d_vec in enumerate(self.doc_vectors):
+                for term_id, weight in d_vec.items():
+                    if term_id not in self._inverted_index:
+                        self._inverted_index[term_id] = []
+                    self._inverted_index[term_id].append((doc_idx, weight))
+            log_with_timestamp(f"  [SPLADE] Inverted index built with {len(self._inverted_index)} terms")
 
         # Encode all queries
         query_vectors = [self._encode_query(q) for q in queries]
 
         results = []
         for q_vec in query_vectors:
-            scores = []
-            for i, d_vec in enumerate(self.doc_vectors):
-                # Compute dot product between sparse vectors
-                score = 0.0
-                # Only iterate over smaller vector for efficiency
-                if len(q_vec) < len(d_vec):
-                    for term_id, weight in q_vec.items():
-                        if term_id in d_vec:
-                            score += weight * d_vec[term_id]
-                else:
-                    for term_id, weight in d_vec.items():
-                        if term_id in q_vec:
-                            score += weight * q_vec[term_id]
-                scores.append((self.doc_ids[i], score))
+            # Compute scores using inverted index (only docs with matching terms)
+            scores = defaultdict(float)
+            for term_id, q_weight in q_vec.items():
+                if term_id in self._inverted_index:
+                    for doc_idx, d_weight in self._inverted_index[term_id]:
+                        scores[doc_idx] += q_weight * d_weight
 
-            # Sort by score and return top k
-            scores.sort(key=lambda x: x[1], reverse=True)
-            results.append(scores[:top_k])
+            # Sort and return top k
+            sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+            results.append([(self.doc_ids[doc_idx], score) for doc_idx, score in sorted_scores[:top_k]])
 
         return results
