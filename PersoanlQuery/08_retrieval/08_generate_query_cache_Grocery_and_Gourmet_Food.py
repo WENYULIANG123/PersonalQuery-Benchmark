@@ -559,7 +559,8 @@ def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str 
         try:
             embedding = retriever_instance.encode_query(query_text)
 
-            if not isinstance(embedding, np.ndarray):
+            # Sparse retrievers (SPLADE) return dict, keep as-is
+            if not isinstance(embedding, (np.ndarray, dict)):
                 if isinstance(embedding, torch.Tensor):
                     embedding = embedding.cpu().numpy()
                 else:

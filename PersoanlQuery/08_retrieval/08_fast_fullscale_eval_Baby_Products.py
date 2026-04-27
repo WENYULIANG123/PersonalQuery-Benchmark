@@ -46,6 +46,11 @@ RETRIEVER_CONFIG = get_retriever_config()
 RETRIEVERS = RETRIEVER_CONFIG['retrievers']
 DENSE_RETRIEVERS = RETRIEVER_CONFIG['dense_retrievers']
 
+# NOTE: 本评估脚本禁用 SPLADE（稀疏检索器）。
+# 1) 避免 validate_cache() 要求 splade 的查询缓存文件；
+# 2) 主评估流程中也会显式跳过 SPLADE（见下方注释块）。
+RETRIEVERS = [r for r in RETRIEVERS if r != 'splade']
+
 # IDF 分层配置
 IDF_BINS = [(2.5, 3.5), (3.5, 4.5), (4.5, 5.0), (5.0, float('inf'))]
 IDF_BIN_LABELS = RETRIEVER_CONFIG['idf_bin_labels']
@@ -2163,16 +2168,16 @@ def main():
             except Exception as e:
                 log(f"  BM25 错误: {e}")
 
-            # 评估 SPLADE
-            try:
-                result = evaluate_splade_retriever(user_queries, user_to_group, k_values, word_idf, query_type, query_category)
-                result['query_type'] = query_type
-                result['query_category'] = query_category
-                query_type_results.append(result)
-            except FileNotFoundError as e:
-                log(f"  跳过 SPLADE: {e}")
-            except Exception as e:
-                log(f"  SPLADE 错误: {e}")
+            # 评估 SPLADE（已禁用）
+            # try:
+            #     result = evaluate_splade_retriever(user_queries, user_to_group, k_values, word_idf, query_type, query_category)
+            #     result['query_type'] = query_type
+            #     result['query_category'] = query_category
+            #     query_type_results.append(result)
+            # except FileNotFoundError as e:
+            #     log(f"  跳过 SPLADE: {e}")
+            # except Exception as e:
+            #     log(f"  SPLADE 错误: {e}")
 
             all_results_by_type[query_type] = query_type_results
 
@@ -2304,11 +2309,11 @@ def fit_within_family_ols_centered(
         idf_c = idf - mean(idf)
 
     这样：
-    - Intercept(L1) = 平均长度、平均IDF下，L1 的预测 P@10
-    - L2vsL1 / L3vsL1 / L3vsL2 仍然是净变化
+    - Intercept(L0) = 平均长度、平均IDF下，L0 的预测 P@10
+    - 其余 level 系数表示相对 L0 的净变化
     """
     subdf = subdf.copy()
-    subdf = subdf[subdf["level"].isin([1, 2, 3])].dropna(
+    subdf = subdf[subdf["level"].isin([0, 1, 2, 3])].dropna(
         subset=[metric_col, "level", len_col, idf_col]
     )
 

@@ -46,6 +46,16 @@ RETRIEVER_CONFIG = get_retriever_config()
 RETRIEVERS = RETRIEVER_CONFIG['retrievers']
 DENSE_RETRIEVERS = RETRIEVER_CONFIG['dense_retrievers']
 
+# NOTE: 本评估脚本禁用 SPLADE（稀疏检索器）。
+# 1) 避免 validate_cache() 要求 splade 的查询缓存文件；
+# 2) 主评估流程中也会显式跳过 SPLADE（见下方注释块）。
+RETRIEVERS = [r for r in RETRIEVERS if r != 'splade']
+
+# 密集检索批量搜索的 query batch 大小。
+# Pet_Supplies 在显存较小的 GPU（例如 T4）上，如果一次性把所有查询丢进 torch.mm，
+# 会生成 (num_queries x num_docs) 的巨大 score 矩阵导致 OOM，因此必须分批。
+DENSE_SEARCH_BATCH_SIZE = 64
+
 # IDF 分层配置
 IDF_BINS = [(2.5, 3.5), (3.5, 4.5), (4.5, 5.0), (5.0, float('inf'))]
 IDF_BIN_LABELS = RETRIEVER_CONFIG['idf_bin_labels']
@@ -795,20 +805,39 @@ class DenseSearcher:
         normalized_embeddings = embeddings / norms
         self.embeddings_tensor = torch.from_numpy(normalized_embeddings).float().to(self.device)
 
-    def search_batch(self, query_embeddings: List[np.ndarray], top_k: int = 10) -> List[List[Tuple[str, float]]]:
+    def search_batch(self, query_embeddings: List[np.ndarray], top_k: int = 10, batch_size: int = 64) -> List[List[Tuple[str, float]]]:
         if not query_embeddings:
             return []
-        query_tensor = torch.from_numpy(np.array(query_embeddings)).float().to(self.device)
-        # 归一化 query embeddings
-        q_norms = np.linalg.norm(query_embeddings, axis=1, keepdims=True)
-        q_norms = np.where(q_norms == 0, 1, q_norms)
-        query_tensor = query_tensor / torch.from_numpy(q_norms).float().to(self.device)
-        # 余弦相似度 = 归一化点积
-        scores = torch.mm(query_tensor, self.embeddings_tensor.T)
-        results = []
-        for i in range(len(query_embeddings)):
-            top_scores, top_indices = torch.topk(scores[i], min(top_k, len(self.doc_ids)))
-            results.append([(self.doc_ids[idx.item()], top_scores[j].item()) for j, idx in enumerate(top_indices)])
+        if batch_size <= 0:
+            raise ValueError(f"batch_size 必须 > 0, 实际为 {batch_size}")
+
+        results: List[List[Tuple[str, float]]] = []
+        n = len(query_embeddings)
+        top_k = min(top_k, len(self.doc_ids))
+
+        # 分批计算 (batch_size x num_docs) 的 score 矩阵，避免一次性构建 (num_queries x num_docs) 导致 OOM
+        with torch.no_grad():
+            for start in range(0, n, batch_size):
+                end = min(start + batch_size, n)
+                batch_emb = query_embeddings[start:end]
+
+                query_tensor = torch.from_numpy(np.array(batch_emb)).float().to(self.device)
+                q_norms = np.linalg.norm(batch_emb, axis=1, keepdims=True)
+                q_norms = np.where(q_norms == 0, 1, q_norms)
+                query_tensor = query_tensor / torch.from_numpy(q_norms).float().to(self.device)
+
+                scores = torch.mm(query_tensor, self.embeddings_tensor.T)
+                for i in range(scores.shape[0]):
+                    top_scores, top_indices = torch.topk(scores[i], top_k)
+                    results.append([(self.doc_ids[idx.item()], top_scores[j].item()) for j, idx in enumerate(top_indices)])
+
+                # 尽快释放中间大张量，降低峰值显存
+                del scores
+                del query_tensor
+
+        if len(results) != n:
+            raise RuntimeError(f"批量搜索结果条数不匹配: results={len(results)} queries={n}")
+
         return results
 
 class BM25Searcher:
@@ -889,7 +918,7 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_gr
     log(f"  批量搜索所有查询...")
     if all_query_data:
         all_embeddings = [q[1] for q in all_query_data]
-        results = searcher.search_batch(all_embeddings, top_k=max(k_values))
+        results = searcher.search_batch(all_embeddings, top_k=max(k_values), batch_size=DENSE_SEARCH_BATCH_SIZE)
 
     # 第三步：遍历搜索结果，进行分组统计
     log(f"  处理结果并分组统计...")
@@ -2180,16 +2209,16 @@ def main():
             except Exception as e:
                 log(f"  BM25 错误: {e}")
 
-            # 评估 SPLADE
-            try:
-                result = evaluate_splade_retriever(user_queries, user_to_group, k_values, word_idf, query_type, query_category)
-                result['query_type'] = query_type
-                result['query_category'] = query_category
-                query_type_results.append(result)
-            except FileNotFoundError as e:
-                log(f"  跳过 SPLADE: {e}")
-            except Exception as e:
-                log(f"  SPLADE 错误: {e}")
+            # 评估 SPLADE（已禁用）
+            # try:
+            #     result = evaluate_splade_retriever(user_queries, user_to_group, k_values, word_idf, query_type, query_category)
+            #     result['query_type'] = query_type
+            #     result['query_category'] = query_category
+            #     query_type_results.append(result)
+            # except FileNotFoundError as e:
+            #     log(f"  跳过 SPLADE: {e}")
+            # except Exception as e:
+            #     log(f"  SPLADE 错误: {e}")
 
             all_results_by_type[query_type] = query_type_results
 

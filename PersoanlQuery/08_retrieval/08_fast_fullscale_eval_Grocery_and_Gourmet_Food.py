@@ -41,10 +41,18 @@ CCOMP_QUERIES_FILE = QUERY_FILE
 OUTPUT_DIR = CAT_CONFIG['output_dir']
 META_FILE = CAT_CONFIG['corpus_file']
 
+# 进程启动后只读取一次查询文件，避免评估中途再次读取时撞上并发写入。
+QUERY_DATA_CACHE = {}
+
 RETRIEVER_CONFIG = get_retriever_config()
 RETRIEVERS = RETRIEVER_CONFIG['retrievers']
 DENSE_RETRIEVERS = RETRIEVER_CONFIG['dense_retrievers']
 SPARSE_RETRIEVERS = RETRIEVER_CONFIG.get('sparse_retrievers', [])
+
+# NOTE: 本评估脚本禁用 SPLADE（稀疏检索器）。
+# 避免 validate_cache() 检查 splade 文档索引/查询缓存，也避免主评估阶段跑到 SPLADE。
+RETRIEVERS = [r for r in RETRIEVERS if r != 'splade']
+SPARSE_RETRIEVERS = [r for r in SPARSE_RETRIEVERS if r != 'splade']
 
 IDF_BINS = [(2.5, 3.5), (3.5, 4.5), (4.5, 5.0), (5.0, float('inf'))]
 IDF_BIN_LABELS = RETRIEVER_CONFIG['idf_bin_labels']
@@ -52,6 +60,14 @@ IDF_BIN_LABELS = RETRIEVER_CONFIG['idf_bin_labels']
 # ============ 日志 ============
 def log(msg):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+def load_query_data_once(query_file: str) -> List[Dict]:
+    """只从磁盘读取一次查询数据，后续复用内存缓存。"""
+    if query_file not in QUERY_DATA_CACHE:
+        with open(query_file, 'r') as f:
+            QUERY_DATA_CACHE[query_file] = json.load(f)
+    return QUERY_DATA_CACHE[query_file]
 
 # ============ 缓存完整性检查 ============
 def validate_cache() -> bool:
@@ -603,8 +619,7 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', 
 
     # 根据 query_category 选择查询文件
     queries_file = ACL_QUERIES_FILE if query_category == 'acl' else CCOMP_QUERIES_FILE
-    with open(queries_file, 'r') as f:
-        data = json.load(f)
+    data = load_query_data_once(queries_file)
     user_queries = {}
     user_to_group = {}
     all_query_metadata = []  # (user_idx, word_count, group_ratio)
@@ -2294,11 +2309,11 @@ def fit_within_family_ols_centered(
         idf_c = idf - mean(idf)
 
     这样：
-    - Intercept(L1) = 平均长度、平均IDF下，L1 的预测 P@10
-    - L2vsL1 / L3vsL1 / L3vsL2 仍然是净变化
+    - Intercept(L0) = 平均长度、平均IDF下，L0 的预测 P@10
+    - 其余 level 系数表示相对 L0 的净变化
     """
     subdf = subdf.copy()
-    subdf = subdf[subdf["level"].isin([1, 2, 3])].dropna(
+    subdf = subdf[subdf["level"].isin([0, 1, 2, 3])].dropna(
         subset=[metric_col, "level", len_col, idf_col]
     )
 
