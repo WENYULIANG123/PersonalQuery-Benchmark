@@ -20,7 +20,7 @@ from collections import defaultdict
 from typing import List, Dict, Tuple, Set
 
 # 设置路径
-sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery/08_retrieval')
+sys.path.insert(0, '/home/wlia0047/ar57/wenyu/PersoanlQuery/08_retrieval')
 from config import get_category_config, get_retriever_config
 
 # ============ 日志 ============
@@ -29,7 +29,7 @@ def log(msg):
 
 # ============ 配置加载 ============
 CATEGORY_NAME = "Pet_Supplies"
-BASE_DIR = "/workspace/result/personal_query"
+BASE_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query"
 
 try:
     CAT_CONFIG = get_category_config(CATEGORY_NAME)
@@ -41,7 +41,7 @@ except:
     CACHE_DIR = f"{BASE_DIR}/08_retrieval/retriever_{CATEGORY_NAME}_cache"
     QUERY_CACHE_BASE_DIR = f"{BASE_DIR}/08_retrieval/query_cache_{CATEGORY_NAME}"
     QUERY_FILE = f"{BASE_DIR}/06_query/{CATEGORY_NAME}/query.json"
-    META_FILE = f"/workspace/Amazon-Reviews-2023/raw/meta_categories/meta_{CATEGORY_NAME}.jsonl.gz"
+    META_FILE = f"/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2023/meta_{CATEGORY_NAME}.jsonl.gz"
 
 OUTPUT_DIR = f"{BASE_DIR}/09_noisy_retrieval/{CATEGORY_NAME}"
 
@@ -49,7 +49,7 @@ RETRIEVER_CONFIG = get_retriever_config()
 RETRIEVERS = RETRIEVER_CONFIG['retrievers']
 
 # Noisy 查询文件路径
-NOISY_QUERY_BASE = "/workspace/result/personal_query/07_inject_noisy"
+NOISY_QUERY_BASE = "/home/wlia0047/ar57/wenyu/result/personal_query/07_inject_noisy"
 
 # ============ 评估指标计算 ============
 def compute_metrics(relevant_asin: str, retrieved_asins: List[str], k_values: List[int]) -> Dict:
@@ -107,6 +107,23 @@ def load_bm25_retriever():
     with open(bm25_path, 'rb') as f:
         bm25 = pickle.load(f)
     return bm25
+
+def load_splade_retriever():
+    """加载 SPLADE 检索器（稀疏向量格式）"""
+    from utils.retrievers import SPLADERetriever
+
+    splade_path = None
+    for f in os.listdir(CACHE_DIR):
+        if f.startswith('splade_') and f.endswith('.pkl'):
+            splade_path = os.path.join(CACHE_DIR, f)
+            break
+    if splade_path is None:
+        raise FileNotFoundError("SPLADE cache not found")
+
+    log(f"  [splade] 加载: {os.path.getsize(splade_path)/1024/1024:.1f} MB")
+    with open(splade_path, 'rb') as f:
+        retriever = pickle.load(f)
+    return retriever
 
 def load_noisy_queries() -> Tuple[List[Dict], Set[Tuple[str, str]]]:
     """加载 noisy 查询，返回 (queries, user_asin_pairs)"""
@@ -372,6 +389,129 @@ def evaluate_correct_queries(retriever_name: str, queries: List[Dict], k_values:
             metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
             all_metrics.append(metrics)
 
+    elif retriever_name == 'splade':
+        # SPLADE 特殊处理：使用矩阵乘法
+        from utils.retrievers import SPLADERetriever
+        from scipy import sparse
+
+        log(f"  加载 SPLADE 检索器...")
+        retriever = load_splade_retriever()
+
+        # 确保索引已构建（触发 lazy initialization of inverted index）
+        retriever.search(["dummy"], top_k=1)
+
+        # 加载 SPLADE correct 查询缓存（特殊格式：{user_id: {query_text: sparse_vec}})
+        def load_splade_correct_cache(query_category: str) -> Dict:
+            cache_path = os.path.join(
+                QUERY_CACHE_BASE_DIR,
+                f'{query_category}_correct_query',
+                f'splade__{query_category}_correct_cache.pkl'
+            )
+            if not os.path.exists(cache_path):
+                return None
+            with open(cache_path, 'rb') as f:
+                return pickle.load(f)
+
+        acl_cache = load_splade_correct_cache('acl')
+        ccomp_cache = load_splade_correct_cache('ccomp')
+
+        all_query_texts = [q['query'] for q in queries]
+        all_asins = [q['asin'] for q in queries]
+        all_user_ids = [q['user_id'] for q in queries]
+        all_categories = [q['query_category'] for q in queries]
+
+        log(f"  查询数: {len(all_query_texts)}")
+
+        if not (acl_cache or ccomp_cache):
+            log(f"  错误: SPLADE Correct 查询缓存不存在")
+            return None
+
+        log(f"  使用 SPLADE correct 查询缓存...")
+
+        # 收集所有查询的 sparse vectors
+        all_q_data = []
+        for user_id, query_text, category in zip(all_user_ids, all_query_texts, all_categories):
+            cache = acl_cache if category == 'acl' else ccomp_cache
+            if cache and user_id in cache and query_text in cache[user_id]:
+                all_q_data.append({
+                    'query': query_text,
+                    'q_vec': cache[user_id][query_text],
+                    'relevant_asin': all_asins[all_user_ids.index(user_id)]
+                })
+
+        log(f"  有效查询: {len(all_q_data)}")
+
+        if not all_q_data:
+            return None
+
+        # 从 inverted index 构建文档矩阵 (term × doc)
+        inverted_index = retriever._inverted_index
+        n_docs = len(retriever.doc_ids)
+
+        log(f"  从倒排索引构建文档矩阵...")
+
+        # 构建 term×doc 的稀疏矩阵
+        row_indices = []
+        col_indices = []
+        data_values = []
+        for term_id, doc_list in inverted_index.items():
+            for doc_idx, d_weight in doc_list:
+                row_indices.append(term_id)
+                col_indices.append(doc_idx)
+                data_values.append(d_weight)
+
+        max_term_id = max(inverted_index.keys()) if inverted_index else 0
+        n_terms = max_term_id + 1
+
+        doc_matrix = sparse.csr_matrix(
+            (data_values, (row_indices, col_indices)),
+            shape=(n_terms, n_docs),
+            dtype=np.float32
+        )
+        log(f"  文档矩阵构建完成: {n_terms} terms × {n_docs} docs")
+
+        # 构建查询矩阵 (n_queries × n_terms)
+        q_rows = []
+        q_cols = []
+        q_data = []
+
+        for q_idx, qd in enumerate(all_q_data):
+            for term_id, q_weight in qd['q_vec'].items():
+                q_rows.append(q_idx)
+                q_cols.append(term_id)
+                q_data.append(q_weight)
+
+        n_queries = len(all_q_data)
+        query_matrix = sparse.csr_matrix(
+            (q_data, (q_rows, q_cols)),
+            shape=(n_queries, n_terms),
+            dtype=np.float32
+        )
+        log(f"  查询矩阵构建完成: {query_matrix.shape}")
+
+        # 矩阵乘法: (n_queries × n_terms) @ (n_terms × n_docs) = (n_queries × n_docs)
+        log(f"  执行矩阵乘法...")
+        score_matrix = query_matrix @ doc_matrix
+        log(f"  矩阵乘法完成: {score_matrix.shape}")
+
+        # 提取 top-k 结果
+        max_k = max(k_values)
+        all_metrics = []
+        for i, qd in enumerate(all_q_data):
+            row = score_matrix.getrow(i)
+            scores_vec = row.toarray().flatten()
+            top_indices = np.argsort(scores_vec)[::-1][:max_k]
+            retrieved_asins = [retriever.doc_ids[idx] for idx in top_indices]
+            metrics = compute_metrics(qd['relevant_asin'], retrieved_asins, k_values)
+            all_metrics.append(metrics)
+
+        overall_metrics = compute_average_metrics(all_metrics, k_values)
+        return {
+            'retriever': retriever_name,
+            'num_queries': len(all_metrics),
+            'metrics': overall_metrics
+        }
+
     else:
         embeddings, doc_ids, dim = load_dense_retriever(retriever_name)
         searcher = DenseSearcher(embeddings, doc_ids)
@@ -471,6 +611,129 @@ def evaluate_noisy_queries(retriever_name: str, queries: List[Dict], k_values: L
             retrieved_asins = [r[0] for r in retrieved]
             metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
             all_metrics.append(metrics)
+
+    elif retriever_name == 'splade':
+        # SPLADE 特殊处理：使用矩阵乘法
+        from utils.retrievers import SPLADERetriever
+        from scipy import sparse
+
+        log(f"  加载 SPLADE 检索器...")
+        retriever = load_splade_retriever()
+
+        # 确保索引已构建（触发 lazy initialization of inverted index）
+        retriever.search(["dummy"], top_k=1)
+
+        # 加载 SPLADE noisy 查询缓存（特殊格式：{user_id: {query_text: sparse_vec}})
+        def load_splade_noisy_cache(query_category: str) -> Dict:
+            cache_path = os.path.join(
+                QUERY_CACHE_BASE_DIR,
+                f'{query_category}_noisy_query',
+                f'splade__{query_category}_noisy_cache.pkl'
+            )
+            if not os.path.exists(cache_path):
+                return None
+            with open(cache_path, 'rb') as f:
+                return pickle.load(f)
+
+        acl_cache = load_splade_noisy_cache('acl')
+        ccomp_cache = load_splade_noisy_cache('ccomp')
+
+        all_query_texts = [q['query'] for q in queries]
+        all_asins = [q['asin'] for q in queries]
+        all_user_ids = [q['user_id'] for q in queries]
+        all_categories = [q['query_category'] for q in queries]
+
+        log(f"  查询数: {len(all_query_texts)}")
+
+        if not (acl_cache or ccomp_cache):
+            log(f"  错误: SPLADE Noisy 查询缓存不存在")
+            return None
+
+        log(f"  使用 SPLADE noisy 查询缓存...")
+
+        # 收集所有查询的 sparse vectors
+        all_q_data = []
+        for user_id, query_text, category in zip(all_user_ids, all_query_texts, all_categories):
+            cache = acl_cache if category == 'acl' else ccomp_cache
+            if cache and user_id in cache and query_text in cache[user_id]:
+                all_q_data.append({
+                    'query': query_text,
+                    'q_vec': cache[user_id][query_text],
+                    'relevant_asin': all_asins[all_user_ids.index(user_id)]
+                })
+
+        log(f"  有效查询: {len(all_q_data)}")
+
+        if not all_q_data:
+            return None
+
+        # 从 inverted index 构建文档矩阵 (term × doc)
+        inverted_index = retriever._inverted_index
+        n_docs = len(retriever.doc_ids)
+
+        log(f"  从倒排索引构建文档矩阵...")
+
+        # 构建 term×doc 的稀疏矩阵
+        row_indices = []
+        col_indices = []
+        data_values = []
+        for term_id, doc_list in inverted_index.items():
+            for doc_idx, d_weight in doc_list:
+                row_indices.append(term_id)
+                col_indices.append(doc_idx)
+                data_values.append(d_weight)
+
+        max_term_id = max(inverted_index.keys()) if inverted_index else 0
+        n_terms = max_term_id + 1
+
+        doc_matrix = sparse.csr_matrix(
+            (data_values, (row_indices, col_indices)),
+            shape=(n_terms, n_docs),
+            dtype=np.float32
+        )
+        log(f"  文档矩阵构建完成: {n_terms} terms × {n_docs} docs")
+
+        # 构建查询矩阵 (n_queries × n_terms)
+        q_rows = []
+        q_cols = []
+        q_data = []
+
+        for q_idx, qd in enumerate(all_q_data):
+            for term_id, q_weight in qd['q_vec'].items():
+                q_rows.append(q_idx)
+                q_cols.append(term_id)
+                q_data.append(q_weight)
+
+        n_queries = len(all_q_data)
+        query_matrix = sparse.csr_matrix(
+            (q_data, (q_rows, q_cols)),
+            shape=(n_queries, n_terms),
+            dtype=np.float32
+        )
+        log(f"  查询矩阵构建完成: {query_matrix.shape}")
+
+        # 矩阵乘法: (n_queries × n_terms) @ (n_terms × n_docs) = (n_queries × n_docs)
+        log(f"  执行矩阵乘法...")
+        score_matrix = query_matrix @ doc_matrix
+        log(f"  矩阵乘法完成: {score_matrix.shape}")
+
+        # 提取 top-k 结果
+        max_k = max(k_values)
+        all_metrics = []
+        for i, qd in enumerate(all_q_data):
+            row = score_matrix.getrow(i)
+            scores_vec = row.toarray().flatten()
+            top_indices = np.argsort(scores_vec)[::-1][:max_k]
+            retrieved_asins = [retriever.doc_ids[idx] for idx in top_indices]
+            metrics = compute_metrics(qd['relevant_asin'], retrieved_asins, k_values)
+            all_metrics.append(metrics)
+
+        overall_metrics = compute_average_metrics(all_metrics, k_values)
+        return {
+            'retriever': retriever_name,
+            'num_queries': len(all_metrics),
+            'metrics': overall_metrics
+        }
 
     else:
         embeddings, doc_ids, dim = load_dense_retriever(retriever_name)

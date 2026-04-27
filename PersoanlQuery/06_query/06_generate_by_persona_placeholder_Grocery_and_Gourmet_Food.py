@@ -18,7 +18,7 @@ import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery')
+sys.path.insert(0, '/home/wlia0047/ar57/wenyu/PersoanlQuery')
 
 # ========================================
 # 加载配置
@@ -531,30 +531,87 @@ def main():
     acl_profile_map = {p['user_id']: p for p in acl_user_profiles}
     ccomp_profile_map = {p['user_id']: p for p in ccomp_user_profiles}
 
-    # 构建用户数据
-    all_user_ids = set(user_level_map.keys()) & set(acl_profile_map.keys()) & set(ccomp_profile_map.keys()) & set(user_wpa_map.keys())
-    log(f"同时存在于level、ACL、CCOMP和attr_density的用户数: {len(all_user_ids)}")
+    # ========================================
+    # 详细过滤步骤
+    # ========================================
+    total_users = len(user_level_map)
+    log(f"\n{'='*60}")
+    log(f"用户过滤详细步骤")
+    log(f"{'='*60}")
+    log(f"Step 0: 原始用户总数: {total_users}")
 
-    all_user_data = []
+    # Step 1: 只检查是否在 level.json 中
+    all_user_ids = set(user_level_map.keys())
+    log(f"Step 1: 检查是否在 level.json 中")
+    log(f"  - level.json 用户: {len(user_level_map)}")
+    log(f"  → 存在于 level.json 的用户: {len(all_user_ids)} (过滤: {total_users - len(all_user_ids)})")
+
+    # Step 2: 过滤无产品数据的用户
+    filtered_by_no_prod = 0
+    temp_user_ids = set()
     for uid in all_user_ids:
-        acl_profile = acl_profile_map[uid]
-        ccomp_profile = ccomp_profile_map[uid]
+        if user_prod_map.get(uid):
+            temp_user_ids.add(uid)
+        else:
+            filtered_by_no_prod += 1
+    log(f"Step 2: 过滤无产品数据的用户")
+    log(f"  - 无产品数据的用户: {filtered_by_no_prod}")
+    log(f"  → 剩余用户: {len(temp_user_ids)}")
 
-        user_products = user_prod_map.get(uid, [])
-        if not user_products:
-            continue
-        prod = user_products[0]
+    # Step 3: 过滤无 attr_density 数据的用户
+    filtered_by_no_wpa = 0
+    temp2_user_ids = set()
+    for uid in temp_user_ids:
+        if user_wpa_map.get(uid) is not None:
+            temp2_user_ids.add(uid)
+        else:
+            filtered_by_no_wpa += 1
+    log(f"Step 3: 过滤无 attr_density 数据的用户")
+    log(f"  - 无 attr_density 数据的用户: {filtered_by_no_wpa}")
+    log(f"  → 剩余用户: {len(temp2_user_ids)}")
 
-        words_per_attribute = user_wpa_map.get(uid)
-        if words_per_attribute is None:
-            continue
-
+    # Step 4: 过滤 ACL > 3 或 CCOMP > 3 的用户
+    filtered_by_level = 0
+    filtered_acl_gt3 = 0
+    filtered_ccomp_gt3 = 0
+    filtered_both_gt3 = 0
+    temp3_user_ids = set()
+    for uid in temp2_user_ids:
         level_info = user_level_map.get(uid, {})
         acl_level = level_info.get('acl_level', 0)
         ccomp_level = level_info.get('ccomp_level', 0)
-
         if acl_level > 3 or ccomp_level > 3:
-            continue
+            filtered_by_level += 1
+            if acl_level > 3 and ccomp_level > 3:
+                filtered_both_gt3 += 1
+            elif acl_level > 3:
+                filtered_acl_gt3 += 1
+            else:
+                filtered_ccomp_gt3 += 1
+        else:
+            temp3_user_ids.add(uid)
+    log(f"Step 4: 过滤 ACL > 3 或 CCOMP > 3 的用户")
+    log(f"  - ACL > 3: {filtered_acl_gt3}")
+    log(f"  - CCOMP > 3: {filtered_ccomp_gt3}")
+    log(f"  - 两者都 > 3: {filtered_both_gt3}")
+    log(f"  → 剩余用户: {len(temp3_user_ids)}")
+
+    # Step 5: 汇总有效用户
+    log(f"\n{'='*60}")
+    log(f"过滤完成，总计有效用户: {len(temp3_user_ids)}")
+    log(f"总过滤用户: {total_users - len(temp3_user_ids)}")
+    log(f"{'='*60}\n")
+
+    # 构建用户数据
+    all_user_data = []
+    for uid in temp3_user_ids:
+        acl_profile = acl_profile_map[uid]
+        ccomp_profile = ccomp_profile_map[uid]
+        prod = user_prod_map[uid][0]
+        words_per_attribute = user_wpa_map.get(uid)
+        level_info = user_level_map.get(uid, {})
+        acl_level = level_info.get('acl_level', 0)
+        ccomp_level = level_info.get('ccomp_level', 0)
 
         all_user_data.append({
             'uid': uid,
@@ -583,9 +640,22 @@ def main():
             existing_results = []
             completed_user_ids = set()
 
+    # 详细分析已完成用户与有效用户的关系
+    valid_user_ids = {u['uid'] for u in all_user_data}
+    completed_in_valid = completed_user_ids & valid_user_ids
+    completed_not_in_valid = completed_user_ids - valid_user_ids
+    log(f"\n{'='*60}")
+    log(f"已完成用户分析")
+    log(f"{'='*60}")
+    log(f"已完成用户总数: {len(completed_user_ids)}")
+    log(f"在有效用户集中的已完成用户: {len(completed_in_valid)}")
+    log(f"不在有效用户集中的已完成用户（脏数据）: {len(completed_not_in_valid)}")
+    log(f"{'='*60}\n")
+
     # 过滤掉已完成的用户
+    original_count = len(all_user_data)
     all_user_data = [u for u in all_user_data if u['uid'] not in completed_user_ids]
-    log(f"去除已完成后剩余用户数: {len(all_user_data)}")
+    log(f"去除已完成后剩余用户数: {len(all_user_data)} (过滤: {original_count - len(all_user_data)})")
 
     # 预热 cache
     prewarm_cache()

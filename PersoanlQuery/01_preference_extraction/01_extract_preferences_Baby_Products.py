@@ -1045,7 +1045,7 @@ def process_chunk(items: List) -> Tuple[List[Dict], Dict]:
 
 def main():
     INPUT_FILE = "/fs04/ar57/wenyu/data/Amazon-Reviews-2023/meta_Baby_Products.jsonl.gz"
-    OUTPUT_FILE = "/home/wlia0047/ar57_scratch/wenyu/result/personal_query/01_preference_extraction/Baby_Products/attributes_Baby_Products.json"
+    OUTPUT_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction/Baby_Products/attributes_Baby_Products.json"
     STAGE0_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/00_data_preparation/Baby_Products"
 
     os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)

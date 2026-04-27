@@ -16,9 +16,7 @@
 - target_length = ceil(words_per_attribute) * 5
 - words_per_acl = total_token_count / acl_count (仅 acl，不含 relcl)
 - ground_truth_acl = int(target_length / words_per_acl)
-- ground_truth_acl = max(0, min(3, ground_truth_acl))
 - ground_truth_ccomp = int(target_length / words_per_ccomp)
-- ground_truth_ccomp = max(0, min(3, ground_truth_ccomp))
 
 注意：words_per_acl 仅统计 acl（形容词性从句），不包含 relcl（关系从句）
 """
@@ -65,6 +63,7 @@ def main():
         acl_file = f"{BASE_DIR}/{category}/acl_user_profiles.json"
         ccomp_file = f"{BASE_DIR}/{category}/ccomp_user_profiles.json"
         attr_file = f"{BASE_DIR}/{category}/attr_density_user_profiles.json"
+        prod_file = f"/home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction/{category}/attributes_{category}.json"
 
         # 跳过不存在的类别
         if not os.path.exists(acl_file):
@@ -85,6 +84,16 @@ def main():
         log(f"加载 AttrDensity 用户画像: {attr_file}")
         with open(attr_file, 'r', encoding='utf-8') as f:
             attr_users = json.load(f)
+
+        # 加载产品数据（用于检查用户是否有产品）
+        log(f"加载产品数据: {prod_file}")
+        with open(prod_file, 'r', encoding='utf-8') as f:
+            prod_data = json.load(f)
+        prod_users = set()
+        for p in prod_data.get('products', []):
+            if p.get('user_id'):
+                prod_users.add(p.get('user_id'))
+        log(f"  产品数据用户数: {len(prod_users)}")
 
         # 构建 user_id -> words_per_attribute 映射
         user_wpa_map = {}
@@ -114,13 +123,24 @@ def main():
         user_levels = []  # 保存每个用户的等级
 
         valid_user_count = 0
-        skip_count = 0
+        skip_no_wpa = 0
+        skip_no_prod = 0
+        skip_no_acl = 0
+        skip_no_ccomp = 0
 
         for uid, acl_profile in user_acl_map.items():
+            # 检查用户是否同时存在于 ACL、CCOMP 和产品数据中
+            if uid not in user_ccomp_map:
+                skip_no_ccomp += 1
+                continue
+            if uid not in prod_users:
+                skip_no_prod += 1
+                continue
+
             # 获取 words_per_attribute
             words_per_attribute = user_wpa_map.get(uid)
             if words_per_attribute is None:
-                skip_count += 1
+                skip_no_wpa += 1
                 continue
 
             # 获取句子数
@@ -131,13 +151,13 @@ def main():
             # ACL: level = int((acl + relcl) / 句子数)
             acl_type_dist = acl_profile.get('acl_type_distribution', {})
             acl_count = acl_type_dist.get('acl', 0) + acl_type_dist.get('relcl_reference', 0)
-            ground_truth_acl = max(0, min(3, int(acl_count / total_sentences)))
+            ground_truth_acl = int(acl_count / total_sentences)
 
             # CCOMP: level = int(ccomp / 句子数)
             ccomp_profile = user_ccomp_map.get(uid, {})
             ccomp_type_dist = ccomp_profile.get('ccomp_type_distribution', {})
             ccomp_count = ccomp_type_dist.get('ccomp', 0)
-            ground_truth_ccomp = max(0, min(3, int(ccomp_count / total_sentences)))
+            ground_truth_ccomp = int(ccomp_count / total_sentences)
 
             acl_level_counts[ground_truth_acl] += 1
             ccomp_level_counts[ground_truth_ccomp] += 1
@@ -150,15 +170,21 @@ def main():
                 'ccomp_level': ground_truth_ccomp
             })
 
-        if skip_count > 0:
-            log(f"  跳过 {skip_count} 个用户（缺少 words_per_attribute 数据）")
+        log(f"  跳过用户统计:")
+        log(f"    - 缺少 words_per_attribute: {skip_no_wpa}")
+        log(f"    - 缺少产品数据: {skip_no_prod}")
+        log(f"    - 缺少 ACL 数据: {skip_no_acl}")
+        log(f"    - 缺少 CCOMP 数据: {skip_no_ccomp}")
+        total_skip = skip_no_wpa + skip_no_prod + skip_no_acl + skip_no_ccomp
+        if total_skip > 0:
+            log(f"  总跳过用户: {total_skip}")
 
         # 打印 ACL 统计
         log(f"\n  ACL 等级分布（有效用户: {valid_user_count}）:")
         log(f"  {'等级':<10} {'用户数':<10} {'占比':<10}")
         log(f"  {'-' * 30}")
         total_acl_users = sum(acl_level_counts.values())
-        for level in range(4):
+        for level in sorted(acl_level_counts.keys()):
             count = acl_level_counts.get(level, 0)
             pct = count / total_acl_users * 100 if total_acl_users > 0 else 0
             log(f"  ACL{level:<8} {count:<10} {pct:.1f}%")
@@ -168,7 +194,7 @@ def main():
         log(f"  {'等级':<10} {'用户数':<10} {'占比':<10}")
         log(f"  {'-' * 30}")
         total_ccomp_users = sum(ccomp_level_counts.values())
-        for level in range(4):
+        for level in sorted(ccomp_level_counts.keys()):
             count = ccomp_level_counts.get(level, 0)
             pct = count / total_ccomp_users * 100 if total_ccomp_users > 0 else 0
             log(f"  CCOMP{level:<6} {count:<10} {pct:.1f}%")
@@ -185,7 +211,10 @@ def main():
             'ccomp_level_counts': dict(ccomp_level_counts),
             'total_acl_users': total_acl_users,
             'total_ccomp_users': total_ccomp_users,
-            'skip_count': skip_count
+            'skip_no_wpa': skip_no_wpa,
+            'skip_no_prod': skip_no_prod,
+            'skip_no_acl': skip_no_acl,
+            'skip_no_ccomp': skip_no_ccomp
         }
 
     # ========================================
@@ -212,7 +241,7 @@ def main():
     log(f"\n  ACL 等级汇总（总用户: {grand_total_acl}）:")
     log(f"  {'等级':<10} {'用户数':<10} {'占比':<10}")
     log(f"  {'-' * 30}")
-    for level in range(4):
+    for level in sorted(total_acl_by_level.keys()):
         count = total_acl_by_level.get(level, 0)
         pct = count / grand_total_acl * 100 if grand_total_acl > 0 else 0
         log(f"  ACL{level:<8} {count:<10} {pct:.1f}%")
@@ -220,7 +249,7 @@ def main():
     log(f"\n  CCOMP 等级汇总（总用户: {grand_total_ccomp}）:")
     log(f"  {'等级':<10} {'用户数':<10} {'占比':<10}")
     log(f"  {'-' * 30}")
-    for level in range(4):
+    for level in sorted(total_ccomp_by_level.keys()):
         count = total_ccomp_by_level.get(level, 0)
         pct = count / grand_total_ccomp * 100 if grand_total_ccomp > 0 else 0
         log(f"  CCOMP{level:<6} {count:<10} {pct:.1f}%")
