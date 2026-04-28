@@ -45,7 +45,7 @@ CATEGORY_NAME = "Baby_Products"
 MODEL_NAME = "colbert-ir/colbertv2.0"
 NBITS = 2
 TARGET_NUM_PARTITIONS = 32768
-KMEANS_NITERS = 8
+KMEANS_NITERS = 1
 EXPERIMENT_NAME = "colbertv2_index"
 
 
@@ -96,8 +96,18 @@ def compute_document_hash(documents: List[Dict]) -> str:
     return doc_hash
 
 
+def should_skip_existing_file(path: str) -> bool:
+    """如果目标文件已存在且非空，则跳过重复写入。"""
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        log_with_timestamp(f"[DEBUG] Skip existing file: {path}")
+        return True
+    return False
+
+
 def write_collection_tsv(documents: List[Dict], all_metadata: Dict, collection_path: str) -> None:
     log_with_timestamp("[DEBUG] Stage 4: collection TSV writing started")
+    if should_skip_existing_file(collection_path):
+        return
     log_with_timestamp(f"Writing collection TSV to {collection_path}...")
     with open(collection_path, 'w', encoding='utf-8') as f:
         for pid, doc in enumerate(documents):
@@ -177,6 +187,7 @@ def patch_colbert_indexing_params() -> None:
     import numpy as np
 
     original_setup = CollectionIndexer.setup
+    original_train_kmeans = CollectionIndexer._train_kmeans
 
     def setup_with_fixed_partitions(self):
         if self.config.resume:
@@ -206,6 +217,42 @@ def patch_colbert_indexing_params() -> None:
         self._save_plan()
 
     CollectionIndexer.setup = setup_with_fixed_partitions
+
+    def train_kmeans_with_checkpoint(self, sample, shared_lists):
+        centroids = original_train_kmeans(self, sample, shared_lists)
+
+        checkpoint_dir = os.path.join(self.config.index_path_, "kmeans_checkpoints")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        centroids_path = os.path.join(
+            checkpoint_dir,
+            f"iter_{self.config.kmeans_niters:03d}_centroids.pt",
+        )
+        metadata_path = os.path.join(
+            checkpoint_dir,
+            f"iter_{self.config.kmeans_niters:03d}_metadata.json",
+        )
+
+        if not should_skip_existing_file(centroids_path):
+            torch.save(centroids.cpu(), centroids_path)
+            log_with_timestamp(f"[DEBUG] Stage 5: saved kmeans centroids checkpoint to {centroids_path}")
+
+        if not should_skip_existing_file(metadata_path):
+            metadata = {
+                "kmeans_niters": self.config.kmeans_niters,
+                "num_partitions": self.num_partitions,
+                "num_centroids": int(centroids.size(0)),
+                "dim": int(centroids.size(1)),
+                "dtype": str(centroids.dtype),
+                "created_at": datetime.now().isoformat(),
+            }
+            with open(metadata_path, "w", encoding="utf-8") as f:
+                json.dump(metadata, f, ensure_ascii=False, indent=2)
+            log_with_timestamp(f"[DEBUG] Stage 5: saved kmeans metadata checkpoint to {metadata_path}")
+
+        return centroids
+
+    CollectionIndexer._train_kmeans = train_kmeans_with_checkpoint
 
 
 def validate_cuda_toolkit_for_colbert() -> None:
@@ -270,6 +317,83 @@ def validate_cuda_toolkit_for_colbert() -> None:
     log_with_timestamp(f"[DEBUG] Stage 5: detected cuda_runtime.h at {existing_headers[0]}")
 
 
+def configure_cuda_env_for_colbert_extension_build() -> None:
+    """为 torch cpp_extension / nvcc 注入 conda CUDA 头文件路径。"""
+    candidate_roots = []
+    for key in ("CUDA_HOME", "CUDA_PATH"):
+        root = os.environ.get(key)
+        if root and root not in candidate_roots:
+            candidate_roots.append(root)
+
+    nvcc_path = shutil.which("nvcc")
+    if nvcc_path:
+        inferred_root = os.path.dirname(os.path.dirname(os.path.realpath(nvcc_path)))
+        if inferred_root not in candidate_roots:
+            candidate_roots.append(inferred_root)
+
+    include_dirs = []
+    for root in candidate_roots:
+        standard_include = os.path.join(root, "include")
+        if os.path.isdir(standard_include) and standard_include not in include_dirs:
+            include_dirs.append(standard_include)
+
+        targets_root = os.path.join(root, "targets")
+        if os.path.isdir(targets_root):
+            for target_name in sorted(os.listdir(targets_root)):
+                target_include = os.path.join(targets_root, target_name, "include")
+                if os.path.isdir(target_include) and target_include not in include_dirs:
+                    include_dirs.append(target_include)
+
+    if not include_dirs:
+        raise RuntimeError(
+            "无法为 ColBERT CUDA 扩展编译配置头文件目录：未找到有效的 CUDA include 路径。"
+        )
+
+    for env_key in ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"):
+        existing = os.environ.get(env_key, "")
+        paths = [path for path in existing.split(":") if path]
+        for include_dir in reversed(include_dirs):
+            if include_dir not in paths:
+                paths.insert(0, include_dir)
+        os.environ[env_key] = ":".join(paths)
+
+    log_with_timestamp(f"[DEBUG] Stage 5: configured CUDA include dirs={include_dirs}")
+    log_with_timestamp(f"[DEBUG] Stage 5: CPATH={os.environ.get('CPATH')}")
+    log_with_timestamp(f"[DEBUG] Stage 5: CPLUS_INCLUDE_PATH={os.environ.get('CPLUS_INCLUDE_PATH')}")
+
+
+def preflight_colbert_cuda_extension_build() -> None:
+    """在正式编码/聚类前，提前触发 ColBERT CUDA 扩展编译。"""
+    log_with_timestamp("[DEBUG] Stage 5: preflight build for ColBERT CUDA extension started")
+
+    include_candidates = []
+    for env_key in ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"):
+        include_candidates.extend([path for path in os.environ.get(env_key, "").split(":") if path])
+
+    thrust_header_candidates = [
+        os.path.join(include_dir, "thrust", "complex.h")
+        for include_dir in include_candidates
+    ]
+    existing_thrust_headers = [path for path in thrust_header_candidates if os.path.exists(path)]
+    if not existing_thrust_headers:
+        raise RuntimeError(
+            "ColBERT CUDA 扩展预检查失败：未找到 thrust/complex.h。"
+            f"已检查路径: {thrust_header_candidates}"
+        )
+
+    log_with_timestamp(f"[DEBUG] Stage 5: detected thrust header at {existing_thrust_headers[0]}")
+
+    from colbert.indexing.codecs.residual import ResidualCodec
+
+    try:
+        ResidualCodec.try_load_torch_extensions(use_gpu=True)
+    except Exception as e:
+        log_with_timestamp(f"[ERROR] Stage 5: ColBERT CUDA extension preflight failed: {type(e).__name__}: {e}")
+        raise
+
+    log_with_timestamp("[DEBUG] Stage 5: preflight build for ColBERT CUDA extension complete")
+
+
 def build_colbert_index(documents: List[Dict], all_metadata: Dict, output_root: str) -> str:
     log_with_timestamp("[DEBUG] Stage 5: ColBERT build started")
     if not torch.cuda.is_available():
@@ -297,6 +421,8 @@ def build_colbert_index(documents: List[Dict], all_metadata: Dict, output_root: 
         raise RuntimeError("CUDA is available but no visible GPU ranks were detected")
 
     validate_cuda_toolkit_for_colbert()
+    configure_cuda_env_for_colbert_extension_build()
+    preflight_colbert_cuda_extension_build()
 
     log_with_timestamp(f"[DEBUG] Stage 5: detected CUDA device count={nranks}")
     log_with_timestamp(
@@ -343,13 +469,15 @@ def save_build_artifacts(output_root: str, documents: List[Dict], all_metadata: 
     manifest_path = os.path.join(output_root, "build_manifest.json")
 
     doc_ids = [doc.get('asin', '') for doc in documents]
-    log_with_timestamp(f"[DEBUG] Stage 6: saving doc_ids to {doc_ids_path}")
-    with open(doc_ids_path, 'wb') as f:
-        pickle.dump(doc_ids, f)
+    if not should_skip_existing_file(doc_ids_path):
+        log_with_timestamp(f"[DEBUG] Stage 6: saving doc_ids to {doc_ids_path}")
+        with open(doc_ids_path, 'wb') as f:
+            pickle.dump(doc_ids, f)
 
-    log_with_timestamp(f"[DEBUG] Stage 6: saving metadata to {metadata_path}")
-    with open(metadata_path, 'wb') as f:
-        pickle.dump(all_metadata, f)
+    if not should_skip_existing_file(metadata_path):
+        log_with_timestamp(f"[DEBUG] Stage 6: saving metadata to {metadata_path}")
+        with open(metadata_path, 'wb') as f:
+            pickle.dump(all_metadata, f)
 
     manifest = {
         "category": CATEGORY_NAME,
@@ -364,9 +492,10 @@ def save_build_artifacts(output_root: str, documents: List[Dict], all_metadata: 
         "collection_path": collection_path,
         "created_at": datetime.now().isoformat(),
     }
-    log_with_timestamp(f"[DEBUG] Stage 6: saving manifest to {manifest_path}")
-    with open(manifest_path, 'w', encoding='utf-8') as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    if not should_skip_existing_file(manifest_path):
+        log_with_timestamp(f"[DEBUG] Stage 6: saving manifest to {manifest_path}")
+        with open(manifest_path, 'w', encoding='utf-8') as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
 
     log_with_timestamp(f"Saved doc_ids: {doc_ids_path}")
     log_with_timestamp(f"Saved metadata: {metadata_path}")
