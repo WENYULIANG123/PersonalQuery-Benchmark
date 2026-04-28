@@ -21,8 +21,8 @@ CATEGORY_SHORT_NAMES = {
     "Pet_Supplies": "Pet",
 }
 
-# 对比脚本中禁用的检索器（例如：本次对比不包含 SPLADE）
-DISABLED_RETRIEVERS = {"splade"}
+# 对比脚本中禁用的检索器
+DISABLED_RETRIEVERS = set()
 
 
 def round4(x: float) -> float:

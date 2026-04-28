@@ -59,8 +59,8 @@
     "document_cache": "{scratch_result}/08_retrieval/document_cache"
   },
   "retriever_config": {
-    "retrievers": ["bge", "e5", "minilm", "star", "ance", "splade", "bm25"],
-    "dense_retrievers": ["bge", "e5", "minilm", "star", "ance"],
+    "retrievers": ["bge", "e5", "minilm", "star", "gritlm", "ance", "splade", "bm25"],
+    "dense_retrievers": ["bge", "e5", "minilm", "star", "gritlm", "ance"],
     "sparse_retrievers": ["splade"],
     "idf_bins": [[2.5, 3.5], [3.5, 4.5], [4.5, 5.0], [5.0, "inf"]],
     "idf_bin_labels": ["IDF[2.5-3.5)", "IDF[3.5-4.5)", "IDF[4.5-5.0)", "IDF[5.0+)"]

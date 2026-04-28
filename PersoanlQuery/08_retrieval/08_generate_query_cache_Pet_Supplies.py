@@ -556,7 +556,7 @@ def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str 
                         else:
                             if not isinstance(encoding, np.ndarray):
                                 if isinstance(encoding, torch.Tensor):
-                                    encoding = encoding.cpu().numpy()
+                                    encoding = np.asarray(encoding.detach().tolist(), dtype=np.float32)
                                 else:
                                     encoding = np.array(encoding)
                             cache[query_text] = encoding
@@ -602,7 +602,7 @@ def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str 
                 # Dense 检索器返回 numpy array 或 tensor
                 if not isinstance(encoding, np.ndarray):
                     if isinstance(encoding, torch.Tensor):
-                        encoding = encoding.cpu().numpy()
+                        encoding = np.asarray(encoding.detach().tolist(), dtype=np.float32)
                     else:
                         encoding = np.array(encoding)
                 cache[query_text] = encoding
@@ -1084,7 +1084,7 @@ def generate_cache_for_all_retrievers(
 def main():
     # ==================== 硬编码配置 ====================
     # 检索器列表：核心5个 + ANCE + SPLADE + BM25
-    RETRIEVER_NAMES = ['BGE', 'E5', 'MiniLM', 'STAR', 'ANCE', 'SPLADE', 'BM25']
+    RETRIEVER_NAMES = ['GRITLM', 'BGE', 'E5', 'MiniLM', 'STAR', 'ANCE', 'SPLADE', 'BM25']
     # 是否清理旧缓存
     CLEAR_CACHE_BEFORE = True
     # 数据源：persona_generated_queries.json

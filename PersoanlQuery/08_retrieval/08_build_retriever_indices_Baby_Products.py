@@ -244,8 +244,8 @@ def _normalize_embeddings_for_save(embeddings, retriever_name: str) -> np.ndarra
         # Already a tensor or array
         if isinstance(embeddings, np.ndarray):
             return embeddings.astype(np.float32)
-        elif hasattr(embeddings, 'cpu'):
-            return embeddings.cpu().numpy().astype(np.float32)
+        elif hasattr(embeddings, 'detach'):
+            return np.asarray(embeddings.detach().tolist(), dtype=np.float32)
         else:
             return embeddings.numpy().astype(np.float32)
     
@@ -256,8 +256,8 @@ def _normalize_embeddings_for_save(embeddings, retriever_name: str) -> np.ndarra
     for i, emb in enumerate(embeddings):
         # Convert to numpy
         log_with_timestamp(f"[DEBUG] Processing embedding {i}: type={type(emb)}")
-        if hasattr(emb, 'cpu'):
-            emb_np = emb.cpu().numpy()
+        if hasattr(emb, 'detach'):
+            emb_np = np.asarray(emb.detach().tolist(), dtype=np.float32)
         elif isinstance(emb, np.ndarray):
             emb_np = emb
         else:
@@ -368,19 +368,19 @@ def save_retriever_to_cache(retriever_name: str, doc_hash: str, retriever: objec
             paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
 
             # ColBERT embeddings are list of tensors (possibly nested for multi-window)
-            # Move to CPU before saving
+            # 保留 GPU 张量后保存
             if hasattr(retriever, 'doc_embeddings') and retriever.doc_embeddings is not None:
-                log_with_timestamp(f"[DEBUG] Moving ColBERT embeddings to CPU before saving...")
-                doc_embeddings_cpu = []
+                log_with_timestamp(f"[DEBUG] Keeping ColBERT embeddings on GPU before saving...")
+                doc_embeddings_gpu = []
                 for i, emb in enumerate(retriever.doc_embeddings):
                     if isinstance(emb, list):
                         # Multi-window: list of tensors
-                        doc_embeddings_cpu.append([w.cpu() for w in emb])
+                        doc_embeddings_gpu.append([w.detach() for w in emb])
                     else:
                         # Single tensor
-                        doc_embeddings_cpu.append(emb.cpu())
-                retriever.doc_embeddings = doc_embeddings_cpu
-                log_with_timestamp(f"[DEBUG] ColBERT embeddings moved to CPU")
+                        doc_embeddings_gpu.append(emb.detach())
+                retriever.doc_embeddings = doc_embeddings_gpu
+                log_with_timestamp(f"[DEBUG] ColBERT embeddings kept on GPU")
 
             log_with_timestamp(f"[DEBUG] Saving ColBERT to {paths['pickle']}...")
             with open(paths['pickle'], 'wb') as f:

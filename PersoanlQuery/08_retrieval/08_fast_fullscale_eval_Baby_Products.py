@@ -45,11 +45,8 @@ META_FILE = CAT_CONFIG['corpus_file']
 RETRIEVER_CONFIG = get_retriever_config()
 RETRIEVERS = RETRIEVER_CONFIG['retrievers']
 DENSE_RETRIEVERS = RETRIEVER_CONFIG['dense_retrievers']
-
-# NOTE: 本评估脚本禁用 SPLADE（稀疏检索器）。
-# 1) 避免 validate_cache() 要求 splade 的查询缓存文件；
-# 2) 主评估流程中也会显式跳过 SPLADE（见下方注释块）。
-RETRIEVERS = [r for r in RETRIEVERS if r != 'splade']
+SPARSE_RETRIEVERS = RETRIEVER_CONFIG.get('sparse_retrievers', [])
+SPLADE_QUERY_BATCH_SIZE = 128
 
 # IDF 分层配置
 IDF_BINS = [(2.5, 3.5), (3.5, 4.5), (4.5, 5.0), (5.0, float('inf'))]
@@ -793,7 +790,7 @@ class DenseSearcher:
     def __init__(self, embeddings: np.ndarray, doc_ids: List[str], retriever_name: str):
         self.doc_ids = doc_ids
         self.retriever_name = retriever_name
-        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        self.device = torch.device('cuda')
         # 归一化 doc embeddings 以支持余弦相似度
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms = np.where(norms == 0, 1, norms)  # 避免除零
@@ -1370,44 +1367,53 @@ def evaluate_splade_retriever(user_queries: Dict, user_to_group: Dict, k_values:
     )
     log(f"  稀疏矩阵构建完成: {n_terms} terms × {n_docs} docs, {len(data_values)} non-zeros")
 
-    # 构建查询矩阵 (n_queries × n_terms)
-    log(f"  构建查询矩阵...")
-    q_rows = []
-    q_cols = []
-    q_data = []
-    q_idx_map = {}  # 查询索引 -> 在all_q_data中的位置
-
-    for q_idx, q_data_item in enumerate(all_q_data):
-        for term_id, q_weight in q_data_item['q_vec'].items():
-            q_rows.append(q_idx)
-            q_cols.append(term_id)
-            q_data.append(q_weight)
-        q_idx_map[q_idx] = q_data_item
-
     n_queries = len(all_q_data)
-    query_matrix = sparse.csr_matrix(
-        (q_data, (q_rows, q_cols)),
-        shape=(n_queries, n_terms),
-        dtype=np.float32
-    )
-    log(f"  查询矩阵构建完成: {n_queries} queries × {n_terms} terms, {len(q_data)} non-zeros")
-
-    # 矩阵乘法: (n_queries × n_terms) @ (n_terms × n_docs) = (n_queries × n_docs)
-    log(f"  执行矩阵乘法...")
-    score_matrix = query_matrix @ doc_matrix  # 稀疏×稀疏 = 稀疏
-    log(f"  矩阵乘法完成: {score_matrix.shape}")
-
-    # 提取每行的top_k
-    log(f"  提取top_k结果...")
+    log(f"  开始分块矩阵乘法与 top-k 提取...")
     batch_scores = []
-    for i in range(n_queries):
-        if (i + 1) % 500 == 0:
-            log(f"    Top-k提取进度: {i+1}/{n_queries}")
-        # 获取这一行的稀疏向量
-        row = score_matrix.getrow(i)
-        scores = row.toarray().flatten()
-        top_indices = np.argsort(scores)[::-1][:max_k]
-        batch_scores.append([(retriever.doc_ids[idx], float(scores[idx])) for idx in top_indices])
+    for batch_start in range(0, n_queries, SPLADE_QUERY_BATCH_SIZE):
+        batch_end = min(batch_start + SPLADE_QUERY_BATCH_SIZE, n_queries)
+        q_rows = []
+        q_cols = []
+        q_data = []
+
+        for local_q_idx, q_data_item in enumerate(all_q_data[batch_start:batch_end]):
+            for term_id, q_weight in q_data_item['q_vec'].items():
+                q_rows.append(local_q_idx)
+                q_cols.append(term_id)
+                q_data.append(q_weight)
+
+        query_matrix = sparse.csr_matrix(
+            (q_data, (q_rows, q_cols)),
+            shape=(batch_end - batch_start, n_terms),
+            dtype=np.float32
+        )
+        score_matrix = query_matrix @ doc_matrix
+
+        for row_idx in range(score_matrix.shape[0]):
+            global_idx = batch_start + row_idx
+            if (global_idx + 1) % 500 == 0 or global_idx + 1 == n_queries:
+                log(f"    Top-k提取进度: {global_idx + 1}/{n_queries}")
+
+            row = score_matrix.getrow(row_idx)
+            if row.nnz == 0:
+                batch_scores.append([])
+                continue
+
+            if row.nnz <= max_k:
+                order = np.argsort(row.data)[::-1]
+            else:
+                partition = np.argpartition(row.data, -max_k)[-max_k:]
+                order = partition[np.argsort(row.data[partition])[::-1]]
+
+            top_doc_indices = row.indices[order]
+            top_scores = row.data[order]
+            batch_scores.append([
+                (retriever.doc_ids[int(doc_idx)], float(score))
+                for doc_idx, score in zip(top_doc_indices, top_scores)
+            ])
+
+        del query_matrix
+        del score_matrix
 
     # 重新组织结果用于后续统计
     q_idx = 0
@@ -2168,16 +2174,17 @@ def main():
             except Exception as e:
                 log(f"  BM25 错误: {e}")
 
-            # 评估 SPLADE（已禁用）
-            # try:
-            #     result = evaluate_splade_retriever(user_queries, user_to_group, k_values, word_idf, query_type, query_category)
-            #     result['query_type'] = query_type
-            #     result['query_category'] = query_category
-            #     query_type_results.append(result)
-            # except FileNotFoundError as e:
-            #     log(f"  跳过 SPLADE: {e}")
-            # except Exception as e:
-            #     log(f"  SPLADE 错误: {e}")
+            # 评估稀疏检索器（SPLADE）
+            for retriever_name in SPARSE_RETRIEVERS:
+                try:
+                    result = evaluate_splade_retriever(user_queries, user_to_group, k_values, word_idf, query_type, query_category)
+                    result['query_type'] = query_type
+                    result['query_category'] = query_category
+                    query_type_results.append(result)
+                except FileNotFoundError as e:
+                    log(f"  跳过 {retriever_name}: {e}")
+                except Exception as e:
+                    log(f"  {retriever_name} 错误: {e}")
 
             all_results_by_type[query_type] = query_type_results
 

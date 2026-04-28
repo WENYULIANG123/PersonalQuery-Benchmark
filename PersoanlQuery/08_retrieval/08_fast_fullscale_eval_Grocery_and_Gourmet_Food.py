@@ -49,13 +49,9 @@ RETRIEVERS = RETRIEVER_CONFIG['retrievers']
 DENSE_RETRIEVERS = RETRIEVER_CONFIG['dense_retrievers']
 SPARSE_RETRIEVERS = RETRIEVER_CONFIG.get('sparse_retrievers', [])
 
-# NOTE: 本评估脚本禁用 SPLADE（稀疏检索器）。
-# 避免 validate_cache() 检查 splade 文档索引/查询缓存，也避免主评估阶段跑到 SPLADE。
-RETRIEVERS = [r for r in RETRIEVERS if r != 'splade']
-SPARSE_RETRIEVERS = [r for r in SPARSE_RETRIEVERS if r != 'splade']
-
 IDF_BINS = [(2.5, 3.5), (3.5, 4.5), (4.5, 5.0), (5.0, float('inf'))]
 IDF_BIN_LABELS = RETRIEVER_CONFIG['idf_bin_labels']
+SPLADE_QUERY_BATCH_SIZE = 128
 
 # ============ 日志 ============
 def log(msg):
@@ -837,7 +833,7 @@ class DenseSearcher:
     def __init__(self, embeddings: np.ndarray, doc_ids: List[str], retriever_name: str):
         self.doc_ids = doc_ids
         self.retriever_name = retriever_name
-        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        self.device = torch.device('cuda')
         # 归一化 doc embeddings 以支持余弦相似度
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms = np.where(norms == 0, 1, norms)  # 避免除零
@@ -887,8 +883,8 @@ class SPLADESearcher:
         self.doc_vectors = doc_vectors
         self.doc_ids = doc_ids
 
-    def search_batch(self, query_vectors: List[Dict[int, float]], top_k: int = 10) -> List[List[Tuple[str, float]]]:
-        """批量搜索 - 使用矩阵乘法加速
+    def search_batch(self, query_vectors: List[Dict[int, float]], top_k: int = 10, batch_size: int = SPLADE_QUERY_BATCH_SIZE) -> List[List[Tuple[str, float]]]:
+        """批量搜索 - 分块矩阵乘法，避免一次性构建全量 score matrix
 
         Args:
             query_vectors: 查询稀疏向量列表，每个元素是 {term_idx: weight} 字典或numpy数组
@@ -902,6 +898,8 @@ class SPLADESearcher:
 
         n_docs = len(self.doc_ids)
         n_queries = len(query_vectors)
+        if batch_size <= 0:
+            raise ValueError(f"SPLADE batch_size 必须 > 0, 实际为 {batch_size}")
 
         # 构建 term×doc 的稀疏矩阵 (CSR格式)
         row_indices = []
@@ -922,37 +920,52 @@ class SPLADESearcher:
             dtype=np.float32
         )
 
-        # 构建查询矩阵 (n_queries × n_terms)
-        q_rows = []
-        q_cols = []
-        q_data = []
-        for q_idx, q_vec in enumerate(query_vectors):
-            # 处理numpy数组或dict
-            if isinstance(q_vec, np.ndarray) and q_vec.ndim == 0:
-                # 0维numpy数组 - 使用.item()获取dict
-                q_vec = q_vec.item()
-            if hasattr(q_vec, 'items'):
+        results = []
+        top_k = min(top_k, n_docs)
+        for batch_start in range(0, n_queries, batch_size):
+            batch_end = min(batch_start + batch_size, n_queries)
+            q_rows = []
+            q_cols = []
+            q_data = []
+
+            for local_q_idx, q_vec in enumerate(query_vectors[batch_start:batch_end]):
+                if isinstance(q_vec, np.ndarray) and q_vec.ndim == 0:
+                    q_vec = q_vec.item()
+                if not hasattr(q_vec, 'items'):
+                    raise TypeError(f"SPLADE 查询向量类型错误: {type(q_vec)}")
                 for term_id, q_weight in q_vec.items():
-                    q_rows.append(q_idx)
+                    q_rows.append(local_q_idx)
                     q_cols.append(int(term_id))
                     q_data.append(float(q_weight))
 
-        query_matrix = sparse.csr_matrix(
-            (q_data, (q_rows, q_cols)),
-            shape=(n_queries, n_terms),
-            dtype=np.float32
-        )
+            query_matrix = sparse.csr_matrix(
+                (q_data, (q_rows, q_cols)),
+                shape=(batch_end - batch_start, n_terms),
+                dtype=np.float32
+            )
+            score_matrix = query_matrix @ doc_matrix
 
-        # 矩阵乘法
-        score_matrix = query_matrix @ doc_matrix
+            for row_idx in range(score_matrix.shape[0]):
+                row = score_matrix.getrow(row_idx)
+                if row.nnz == 0:
+                    results.append([])
+                    continue
 
-        # 提取每行的top_k
-        results = []
-        for i in range(n_queries):
-            row = score_matrix.getrow(i)
-            scores = row.toarray().flatten()
-            top_indices = np.argsort(scores)[::-1][:top_k]
-            results.append([(self.doc_ids[idx], float(scores[idx])) for idx in top_indices])
+                if row.nnz <= top_k:
+                    order = np.argsort(row.data)[::-1]
+                else:
+                    partition = np.argpartition(row.data, -top_k)[-top_k:]
+                    order = partition[np.argsort(row.data[partition])[::-1]]
+
+                top_doc_indices = row.indices[order]
+                top_scores = row.data[order]
+                results.append([
+                    (self.doc_ids[int(doc_idx)], float(score))
+                    for doc_idx, score in zip(top_doc_indices, top_scores)
+                ])
+
+            del query_matrix
+            del score_matrix
 
         return results
 

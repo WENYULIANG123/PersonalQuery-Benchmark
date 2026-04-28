@@ -28,6 +28,11 @@ from utils import log_with_timestamp, build_document_text
 # Prevents CUDA/GIL deadlocks when multiple threads call model.encode() simultaneously
 _model_inference_lock = threading.Lock()
 
+def _require_cuda_device() -> torch.device:
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for retrieval models in this codepath")
+    return torch.device("cuda")
+
 try:
     import bm25s
 except ImportError:
@@ -228,7 +233,7 @@ class DenseRetriever:
         self.doc_embeddings = None
         self.doc_ids = []
         self.all_metadata = None  # 存储所有元数据
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = _require_cuda_device()
 
     def _get_model(self):
         if self.model is None:
@@ -271,7 +276,7 @@ class DenseRetriever:
             numpy array of shape (embedding_dim,)
         """
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -283,7 +288,7 @@ class DenseRetriever:
             )
 
         if isinstance(query_embedding, torch.Tensor):
-            query_embedding = query_embedding.cpu().numpy()
+            query_embedding = np.asarray(query_embedding.detach().tolist(), dtype=np.float32)
 
         return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
 
@@ -298,7 +303,7 @@ class DenseRetriever:
             numpy array of shape (len(queries), embedding_dim)
         """
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -312,14 +317,14 @@ class DenseRetriever:
             )
 
         if isinstance(embeddings, torch.Tensor):
-            embeddings = embeddings.cpu().numpy()
+            embeddings = np.asarray(embeddings.detach().tolist(), dtype=np.float32)
 
         return embeddings
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using dense vectors with optimized top-k extraction"""
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -343,7 +348,7 @@ class DenseRetriever:
         topk_values, topk_indices = torch.topk(scores, k=min(top_k, len(self.doc_ids)))
         
         results = [(self.doc_ids[idx], topk_values[i].item()) 
-                   for i, idx in enumerate(topk_indices.cpu())]
+                   for i, idx in enumerate(topk_indices.tolist())]
         
         return results
 
@@ -356,7 +361,7 @@ class E5Retriever:
         self.doc_embeddings = None  # 可能是 tensor 或 list of tensors (多窗口)
         self.doc_ids = []
         self.all_metadata = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = _require_cuda_device()
 
         # 滑动窗口配置
         self.max_seq_length = 512  # E5 模型的最大长度
@@ -512,7 +517,7 @@ class E5Retriever:
             numpy array of shape (embedding_dim,)
         """
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -524,7 +529,7 @@ class E5Retriever:
             )[0]
 
         if isinstance(query_embedding, torch.Tensor):
-            query_embedding = query_embedding.cpu().numpy()
+            query_embedding = np.asarray(query_embedding.detach().tolist(), dtype=np.float32)
 
         return query_embedding
 
@@ -539,7 +544,7 @@ class E5Retriever:
             numpy array of shape (len(queries), embedding_dim)
         """
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -553,14 +558,14 @@ class E5Retriever:
             )
 
         if isinstance(embeddings, torch.Tensor):
-            embeddings = embeddings.cpu().numpy()
+            embeddings = np.asarray(embeddings.detach().tolist(), dtype=np.float32)
 
         return embeddings
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using E5 with batch processing for single-window documents"""
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -599,7 +604,7 @@ class BGERetriever:
         self.doc_embeddings = None  # 可能是 tensor 或 list of tensors (多窗口)
         self.doc_ids = []
         self.all_metadata = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = _require_cuda_device()
 
         # 滑动窗口配置
         self.max_seq_length = 512  # BGE 模型的最大长度
@@ -741,7 +746,7 @@ class BGERetriever:
             numpy array of shape (embedding_dim,)
         """
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -753,7 +758,7 @@ class BGERetriever:
             )[0]
 
         if isinstance(query_embedding, torch.Tensor):
-            query_embedding = query_embedding.cpu().numpy()
+            query_embedding = np.asarray(query_embedding.detach().tolist(), dtype=np.float32)
 
         return query_embedding
 
@@ -768,7 +773,7 @@ class BGERetriever:
             numpy array of shape (len(queries), embedding_dim)
         """
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -782,14 +787,14 @@ class BGERetriever:
             )
 
         if isinstance(embeddings, torch.Tensor):
-            embeddings = embeddings.cpu().numpy()
+            embeddings = np.asarray(embeddings.detach().tolist(), dtype=np.float32)
 
         return embeddings
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using BGE with batched similarity computation (optimized with window pooling)"""
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
         
         model = self._get_model()
 
@@ -810,7 +815,7 @@ class BGERetriever:
         topk_values, topk_indices = torch.topk(scores, k=min(top_k, len(self.doc_ids)))
         
         results = [(self.doc_ids[idx], topk_values[i].item()) 
-                   for i, idx in enumerate(topk_indices.cpu())]
+                   for i, idx in enumerate(topk_indices.tolist())]
         
         return results
 
@@ -833,7 +838,7 @@ class ColBERTRetriever:
         self.tokenizer = None
         self.doc_ids = []  # 原始 asin 列表
         self.all_metadata = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = _require_cuda_device()
 
         # 索引相关
         self.index_path = None
@@ -888,10 +893,9 @@ class ColBERTRetriever:
         log_with_timestamp("  Building ColBERTv2 index with official Indexer...")
 
         # 清理 GPU 缓存
-        if torch.cuda.is_available():
-            log_with_timestamp("  Clearing GPU cache...")
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+        log_with_timestamp("  Clearing GPU cache...")
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
         self.doc_ids = [doc.get('asin', '') for doc in documents]
         self.all_metadata = all_metadata
@@ -931,7 +935,9 @@ class ColBERTRetriever:
         # 设置索引路径
         self.index_path = os.path.join(self._temp_dir, "index")
 
-        nranks = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        nranks = torch.cuda.device_count()
+        if nranks < 1:
+            raise RuntimeError("CUDA is required and at least one GPU must be visible")
         exp_name = "colbert_index"
 
         # 创建 tqdm 进度条来跟踪索引进度
@@ -1201,7 +1207,7 @@ class GritLMRetriever:
         self.doc_embeddings = None
         self.doc_ids = []
         self.all_metadata = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = _require_cuda_device()
         # 标准 GritLM instruction 格式
         self.query_instruction = "Given a product search query, retrieve relevant product descriptions."
         self.doc_instruction = "Given a product description, retrieve relevant web search queries."
@@ -1276,7 +1282,7 @@ class GritLMRetriever:
     def encode_query(self, query: str) -> np.ndarray:
         """Encode query to embedding vector"""
         embedding = self._encode_text(query)
-        return embedding.cpu().numpy()
+        return np.asarray(embedding.detach().tolist(), dtype=np.float32)
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using GritLM"""
@@ -1312,7 +1318,7 @@ class ANCERetriever:
         self.doc_embeddings = None
         self.doc_ids = []
         self.all_metadata = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = _require_cuda_device()
 
         # 滑动窗口配置
         self.max_seq_length = 512
@@ -1465,7 +1471,7 @@ class ANCERetriever:
             numpy array of shape (embedding_dim,)
         """
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -1477,7 +1483,7 @@ class ANCERetriever:
             )[0]
 
         if isinstance(query_embedding, torch.Tensor):
-            query_embedding = query_embedding.cpu().numpy()
+            query_embedding = np.asarray(query_embedding.detach().tolist(), dtype=np.float32)
 
         return query_embedding
 
@@ -1492,7 +1498,7 @@ class ANCERetriever:
             numpy array of shape (len(queries), embedding_dim)
         """
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -1506,14 +1512,14 @@ class ANCERetriever:
             )
 
         if isinstance(embeddings, torch.Tensor):
-            embeddings = embeddings.cpu().numpy()
+            embeddings = np.asarray(embeddings.detach().tolist(), dtype=np.float32)
 
         return embeddings
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using ANCE with sliding window support"""
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -1534,8 +1540,7 @@ class ANCERetriever:
         if hasattr(self, 'single_window_embeddings') and self.single_window_embeddings is not None:
             single_emb = self.single_window_embeddings
             # Move to GPU for computation if not already there
-            if single_emb.device.type == 'cpu':
-                single_emb = single_emb.to(self.device)
+            single_emb = single_emb.to(self.device)
             batch_scores = util.cos_sim(query_embedding, single_emb)[0]
             for idx, doc_idx in enumerate(self.single_window_indices):
                 all_scores[doc_idx] = batch_scores[idx].item()
@@ -1544,8 +1549,7 @@ class ANCERetriever:
         for i in self.multi_window_indices:
             doc_emb = self.doc_embeddings[i]
             # Move to GPU for computation if not already there
-            if doc_emb.device.type == 'cpu':
-                doc_emb = doc_emb.to(self.device)
+            doc_emb = doc_emb.to(self.device)
             window_scores = util.cos_sim(query_embedding, doc_emb)[0]
             all_scores[i] = window_scores.max().item()
 
@@ -1567,7 +1571,7 @@ class STARRetriever:
         self.doc_embeddings = None
         self.doc_ids = []
         self.all_metadata = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = _require_cuda_device()
 
     def _get_model(self):
         if self.model is None:
@@ -1599,7 +1603,7 @@ class STARRetriever:
             numpy array of shape (embedding_dim,)
         """
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -1609,7 +1613,7 @@ class STARRetriever:
             )
 
         if isinstance(query_embedding, torch.Tensor):
-            query_embedding = query_embedding.cpu().numpy()
+            query_embedding = np.asarray(query_embedding.detach().tolist(), dtype=np.float32)
 
         return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
 
@@ -1624,7 +1628,7 @@ class STARRetriever:
             numpy array of shape (len(queries), embedding_dim)
         """
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -1636,14 +1640,14 @@ class STARRetriever:
             )
 
         if isinstance(embeddings, torch.Tensor):
-            embeddings = embeddings.cpu().numpy()
+            embeddings = np.asarray(embeddings.detach().tolist(), dtype=np.float32)
 
         return embeddings
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using STAR embeddings"""
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -1684,7 +1688,7 @@ class MiniLMRetriever:
         self.doc_embeddings = None
         self.doc_ids = []
         self.all_metadata = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = _require_cuda_device()
 
     def _get_model(self):
         if self.model is None:
@@ -1709,7 +1713,7 @@ class MiniLMRetriever:
     def encode_query(self, query: str) -> np.ndarray:
         """Encode query to embedding vector"""
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -1719,7 +1723,7 @@ class MiniLMRetriever:
             )
 
         if isinstance(query_embedding, torch.Tensor):
-            query_embedding = query_embedding.cpu().numpy()
+            query_embedding = np.asarray(query_embedding.detach().tolist(), dtype=np.float32)
 
         return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
 
@@ -1734,7 +1738,7 @@ class MiniLMRetriever:
             numpy array of shape (len(queries), embedding_dim)
         """
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -1746,14 +1750,14 @@ class MiniLMRetriever:
             )
 
         if isinstance(embeddings, torch.Tensor):
-            embeddings = embeddings.cpu().numpy()
+            embeddings = np.asarray(embeddings.detach().tolist(), dtype=np.float32)
 
         return embeddings
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using MiniLM embeddings"""
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
 
         model = self._get_model()
 
@@ -1796,7 +1800,7 @@ class MultiQAMiniLMRetriever:
         self.doc_embeddings = None
         self.doc_ids = []
         self.all_metadata = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = _require_cuda_device()
 
     def _get_model(self):
         if self.model is None:
@@ -1821,7 +1825,7 @@ class MultiQAMiniLMRetriever:
     def encode_query(self, query: str) -> np.ndarray:
         """Encode query to embedding vector"""
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
         
         model = self._get_model()
         
@@ -1829,14 +1833,14 @@ class MultiQAMiniLMRetriever:
             query_embedding = model.encode([query])
         
         if isinstance(query_embedding, torch.Tensor):
-            query_embedding = query_embedding.cpu().numpy()
+            query_embedding = np.asarray(query_embedding.detach().tolist(), dtype=np.float32)
         
         return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using MultiQA-MiniLM embeddings"""
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
         
         model = self._get_model()
         
@@ -1875,7 +1879,7 @@ class MPNetRetriever:
         self.doc_embeddings = None
         self.doc_ids = []
         self.all_metadata = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = _require_cuda_device()
 
     def _get_model(self):
         if self.model is None:
@@ -1900,7 +1904,7 @@ class MPNetRetriever:
     def encode_query(self, query: str) -> np.ndarray:
         """Encode query to embedding vector"""
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
         
         model = self._get_model()
         
@@ -1908,14 +1912,14 @@ class MPNetRetriever:
             query_embedding = model.encode([query])
         
         if isinstance(query_embedding, torch.Tensor):
-            query_embedding = query_embedding.cpu().numpy()
+            query_embedding = np.asarray(query_embedding.detach().tolist(), dtype=np.float32)
         
         return query_embedding[0] if len(query_embedding.shape) > 1 else query_embedding
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using MPNet embeddings"""
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
         
         model = self._get_model()
         
@@ -1950,8 +1954,8 @@ class FAISSRetriever:
         self.model = None
         self.doc_ids = []
         self.all_metadata = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.use_gpu = use_gpu and torch.cuda.is_available()
+        self.device = _require_cuda_device()
+        self.use_gpu = use_gpu
         self.index = None
         
         self.nlist = nlist
@@ -1983,37 +1987,31 @@ class FAISSRetriever:
         embedding_dim = embeddings.shape[1]
         log_with_timestamp(f"  Embedding dimension: {embedding_dim}")
         
-        try:
-            import faiss
-            
-            log_with_timestamp(f"  Creating FAISS index (nlist={self.nlist}, nprobe={self.nprobe})...")
-            
-            quantizer = faiss.IndexFlatIP(embedding_dim)
-            self.index = faiss.IndexIVFFlat(quantizer, embedding_dim, self.nlist, faiss.METRIC_INNER_PRODUCT)
-            
-            log_with_timestamp("  Training FAISS index...")
-            self.index.train(embeddings)
-            
-            log_with_timestamp("  Adding embeddings to FAISS index...")
-            self.index.add(embeddings)
-            self.index.nprobe = self.nprobe
-            
-            if self.use_gpu:
-                log_with_timestamp("  Moving FAISS index to GPU...")
-                res = faiss.StandardGpuResources()
-                self.index_gpu = faiss.index_cpu_to_gpu(res, 0, self.index)
-                log_with_timestamp("  ✓ FAISS GPU index ready")
-            
-            log_with_timestamp(f"  FAISS index built with {len(self.doc_ids)} docs")
-        except ImportError:
-            log_with_timestamp("  WARNING: FAISS not available, falling back to brute force")
-            self.index = None
-            self.doc_embeddings = embeddings
+        import faiss
+
+        log_with_timestamp(f"  Creating FAISS index (nlist={self.nlist}, nprobe={self.nprobe})...")
+
+        quantizer = faiss.IndexFlatIP(embedding_dim)
+        self.index = faiss.IndexIVFFlat(quantizer, embedding_dim, self.nlist, faiss.METRIC_INNER_PRODUCT)
+
+        log_with_timestamp("  Training FAISS index...")
+        self.index.train(embeddings)
+
+        log_with_timestamp("  Adding embeddings to FAISS index...")
+        self.index.add(embeddings)
+        self.index.nprobe = self.nprobe
+
+        log_with_timestamp("  Moving FAISS index to GPU...")
+        res = faiss.StandardGpuResources()
+        self.index_gpu = faiss.index_cpu_to_gpu(res, 0, self.index)
+        log_with_timestamp("  ✓ FAISS GPU index ready")
+
+        log_with_timestamp(f"  FAISS index built with {len(self.doc_ids)} docs")
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
         """Search using FAISS index"""
         if not hasattr(self, 'device'):
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = _require_cuda_device()
         
         model = self._get_model()
         
@@ -2023,39 +2021,14 @@ class FAISSRetriever:
         query_embedding = query_embedding.astype('float32')
         query_embedding = query_embedding / (np.linalg.norm(query_embedding, axis=1, keepdims=True) + 1e-10)
         
-        if self.index is None:
-            from sentence_transformers import util
-            query_tensor = torch.from_numpy(query_embedding).float().to(self.device)
-            doc_embeddings = torch.from_numpy(self.doc_embeddings).float().to(self.device)
-            scores = util.cos_sim(query_tensor, doc_embeddings)[0]
-            # Optimized: Use torch.topk instead of full sort (O(n log k) vs O(n log n))
-            topk_values, topk_indices = torch.topk(scores, k=min(top_k, len(self.doc_ids)))
-            results = [(self.doc_ids[idx.item()], topk_values[i].item()) 
-                       for i, idx in enumerate(topk_indices)]
-            return results
-        
-        try:
-            if self.use_gpu and hasattr(self, 'index_gpu'):
-                import faiss
-                query_gpu = faiss.array_to_numpy(query_embedding)
-                distances, indices = self.index_gpu.search(query_gpu, k=min(top_k + 10, len(self.doc_ids)))
-            else:
-                distances, indices = self.index.search(query_embedding, k=min(top_k + 10, len(self.doc_ids)))
-            
-            results = [(self.doc_ids[int(idx)], float(dist)) 
-                      for idx, dist in zip(indices[0], distances[0]) if idx != -1]
-            return results[:top_k]
-        except Exception as e:
-            log_with_timestamp(f"  FAISS search error: {e}, falling back to brute force")
-            from sentence_transformers import util
-            query_tensor = torch.from_numpy(query_embedding).float().to(self.device)
-            doc_embeddings = torch.from_numpy(self.doc_embeddings).float().to(self.device)
-            scores = util.cos_sim(query_tensor, doc_embeddings)[0]
-            # Optimized: Use torch.topk instead of full sort (O(n log k) vs O(n log n))
-            topk_values, topk_indices = torch.topk(scores, k=min(top_k, len(self.doc_ids)))
-            results = [(self.doc_ids[idx.item()], topk_values[i].item()) 
-                       for i, idx in enumerate(topk_indices)]
-            return results
+        if not self.use_gpu or not hasattr(self, 'index_gpu'):
+            raise RuntimeError("FAISS GPU index is not initialized")
+
+        distances, indices = self.index_gpu.search(query_embedding, k=min(top_k + 10, len(self.doc_ids)))
+
+        results = [(self.doc_ids[int(idx)], float(dist))
+                  for idx, dist in zip(indices[0], distances[0]) if idx != -1]
+        return results[:top_k]
 
 
 class CachedRetriever:
@@ -2081,33 +2054,22 @@ class CachedRetriever:
         # 获取 base_retriever 的 embeddings
         doc_embeddings = self.base_retriever.doc_embeddings
 
-        if torch.cuda.is_available():
-            device = torch.device('cuda')
-            # 转换为 tensor 并移到 GPU，一次完成避免重复
-            if isinstance(doc_embeddings, np.ndarray):
-                self._doc_embeddings_cached = torch.from_numpy(doc_embeddings).float().to(device)
-            elif isinstance(doc_embeddings, torch.Tensor):
-                if doc_embeddings.device.type != 'cuda':
-                    self._doc_embeddings_cached = doc_embeddings.to(device)
-                else:
-                    self._doc_embeddings_cached = doc_embeddings
+        device = torch.device('cuda')
+        if isinstance(doc_embeddings, np.ndarray):
+            self._doc_embeddings_cached = torch.from_numpy(doc_embeddings).float().to(device)
+        elif isinstance(doc_embeddings, torch.Tensor):
+            if doc_embeddings.device.type != 'cuda':
+                self._doc_embeddings_cached = doc_embeddings.to(device)
             else:
-                self._doc_embeddings_cached = torch.from_numpy(np.array(doc_embeddings)).float().to(device)
-            self._doc_embeddings_device = device
-        else:
-            # CPU 模式
-            if isinstance(doc_embeddings, np.ndarray):
-                self._doc_embeddings_cached = torch.from_numpy(doc_embeddings).float()
-            elif isinstance(doc_embeddings, torch.Tensor):
                 self._doc_embeddings_cached = doc_embeddings
-            else:
-                self._doc_embeddings_cached = torch.from_numpy(np.array(doc_embeddings)).float()
-            self._doc_embeddings_device = torch.device('cpu')
+        else:
+            self._doc_embeddings_cached = torch.from_numpy(np.array(doc_embeddings)).float().to(device)
+        self._doc_embeddings_device = device
 
         return self._doc_embeddings_cached
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """Search using cached embedding or fallback to base retriever"""
+        """Search using cached embedding"""
         if query in self.cache:
             query_embedding = self.cache[query]
             if isinstance(query_embedding, np.ndarray):
@@ -2133,8 +2095,8 @@ class CachedRetriever:
 
             return [(self.base_retriever.doc_ids[idx.item()], topk_values[i].item())
                     for i, idx in enumerate(topk_indices)]
-        else:
-            return self.base_retriever.search(query, top_k)
+
+        raise RuntimeError("Query embedding is missing from cache")
 
     def batch_search(self, queries: List[str], top_k: int = 10) -> List[List[Tuple[str, float]]]:
         """批量搜索 - 更高效的处理多个查询"""
@@ -2144,8 +2106,7 @@ class CachedRetriever:
         # 收集所有需要计算的查询
         uncached_queries = [q for q in queries if q not in self.cache]
         if uncached_queries:
-            log_with_timestamp(f"  [CachedRetriever.batch_search] {len(uncached_queries)} queries not in cache, falling back to base")
-            return [self.search(q, top_k) for q in queries]
+            raise RuntimeError(f"{len(uncached_queries)} queries are missing from cache")
 
         # 获取 GPU 上的 doc embeddings
         doc_embeddings = self._get_doc_embeddings_gpu()
@@ -2191,7 +2152,7 @@ class SPLADERetriever:
         self.tokenizer = None
         self.doc_ids = []
         self.all_metadata = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = _require_cuda_device()
         self.doc_vectors = None  # Sparse vectors stored as dicts: {term_idx: weight}
 
     def _get_model(self):
@@ -2296,7 +2257,7 @@ class SPLADERetriever:
                     # Use nonzero directly with as_tuple=True for efficiency
                     indices = mask_b.nonzero(as_tuple=True)[0]
                     vals = w_b[mask_b]
-                    # Build dict efficiently using cpu().numpy() once per batch item
+                    # Build dict efficiently using GPU tensors only
                     sparse_vec = dict(zip(indices.tolist(), vals.tolist()))
                     results.append(sparse_vec)
 
@@ -2358,8 +2319,8 @@ class SPLADERetriever:
                 # Split into per-document sparse vectors on CPU
                 for b in range(weights.shape[0]):
                     doc_mask = batch_indices == b
-                    doc_vocab = vocab_indices[doc_mask].cpu().tolist()
-                    doc_vals = nonzero_values[doc_mask].cpu().tolist()
+                    doc_vocab = vocab_indices[doc_mask].tolist()
+                    doc_vals = nonzero_values[doc_mask].tolist()
                     doc_vectors.append(dict(zip(doc_vocab, doc_vals)))
 
             if (batch_end) % 10000 == 0:

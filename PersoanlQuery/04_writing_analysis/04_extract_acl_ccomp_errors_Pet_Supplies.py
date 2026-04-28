@@ -59,6 +59,16 @@ QUERY_FILE = "/workspace/result/personal_query/06_query/Pet_Supplies/query.json"
 # ============================================================================
 
 PROMPT_CONFIG_FILE = "/workspace/PersonalQuery/PersoanlQuery/04_writing_analysis/acl_ccomp_prompts.json"
+SYNTAX_VALIDATOR_FILE = str(Path(__file__).with_name("syntax_hard_validator.py"))
+
+
+def load_syntax_validator_class():
+    spec = importlib.util.spec_from_file_location("stage4_syntax_hard_validator", SYNTAX_VALIDATOR_FILE)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Failed to load syntax validator from {SYNTAX_VALIDATOR_FILE}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.SyntaxHardValidator
 
 def load_config():
     """从 JSON 文件加载配置"""
@@ -67,6 +77,12 @@ def load_config():
     return config['base_system'], config['user_content_template'], config['max_users'], config['max_reviews'], config['max_workers'], config.get('use_minimaxio', False)
 
 BASE_SYSTEM, USER_CONTENT_TEMPLATE, MAX_USERS, MAX_REVIEWS, MAX_WORKERS, USE_MINIMAXIO = load_config()
+SyntaxHardValidator = load_syntax_validator_class()
+
+ACL_ALLOWED_REGION_TYPES = {"acl", "relcl", "advcl"}
+ACL_ALLOWED_ERROR_TYPES = {"attribute_typo", "modifier_typo", "np_inflection"}
+CCOMP_ALLOWED_REGION_TYPES = {"ccomp", "modal", "complement_link", "clause_boundary"}
+CCOMP_ALLOWED_ERROR_TYPES = {"clause_shell_typo", "complement_linking_error", "modal_distortion", "clause_boundary_error"}
 
 # 全局变量
 _minimax_client = None
@@ -366,6 +382,7 @@ class MergedErrorAnalyzer:
         self.reviews_dir = reviews_dir or Path(os.path.dirname(INPUT_FILE))
         self.acl_classifier = ACLErrorClassifier()
         self.ccomp_classifier = CCOMPErrorClassifier()
+        self.syntax_validator = SyntaxHardValidator()
 
         self._merged_data = None
         self._users_map = None
@@ -390,26 +407,35 @@ class MergedErrorAnalyzer:
         self._load_merged_file()
         return self._users_map.get(user_id)
 
-    def _filter_errors(self, errors: List[Dict], error_category: str) -> List[Dict]:
-        """过滤错误列表，只保留单词级别的修正"""
+    def _get_allowed_error_types(self, error_category: str) -> Set[str]:
+        if error_category == "acl":
+            return ACL_ALLOWED_ERROR_TYPES
+        return CCOMP_ALLOWED_ERROR_TYPES
+
+    def _filter_errors(self, errors: List[Dict], error_category: str, filtered_counts: defaultdict) -> List[Dict]:
+        """严格过滤错误列表，只保留当前桶允许的单词级错误"""
         valid_errors = []
+        allowed_error_types = self._get_allowed_error_types(error_category)
         for error in errors:
             orig = error.get("original", "").strip()
             corr = error.get("corrected", "").strip()
 
             if not orig or not corr or orig == corr:
+                filtered_counts["empty_or_identity_error"] += 1
                 continue
 
-            # 跳过 corrected 是短语的情况（必须是单词）
-            if len(corr.split()) > 1:
+            if len(orig.split()) > 1 or len(corr.split()) > 1:
+                filtered_counts["non_single_word_error"] += 1
                 continue
 
             error_type = error.get("error_type", "")
             if not error_type:
-                if error_category == "acl":
-                    error_type = self.acl_classifier.classify_error_type(orig, corr)
-                else:
-                    error_type = self.ccomp_classifier.classify_error_type(orig, corr, "")
+                filtered_counts["missing_error_type"] += 1
+                continue
+
+            if error_type not in allowed_error_types:
+                filtered_counts["cross_bucket_or_invalid_error_type"] += 1
+                continue
 
             valid_errors.append({
                 "original": orig,
@@ -418,6 +444,32 @@ class MergedErrorAnalyzer:
                 "confidence": error.get("confidence", 0.8)
             })
         return valid_errors
+
+    def _apply_syntax_hard_validation(
+        self,
+        review_text: str,
+        span_text: str,
+        region_type: str,
+        errors: List[Dict],
+        error_category: str,
+        filtered_counts: defaultdict
+    ) -> List[Dict]:
+        validated_errors = []
+        for error in errors:
+            is_valid, reason = self.syntax_validator.validate_candidate(
+                review_text=review_text,
+                span_text=span_text,
+                original=error["original"],
+                corrected=error["corrected"],
+                error_category=error_category,
+                region_type=region_type,
+                error_type=error["error_type"]
+            )
+            if not is_valid:
+                filtered_counts[reason] += 1
+                continue
+            validated_errors.append(error)
+        return validated_errors
 
     def process_user(self, user_id: str, reviews_file: Optional[str] = None, max_reviews: Optional[int] = None) -> dict:
         """处理单个用户：同时提取 ACL 和 CCOMP 错误"""
@@ -455,6 +507,7 @@ class MergedErrorAnalyzer:
             ccomp_error_type_counts = defaultdict(int)
             acl_region_type_counts = defaultdict(int)
             ccomp_region_type_counts = defaultdict(int)
+            filtered_counts = defaultdict(int)
             detailed_results = []
 
             # 一次请求同时提取 ACL 和 CCOMP 错误
@@ -476,10 +529,21 @@ class MergedErrorAnalyzer:
                 acl_regions = review_result.get("acl_regions", []) if isinstance(review_result, dict) else []
                 for region in acl_regions:
                     region_type = region.get("region_type", "unknown")
+                    if region_type not in ACL_ALLOWED_REGION_TYPES:
+                        filtered_counts["invalid_acl_region_type"] += 1
+                        continue
                     span_text = region.get("span_text", "")
                     errors = region.get("errors", [])
 
-                    valid_errors = self._filter_errors(errors, "acl")
+                    valid_errors = self._filter_errors(errors, "acl", filtered_counts)
+                    valid_errors = self._apply_syntax_hard_validation(
+                        review_text=review_text,
+                        span_text=span_text,
+                        region_type=region_type,
+                        errors=valid_errors,
+                        error_category="acl",
+                        filtered_counts=filtered_counts
+                    )
                     if valid_errors:
                         acl_region_type_counts[region_type] += 1
                         for err in valid_errors:
@@ -496,10 +560,21 @@ class MergedErrorAnalyzer:
                 ccomp_regions = review_result.get("ccomp_regions", []) if isinstance(review_result, dict) else []
                 for region in ccomp_regions:
                     region_type = region.get("region_type", "unknown")
+                    if region_type not in CCOMP_ALLOWED_REGION_TYPES:
+                        filtered_counts["invalid_ccomp_region_type"] += 1
+                        continue
                     span_text = region.get("span_text", "")
                     errors = region.get("errors", [])
 
-                    valid_errors = self._filter_errors(errors, "ccomp")
+                    valid_errors = self._filter_errors(errors, "ccomp", filtered_counts)
+                    valid_errors = self._apply_syntax_hard_validation(
+                        review_text=review_text,
+                        span_text=span_text,
+                        region_type=region_type,
+                        errors=valid_errors,
+                        error_category="ccomp",
+                        filtered_counts=filtered_counts
+                    )
                     if valid_errors:
                         ccomp_region_type_counts[region_type] += 1
                         for err in valid_errors:
@@ -528,6 +603,7 @@ class MergedErrorAnalyzer:
                 "ccomp_error_types": dict(ccomp_error_type_counts),
                 "acl_region_types": dict(acl_region_type_counts),
                 "ccomp_region_types": dict(ccomp_region_type_counts),
+                "filtered_counts": dict(filtered_counts),
                 "detailed_results": detailed_results
             }
 
@@ -813,6 +889,7 @@ def main():
         all_ccomp_error_types = defaultdict(int)
         all_acl_region_types = defaultdict(int)
         all_ccomp_region_types = defaultdict(int)
+        all_filtered_counts = defaultdict(int)
 
         for r in successful:
             for etype, count in r["acl_error_types"].items():
@@ -823,6 +900,8 @@ def main():
                 all_acl_region_types[rtype] += count
             for rtype, count in r["ccomp_region_types"].items():
                 all_ccomp_region_types[rtype] += count
+            for reason, count in r.get("filtered_counts", {}).items():
+                all_filtered_counts[reason] += count
 
         log_with_timestamp("ACL Error type distribution:")
         for etype, count in sorted(all_acl_error_types.items(), key=lambda x: x[1], reverse=True):
@@ -832,9 +911,15 @@ def main():
         for etype, count in sorted(all_ccomp_error_types.items(), key=lambda x: x[1], reverse=True):
             log_with_timestamp(f"  {etype}: {count}")
 
+        if all_filtered_counts:
+            log_with_timestamp("Filtered invalid outputs:")
+            for reason, count in sorted(all_filtered_counts.items(), key=lambda x: x[1], reverse=True):
+                log_with_timestamp(f"  {reason}: {count}")
+
         # 只保存有错误的用户
         users_with_errors = [r for r in successful if r["total_errors"] > 0]
 
+        # 只保留控制台统计和主结果文件，不再写 summary 文件
         # 保存详情结果（JSON Lines 格式，已在处理时流水写入）
 
     if len(successful) == 0:

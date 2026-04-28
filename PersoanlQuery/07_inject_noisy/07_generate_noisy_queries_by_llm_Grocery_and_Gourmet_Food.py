@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery')
+sys.path.insert(0, '/home/wlia0047/ar57/wenyu/PersoanlQuery')
 
 # ========================================
 # 配置加载
@@ -23,22 +23,22 @@ CATEGORY = "Grocery_and_Gourmet_Food"
 CAT_CONFIG = get_category_config(CATEGORY)
 
 # Stage 6 查询文件（合并的 query.json）
-QUERY_FILE = CAT_CONFIG.get('query_file', f'/workspace/result/personal_query/06_query/{CATEGORY}/query.json')
+QUERY_FILE = CAT_CONFIG.get('query_file', f'/home/wlia0047/ar57/wenyu/result/personal_query/06_query/{CATEGORY}/query.json')
 
 # Stage 4 用户错误文件
-USER_ERROR_FILE = CAT_CONFIG.get('user_error_file', f'/workspace/result/personal_query/04_writing_analysis/{CATEGORY}/acl_ccomp_error.json')
+USER_ERROR_FILE = CAT_CONFIG.get('user_error_file', f'/home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/{CATEGORY}/acl_ccomp_error.json')
 
 # 输出文件 - 按类别分目录
-BASE_OUTPUT_DIR = "/workspace/result/personal_query/07_inject_noisy"
+BASE_OUTPUT_DIR = "/home/wlia0047/ar57/wenyu/result/personal_query/07_inject_noisy"
 CATEGORY_OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, CATEGORY)
 NOISY_OUTPUT_FILE = os.path.join(CATEGORY_OUTPUT_DIR, "noisy_query.json")
 
 # Prompt 配置
-NOISY_PROMPT_FILE = '/workspace/PersonalQuery/PersoanlQuery/07_inject_noisy/noisy_query_prompts.json'
+NOISY_PROMPT_FILE = '/home/wlia0047/ar57/wenyu/PersoanlQuery/07_inject_noisy/noisy_query_prompts.json'
 
 # 全局配置
-NOISY_CONFIG_FILE = '/workspace/PersonalQuery/PersoanlQuery/07_inject_noisy/noisy_query_config.json'
-QUERY_CONFIG_FILE = '/workspace/PersonalQuery/PersoanlQuery/06_query/query_config.json'
+NOISY_CONFIG_FILE = '/home/wlia0047/ar57/wenyu/PersoanlQuery/07_inject_noisy/07_inject_noisy_config.json'
+QUERY_CONFIG_FILE = '/home/wlia0047/ar57/wenyu/PersoanlQuery/06_query/query_config.json'
 
 
 # ========================================

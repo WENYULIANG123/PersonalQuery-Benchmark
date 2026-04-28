@@ -27,7 +27,7 @@ class BERTReRanker:
         self.model_name = model_name
         self.top_k = top_k
         self.model = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device('cuda')
 
     def _get_model(self):
         if self.model is None:

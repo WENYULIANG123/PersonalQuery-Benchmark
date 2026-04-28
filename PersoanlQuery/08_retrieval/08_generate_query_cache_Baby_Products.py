@@ -588,7 +588,7 @@ def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str 
 
             if not isinstance(embedding, np.ndarray):
                 if isinstance(embedding, torch.Tensor):
-                    embedding = embedding.cpu().numpy()
+                    embedding = np.asarray(embedding.detach().tolist(), dtype=np.float32)
                 else:
                     embedding = np.array(embedding)
 
@@ -1072,7 +1072,7 @@ def generate_cache_for_all_retrievers(
 def main():
     # ==================== 硬编码配置 ====================
     # 检索器列表：核心5个 + GritLM + ANCE + SPLADE
-    RETRIEVER_NAMES = ['BGE', 'E5', 'MiniLM', 'STAR', 'ANCE', 'SPLADE', 'BM25']
+    RETRIEVER_NAMES = ['GRITLM', 'BGE', 'E5', 'MiniLM', 'STAR', 'ANCE', 'SPLADE', 'BM25']
     # 是否清理旧缓存
     CLEAR_CACHE_BEFORE = True
     # 数据源：persona_generated_queries.json
