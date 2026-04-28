@@ -81,7 +81,7 @@ def compute_document_hash(documents: List[Dict]) -> str:
 
 def get_cache_paths(retriever_name: str, doc_hash: str, cache_dir: str) -> Dict[str, str]:
     """Get cache file paths for a retriever"""
-    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance']
+    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'gritlm', 'ance']
     # ColBERT 使用 token-level embeddings，需要特殊处理，不使用简单的 numpy 数组
     COLBERT_RETRIEVERS = ['colbert']
     SPARSE_RETRIEVERS = ['bm25', 'splade']
@@ -107,7 +107,7 @@ def get_cache_paths(retriever_name: str, doc_hash: str, cache_dir: str) -> Dict[
 
 def cache_exists(retriever_name: str, doc_hash: str, cache_dir: str) -> bool:
     """Check if retriever cache already exists"""
-    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance']
+    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'gritlm', 'ance']
     COLBERT_RETRIEVERS = ['colbert']
 
     if retriever_name in DENSE_RETRIEVERS:
@@ -128,7 +128,7 @@ def validate_retriever_cache(retriever_name: str, doc_hash: str, cache_dir: str,
     Returns:
         (is_valid, error_message)
     """
-    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance']
+    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'gritlm', 'ance']
     COLBERT_RETRIEVERS = ['colbert']
 
     log_with_timestamp(f"[VALIDATE] Checking cache integrity for {retriever_name}...")
@@ -291,7 +291,7 @@ def _normalize_embeddings_for_save(embeddings, retriever_name: str) -> np.ndarra
 
 def save_retriever_to_cache(retriever_name: str, doc_hash: str, retriever: object, cache_dir: str) -> bool:
     """Save retriever to disk cache. Returns True if successful."""
-    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance']
+    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'gritlm', 'ance']
     COLBERT_RETRIEVERS = ['colbert']
     SPARSE_RETRIEVERS = ['bm25', 'splade']
 
@@ -557,8 +557,8 @@ def main():
     log_with_timestamp(f"Document hash: {doc_hash}")
     log_with_timestamp(f"Cache directory: {cache_dir}")
     
-    # Define retrievers to build (按参数量从小到大排序: minilm < star < e5 < bge < gritlm)
-    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'ance']
+    # Define retrievers to build (按参数量从小到大排序: minilm < star < e5 < bge < gritlm < ance)
+    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'gritlm', 'ance']
     COLBERT_RETRIEVERS = ['colbert']  # 使用 token-level late interaction
     SPARSE_RETRIEVERS = ['bm25', 'splade']
     # TODO: ColBERT 暂时禁用，token-level embeddings 数据量过大（300k docs × 200 tokens × 768 dim ≈ 176GB+）
