@@ -46,6 +46,7 @@ RETRIEVER_CONFIG = get_retriever_config()
 RETRIEVERS = RETRIEVER_CONFIG['retrievers']
 DENSE_RETRIEVERS = RETRIEVER_CONFIG['dense_retrievers']
 SPARSE_RETRIEVERS = RETRIEVER_CONFIG.get('sparse_retrievers', [])
+COLBERTV2_RETRIEVERS = ['colbertv2']
 SPLADE_QUERY_BATCH_SIZE = 128
 
 # IDF 分层配置
@@ -527,6 +528,25 @@ def load_bm25_query_cache(query_type: str = 'correct', query_category: str = 'ac
         return None
     with open(cache_path, 'rb') as f:
         return pickle.load(f)
+
+
+def load_result_query_cache(retriever_name: str, query_type: str, query_category: str) -> Dict:
+    """加载已经生成好的 query -> [(asin, score), ...] 结果缓存"""
+    cache_path = os.path.join(
+        QUERY_CACHE_BASE_DIR,
+        f'{query_category}_{query_type}_query',
+        f'{retriever_name}__{query_category}_{query_type}_cache.pkl'
+    )
+    if not os.path.exists(cache_path):
+        raise FileNotFoundError(f"{retriever_name} query result cache not found: {cache_path}")
+
+    with open(cache_path, 'rb') as f:
+        cache = pickle.load(f)
+
+    if not isinstance(cache, dict):
+        raise TypeError(f"{retriever_name} query result cache must be dict, got {type(cache).__name__}: {cache_path}")
+
+    return cache
 
 def _find_same_level_pairs(data: list) -> set:
     """找出 ACL 和 CCOMP level 一致的 (user_id, asin) 对"""
@@ -1202,6 +1222,184 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: L
         'retriever': 'bm25', 'dim': 0, 'type': 'sparse', 'num_users': len(matched_users),
         'num_queries': len(all_metrics), 'eval_time_seconds': eval_time,
         'metrics': overall_metrics, 'group_metrics': group_metrics, 'group_counts': group_counts,
+        'raw_metrics_per_group': group_groups, 'all_raw_metrics': all_metrics,
+        'word_count_analysis': word_count_analysis,
+        'group_ratio_analysis': group_ratio_analysis,
+        'idf_analysis': idf_analysis,
+        'idf_group_cross': idf_group_analysis,
+        'all_query_records': all_query_records
+    }
+
+
+def evaluate_cached_result_retriever(retriever_name: str, user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float], query_type: str, query_category: str) -> Dict:
+    """评估已经缓存为 query -> [(asin, score), ...] 的检索结果"""
+    global GROUP_FIELD, UNIQUE_LEVELS
+    GROUP_FIELD = query_category
+
+    required_k_values = {1, 3, 5, 10}
+    if not required_k_values.issubset(set(k_values)):
+        raise ValueError(f"{retriever_name} evaluation requires k_values to contain {sorted(required_k_values)}")
+    if word_idf is None:
+        raise ValueError(f"{retriever_name} evaluation requires word_idf")
+
+    log(f"\n{'='*60}")
+    log(f"检索器: {retriever_name.upper()} (缓存结果) - {query_category.upper()}/{query_type.upper()}")
+    log(f"{'='*60}")
+
+    query_cache = load_result_query_cache(retriever_name, query_type, query_category)
+    matched_users = list(user_queries.keys())
+    log(f"  用户数: {len(matched_users)}")
+
+    eval_start = time.time()
+
+    all_query_texts = []
+    all_query_asins = []
+    all_query_users = []
+    all_query_word_counts = []
+    all_query_group_ratios = []
+    all_query_groups = []
+    all_query_idf_values = []
+
+    for user_id in matched_users:
+        for q in user_queries[user_id]:
+            query_text = q['query']
+            all_query_texts.append(query_text)
+            all_query_asins.append(q['asin'])
+            all_query_users.append(user_id)
+            all_query_word_counts.append(q['word_count'])
+            all_query_group_ratios.append(q[f'{GROUP_FIELD}_ratio'])
+            all_query_groups.append(q[GROUP_FIELD])
+            all_query_idf_values.append(compute_query_idf(query_text, word_idf))
+
+    if not all_query_texts:
+        raise ValueError(f"{retriever_name} has no queries for {query_category}/{query_type}")
+
+    log(f"  总查询数: {len(all_query_texts)}")
+    log(f"  使用查询结果缓存 (共 {len(query_cache)} 条记录)...")
+
+    missing_queries = sorted({query_text for query_text in all_query_texts if query_text not in query_cache})
+    if missing_queries:
+        raise KeyError(
+            f"{retriever_name} query result cache missing {len(missing_queries)} queries "
+            f"for {query_category}/{query_type}; examples: {missing_queries[:5]}"
+        )
+
+    all_results = []
+    for query_text in all_query_texts:
+        retrieved = query_cache[query_text]
+        if not isinstance(retrieved, list):
+            raise TypeError(f"{retriever_name} cached result must be list for query: {query_text}")
+        all_results.append(retrieved)
+
+    group_groups = {g: [] for g in UNIQUE_LEVELS}
+    all_metrics = []
+
+    word_bins = [(0, 15), (15, 20), (20, 25), (25, 30), (30, float('inf'))]
+    word_bin_labels = ['很短(1-15)', '短(15-20)', '中(20-25)', '长(25-30)', '很长(30+)']
+    ratio_bins = [(0.0, 0.05), (0.05, 0.1), (0.1, 0.2), (0.2, 0.5), (0.5, 1.0)]
+    ratio_bin_labels = ['很低(0-0.05)', '低(0.05-0.1)', '中(0.1-0.2)', '高(0.2-0.5)', '很高(0.5+)']
+    word_count_groups = {label: [] for label in word_bin_labels}
+    group_ratio_groups = {label: [] for label in ratio_bin_labels}
+    idf_bin_groups = {label: [] for label in IDF_BIN_LABELS}
+    idf_group_cross = defaultdict(list)
+    all_query_records = []
+
+    for i, (retrieved, relevant_asin) in enumerate(zip(all_results, all_query_asins)):
+        retrieved_asins = [r[0] for r in retrieved]
+        metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
+        group = all_query_groups[i]
+        all_metrics.append(metrics)
+        group_groups[group].append(metrics)
+
+        all_query_records.append({
+            'user_id': all_query_users[i],
+            'asin': relevant_asin,
+            f'{GROUP_FIELD}': group,
+            'mean_idf': all_query_idf_values[i],
+            'query_length': all_query_word_counts[i],
+            f'{GROUP_FIELD}_ratio': all_query_group_ratios[i],
+            'p_at1': float(metrics['P@1']),
+            'p_at3': float(metrics['P@3']),
+            'p_at5': float(metrics['P@5']),
+            'p_at10': float(metrics['P@10']),
+            'n_at10': float(metrics['N@10']),
+            'mrr_at10': float(metrics['MR@10']),
+            'hit_at10': float(metrics['H@10']),
+        })
+
+        wc = all_query_word_counts[i]
+        for (low, high), label in zip(word_bins, word_bin_labels):
+            if low <= wc < high:
+                word_count_groups[label].append(metrics)
+                break
+
+        group_ratio = all_query_group_ratios[i]
+        for (low, high), label in zip(ratio_bins, ratio_bin_labels):
+            if low <= group_ratio < high:
+                group_ratio_groups[label].append(metrics)
+                break
+
+        q_idf = all_query_idf_values[i]
+        for (low, high), label in zip(IDF_BINS, IDF_BIN_LABELS):
+            if low <= q_idf < high:
+                idf_bin_groups[label].append(metrics)
+                idf_group_cross[(label, group)].append(metrics)
+                break
+
+        if (i + 1) % 500 == 0:
+            log(f"    进度: {i+1}/{len(all_results)} ({100*(i+1)/len(all_results):.1f}%)")
+
+    eval_time = time.time() - eval_start
+    log(f"  评估完成，总耗时: {eval_time:.1f}秒")
+    overall_metrics = compute_average_metrics(all_metrics, k_values)
+
+    group_metrics = {}
+    group_counts = {}
+    for group in UNIQUE_LEVELS:
+        if group_groups[group]:
+            group_metrics[group] = compute_average_metrics(group_groups[group], k_values)
+            group_counts[group] = len(group_groups[group])
+        else:
+            group_metrics[group] = {k: 0.0 for k in [f'P@{i}' for i in k_values] + [f'N@{i}' for i in k_values] + [f'MR@{i}' for i in k_values] + [f'H@{i}' for i in k_values]}
+            group_counts[group] = 0
+
+    word_count_analysis = {}
+    for label in word_bin_labels:
+        if word_count_groups[label]:
+            word_count_analysis[label] = {
+                'count': len(word_count_groups[label]),
+                'metrics': compute_average_metrics(word_count_groups[label], k_values)
+            }
+
+    group_ratio_analysis = {}
+    for label in ratio_bin_labels:
+        if group_ratio_groups[label]:
+            group_ratio_analysis[label] = {
+                'count': len(group_ratio_groups[label]),
+                'metrics': compute_average_metrics(group_ratio_groups[label], k_values)
+            }
+
+    idf_analysis = {}
+    for label in IDF_BIN_LABELS:
+        if idf_bin_groups[label]:
+            idf_analysis[label] = {
+                'count': len(idf_bin_groups[label]),
+                'metrics': compute_average_metrics(idf_bin_groups[label], k_values)
+            }
+
+    idf_group_analysis = {}
+    for (idf_label, group_val), metrics_list in idf_group_cross.items():
+        if metrics_list:
+            idf_group_analysis[(idf_label, group_val)] = {
+                'count': len(metrics_list),
+                'metrics': compute_average_metrics(metrics_list, k_values)
+            }
+
+    return {
+        'retriever': retriever_name, 'dim': 0, 'type': 'late_interaction_result_cache',
+        'num_users': len(matched_users), 'num_queries': len(all_metrics),
+        'eval_time_seconds': eval_time, 'metrics': overall_metrics,
+        'group_metrics': group_metrics, 'group_counts': group_counts,
         'raw_metrics_per_group': group_groups, 'all_raw_metrics': all_metrics,
         'word_count_analysis': word_count_analysis,
         'group_ratio_analysis': group_ratio_analysis,
@@ -2173,6 +2371,15 @@ def main():
                 query_type_results.append(result)
             except Exception as e:
                 log(f"  BM25 错误: {e}")
+
+            # 评估 ColBERTv2（使用预生成的 query -> result 缓存）
+            for retriever_name in COLBERTV2_RETRIEVERS:
+                result = evaluate_cached_result_retriever(
+                    retriever_name, user_queries, user_to_group, k_values, word_idf, query_type, query_category
+                )
+                result['query_type'] = query_type
+                result['query_category'] = query_category
+                query_type_results.append(result)
 
             # 评估稀疏检索器（SPLADE）
             for retriever_name in SPARSE_RETRIEVERS:

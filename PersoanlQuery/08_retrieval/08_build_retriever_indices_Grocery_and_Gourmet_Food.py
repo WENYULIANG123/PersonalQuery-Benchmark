@@ -9,6 +9,7 @@ import os
 import sys
 import pickle
 import hashlib
+import importlib.util
 import threading
 import numpy as np
 import torch
@@ -22,8 +23,9 @@ if "HF_HOME" not in os.environ:
 if "HF_HUB_CACHE" not in os.environ:
     os.environ["HF_HUB_CACHE"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
 
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
+# ColBERTv2 checkpoint is not fully cached in this environment, so allow online resolution.
+os.environ["HF_HUB_OFFLINE"] = "0"
+os.environ["TRANSFORMERS_OFFLINE"] = "0"
 
 # Add utils path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -42,6 +44,33 @@ from config import get_category_config
 
 CATEGORY_NAME = "Grocery_and_Gourmet_Food"
 CAT_CONFIG = get_category_config(CATEGORY_NAME)
+
+COLBERTV2_TEMPLATE_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "08_build_retriever_indices_Baby_Products.py",
+)
+_COLBERTV2_TEMPLATE_MODULE = None
+
+
+def get_colbertv2_template_module():
+    """加载 Baby 脚本中已合入的 ColBERTv2 原生索引实现，并绑定当前类别配置。"""
+    global _COLBERTV2_TEMPLATE_MODULE
+    if _COLBERTV2_TEMPLATE_MODULE is not None:
+        return _COLBERTV2_TEMPLATE_MODULE
+
+    if not os.path.exists(COLBERTV2_TEMPLATE_SCRIPT):
+        raise FileNotFoundError(f"ColBERTv2 template script not found: {COLBERTV2_TEMPLATE_SCRIPT}")
+
+    spec = importlib.util.spec_from_file_location("colbertv2_build_template", COLBERTV2_TEMPLATE_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load ColBERTv2 template script: {COLBERTV2_TEMPLATE_SCRIPT}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.CATEGORY_NAME = CATEGORY_NAME
+    module.CAT_CONFIG = CAT_CONFIG
+    _COLBERTV2_TEMPLATE_MODULE = module
+    return module
 
 
 
@@ -94,6 +123,8 @@ def get_cache_paths(retriever_name: str, doc_hash: str, cache_dir: str) -> Dict[
             'doc_ids': f"{base_path}_doc_ids.pkl",
             'metadata': f"{base_path}_metadata.pkl",
         }
+    elif retriever_name == 'colbertv2':
+        return get_colbertv2_template_module().get_cache_paths(retriever_name, doc_hash, cache_dir)
     elif retriever_name in COLBERT_RETRIEVERS:
         # ColBERT 使用 pickle 保存（因为是 token-level 可变长 embeddings）
         return {
@@ -113,6 +144,10 @@ def cache_exists(retriever_name: str, doc_hash: str, cache_dir: str) -> bool:
     if retriever_name in DENSE_RETRIEVERS:
         paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
         return os.path.exists(paths['config']) and os.path.exists(paths['embeddings'])
+    elif retriever_name == 'colbertv2':
+        paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
+        required_files = ['index_metadata', 'plan', 'centroids', 'ivf', 'doc_ids', 'metadata', 'manifest']
+        return all(os.path.exists(paths[key]) and os.path.getsize(paths[key]) > 0 for key in required_files)
     elif retriever_name in COLBERT_RETRIEVERS:
         # ColBERT 使用 pickle 保存
         paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
@@ -172,6 +207,11 @@ def validate_retriever_cache(retriever_name: str, doc_hash: str, cache_dir: str,
 
         except Exception as e:
             return False, f"Validation error: {str(e)}"
+
+    elif retriever_name == 'colbertv2':
+        return get_colbertv2_template_module().validate_retriever_cache(
+            retriever_name, doc_hash, cache_dir, n_documents
+        )
 
     elif retriever_name in COLBERT_RETRIEVERS:
         paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
@@ -455,6 +495,13 @@ def build_retriever(retriever_name: str, documents: List[Dict], doc_hash: str, c
     """Build and save retriever to cache. Returns (success, cache_path_or_error)"""
     log_with_timestamp(f"[DEBUG] build_retriever: Creating {retriever_name}...")
     try:
+        if retriever_name == 'colbertv2':
+            if all_metadata is None:
+                raise ValueError("ColBERTv2 build requires all_metadata")
+            return get_colbertv2_template_module().build_retriever(
+                retriever_name, documents, doc_hash, cache_dir, all_metadata
+            )
+
         log_with_timestamp(f"[DEBUG] Creating retriever instance...")
         if retriever_name == 'bm25':
             retriever = retrievers.BM25()
@@ -558,12 +605,14 @@ def main():
     log_with_timestamp(f"Cache directory: {cache_dir}")
     
     # Define retrievers to build (按参数量从小到大排序: minilm < star < e5 < bge < gritlm < ance)
-    DENSE_RETRIEVERS = ['minilm', 'star', 'e5', 'bge', 'gritlm', 'ance']
-    COLBERT_RETRIEVERS = ['colbert']  # 使用 token-level late interaction
+    DENSE_RETRIEVERS = [
+        'minilm', 'star', 'e5', 'bge',
+        # 'gritlm',
+        'ance',
+    ]
+    COLBERT_RETRIEVERS = ['colbertv2']  # 使用 ColBERTv2 原生 late-interaction 索引
     SPARSE_RETRIEVERS = ['bm25', 'splade']
-    # TODO: ColBERT 暂时禁用，token-level embeddings 数据量过大（300k docs × 200 tokens × 768 dim ≈ 176GB+）
-    # ALL_RETRIEVERS = DENSE_RETRIEVERS + COLBERT_RETRIEVERS + SPARSE_RETRIEVERS
-    ALL_RETRIEVERS = DENSE_RETRIEVERS + SPARSE_RETRIEVERS
+    ALL_RETRIEVERS = DENSE_RETRIEVERS + COLBERT_RETRIEVERS + SPARSE_RETRIEVERS
 
     log_with_timestamp(f"\nBuilding {len(ALL_RETRIEVERS)} retrievers:")
     log_with_timestamp(f"  Dense: {DENSE_RETRIEVERS}")
@@ -587,7 +636,8 @@ def main():
                 log_with_timestamp(f"  → {paths['config']}")
                 log_with_timestamp(f"  → {paths['embeddings']}")
             elif retriever_name in COLBERT_RETRIEVERS:
-                log_with_timestamp(f"  → {paths['pickle']}")
+                log_with_timestamp(f"  → {paths['index_root']}")
+                log_with_timestamp(f"  → {paths['index_path']}")
             else:
                 log_with_timestamp(f"  → {paths['pickle']}")
 
@@ -637,13 +687,16 @@ def main():
                     log_with_timestamp(f"  → {paths['config']}")
                     log_with_timestamp(f"  → {paths['embeddings']}")
                 elif retriever_name in COLBERT_RETRIEVERS:
-                    log_with_timestamp(f"  → {paths['pickle']}")
+                    log_with_timestamp(f"  → {paths['index_root']}")
+                    log_with_timestamp(f"  → {paths['index_path']}")
                 else:
                     log_with_timestamp(f"  → {paths['pickle']}")
                 results[retriever_name] = {'status': 'success', 'time': elapsed}
             else:
                 log_with_timestamp(f"[BUILD_FAILED] {retriever_name}: {cache_path}")
                 results[retriever_name] = {'status': 'failed', 'error': cache_path}
+                if retriever_name in COLBERT_RETRIEVERS:
+                    raise RuntimeError(f"ColBERTv2 build failed: {cache_path}")
     
     # Summary
     log_with_timestamp(f"[DEBUG] Build loop complete, generating summary...")

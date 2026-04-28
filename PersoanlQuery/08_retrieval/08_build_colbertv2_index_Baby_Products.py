@@ -15,6 +15,7 @@ import os
 import pickle
 import math
 import shutil
+import subprocess
 import sys
 from datetime import datetime
 from typing import Dict, List, Set, Tuple
@@ -47,6 +48,166 @@ NBITS = 2
 TARGET_NUM_PARTITIONS = 32768
 KMEANS_NITERS = 1
 EXPERIMENT_NAME = "colbertv2_index"
+
+
+def parse_cuda_version_text(version_text: str) -> Tuple[int, int]:
+    marker = "release "
+    marker_index = version_text.find(marker)
+    if marker_index < 0:
+        raise ValueError(f"Unable to parse CUDA release from nvcc output: {version_text}")
+
+    version_part = version_text[marker_index + len(marker):].split(",", 1)[0].strip()
+    pieces = version_part.split(".")
+    if len(pieces) < 2:
+        raise ValueError(f"Unable to parse CUDA major/minor from nvcc output: {version_text}")
+
+    return int(pieces[0]), int(pieces[1])
+
+
+def get_nvcc_cuda_version(nvcc_path: str) -> Tuple[int, int]:
+    result = subprocess.run(
+        [nvcc_path, "--version"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    return parse_cuda_version_text(result.stdout)
+
+
+def get_torch_cuda_version() -> Tuple[int, int]:
+    cuda_version = torch.version.cuda
+    if cuda_version is None:
+        raise RuntimeError("PyTorch CUDA version is unavailable; ColBERTv2 indexing requires CUDA PyTorch.")
+
+    pieces = cuda_version.split(".")
+    if len(pieces) < 2:
+        raise RuntimeError(f"Unable to parse PyTorch CUDA version: {cuda_version}")
+
+    return int(pieces[0]), int(pieces[1])
+
+
+def get_gcc_major_version(compiler_path: str) -> int:
+    result = subprocess.run(
+        [compiler_path, "--version"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    first_line = result.stdout.splitlines()[0]
+    marker = "(GCC) "
+    marker_index = first_line.find(marker)
+    if marker_index < 0:
+        raise ValueError(f"Unable to parse GCC version from compiler output: {first_line}")
+
+    version_text = first_line[marker_index + len(marker):].split()[0]
+    return int(version_text.split(".", 1)[0])
+
+
+def candidate_cuda_roots_for_colbert() -> List[str]:
+    candidate_roots = []
+
+    for key in ("CUDA_HOME", "CUDA_PATH"):
+        root = os.environ.get(key)
+        if root and root not in candidate_roots:
+            candidate_roots.append(root)
+
+    nvcc_path = shutil.which("nvcc")
+    if nvcc_path:
+        inferred_root = os.path.dirname(os.path.dirname(os.path.realpath(nvcc_path)))
+        if inferred_root not in candidate_roots:
+            candidate_roots.append(inferred_root)
+
+    usr_local = "/usr/local"
+    if os.path.isdir(usr_local):
+        for entry_name in sorted(os.listdir(usr_local)):
+            if entry_name.startswith("cuda-"):
+                root = os.path.join(usr_local, entry_name)
+                if root not in candidate_roots:
+                    candidate_roots.append(root)
+
+    return candidate_roots
+
+
+def select_cuda_toolkit_for_colbert_extension_build() -> None:
+    torch_cuda_major, torch_cuda_minor = get_torch_cuda_version()
+    candidate_roots = candidate_cuda_roots_for_colbert()
+    if not candidate_roots:
+        raise RuntimeError("No CUDA toolkit candidates found for ColBERT CUDA extension build.")
+
+    compatible_roots = []
+    rejected_roots = []
+    for root in candidate_roots:
+        nvcc_path = os.path.join(root, "bin", "nvcc")
+        if not os.path.exists(nvcc_path):
+            rejected_roots.append((root, "missing nvcc"))
+            continue
+
+        try:
+            cuda_major, cuda_minor = get_nvcc_cuda_version(nvcc_path)
+        except Exception as e:
+            rejected_roots.append((root, f"nvcc version parse failed: {type(e).__name__}: {e}"))
+            continue
+
+        if cuda_major != torch_cuda_major:
+            rejected_roots.append(
+                (root, f"CUDA {cuda_major}.{cuda_minor} does not match PyTorch CUDA major {torch_cuda_major}")
+            )
+            continue
+
+        compatible_roots.append((root, cuda_major, cuda_minor))
+
+    if not compatible_roots:
+        raise RuntimeError(
+            "No CUDA toolkit with the same major version as PyTorch CUDA was found. "
+            f"PyTorch CUDA={torch.version.cuda}; rejected candidates={rejected_roots}"
+        )
+
+    compatible_roots.sort(key=lambda item: (abs(item[2] - torch_cuda_minor), -item[2], item[0]))
+    selected_root, selected_major, selected_minor = compatible_roots[0]
+
+    os.environ["CUDA_HOME"] = selected_root
+    os.environ["CUDA_PATH"] = selected_root
+    selected_bin = os.path.join(selected_root, "bin")
+    path_entries = [path for path in os.environ.get("PATH", "").split(":") if path]
+    if selected_bin in path_entries:
+        path_entries.remove(selected_bin)
+    path_entries.insert(0, selected_bin)
+    os.environ["PATH"] = ":".join(path_entries)
+
+    from torch.utils import cpp_extension
+    cpp_extension.CUDA_HOME = selected_root
+
+    log_with_timestamp(
+        f"[DEBUG] Stage 5: selected CUDA toolkit {selected_root} "
+        f"(nvcc CUDA {selected_major}.{selected_minor}, PyTorch CUDA {torch.version.cuda})"
+    )
+
+
+def configure_host_compiler_for_colbert_extension_build() -> None:
+    cc_path = "/usr/bin/gcc"
+    cxx_path = "/usr/bin/g++"
+
+    if not os.path.exists(cc_path):
+        raise RuntimeError(f"Required CUDA host C compiler not found: {cc_path}")
+    if not os.path.exists(cxx_path):
+        raise RuntimeError(f"Required CUDA host C++ compiler not found: {cxx_path}")
+
+    cc_major = get_gcc_major_version(cc_path)
+    cxx_major = get_gcc_major_version(cxx_path)
+    max_supported_major = 13
+    if cc_major > max_supported_major:
+        raise RuntimeError(f"{cc_path} GCC major version {cc_major} exceeds CUDA 12.5 support limit {max_supported_major}")
+    if cxx_major > max_supported_major:
+        raise RuntimeError(f"{cxx_path} GCC major version {cxx_major} exceeds CUDA 12.5 support limit {max_supported_major}")
+
+    os.environ["CC"] = cc_path
+    os.environ["CXX"] = cxx_path
+    log_with_timestamp(
+        f"[DEBUG] Stage 5: selected host compilers CC={cc_path} (GCC {cc_major}), "
+        f"CXX={cxx_path} (GCC {cxx_major})"
+    )
 
 
 def setup_logging() -> None:
@@ -332,17 +493,22 @@ def configure_cuda_env_for_colbert_extension_build() -> None:
             candidate_roots.append(inferred_root)
 
     include_dirs = []
+
+    def add_include_dir(path: str) -> None:
+        if os.path.isdir(path) and path not in include_dirs:
+            include_dirs.append(path)
+
     for root in candidate_roots:
         standard_include = os.path.join(root, "include")
-        if os.path.isdir(standard_include) and standard_include not in include_dirs:
-            include_dirs.append(standard_include)
+        add_include_dir(standard_include)
+        add_include_dir(os.path.join(standard_include, "cccl"))
 
         targets_root = os.path.join(root, "targets")
         if os.path.isdir(targets_root):
             for target_name in sorted(os.listdir(targets_root)):
                 target_include = os.path.join(targets_root, target_name, "include")
-                if os.path.isdir(target_include) and target_include not in include_dirs:
-                    include_dirs.append(target_include)
+                add_include_dir(target_include)
+                add_include_dir(os.path.join(target_include, "cccl"))
 
     if not include_dirs:
         raise RuntimeError(
@@ -399,6 +565,16 @@ def build_colbert_index(documents: List[Dict], all_metadata: Dict, output_root: 
     if not torch.cuda.is_available():
         raise RuntimeError("ColBERTv2 indexing requires CUDA")
 
+    nranks = torch.cuda.device_count()
+    if nranks < 1:
+        raise RuntimeError("CUDA is available but no visible GPU ranks were detected")
+
+    select_cuda_toolkit_for_colbert_extension_build()
+    configure_host_compiler_for_colbert_extension_build()
+    validate_cuda_toolkit_for_colbert()
+    configure_cuda_env_for_colbert_extension_build()
+    preflight_colbert_cuda_extension_build()
+
     log_with_timestamp("[DEBUG] Stage 5: importing ColBERT modules")
     try:
         from colbert.infra import Run, RunConfig, ColBERTConfig
@@ -415,14 +591,6 @@ def build_colbert_index(documents: List[Dict], all_metadata: Dict, output_root: 
     log_with_timestamp(f"[DEBUG] Stage 5: output directory ready: {output_root}")
     collection_path = os.path.join(output_root, "collection.tsv")
     write_collection_tsv(documents, all_metadata, collection_path)
-
-    nranks = torch.cuda.device_count()
-    if nranks < 1:
-        raise RuntimeError("CUDA is available but no visible GPU ranks were detected")
-
-    validate_cuda_toolkit_for_colbert()
-    configure_cuda_env_for_colbert_extension_build()
-    preflight_colbert_cuda_extension_build()
 
     log_with_timestamp(f"[DEBUG] Stage 5: detected CUDA device count={nranks}")
     log_with_timestamp(
@@ -518,21 +686,23 @@ def main() -> None:
     log_with_timestamp("[DEBUG] Stage 0: configuration loading started")
     category_config = get_category_config(CATEGORY_NAME)
     raw_corpus_file = category_config['raw_corpus_file']
-    output_root = os.path.join(category_config['output_dir'], "colbertv2_index")
+    output_base_dir = category_config['retriever_cache_dir']
 
     log_with_timestamp(f"Category: {CATEGORY_NAME}")
     log_with_timestamp(f"Raw corpus file: {raw_corpus_file}")
-    log_with_timestamp(f"Output root: {output_root}")
+    log_with_timestamp(f"Output base dir: {output_base_dir}")
     log_with_timestamp(f"[DEBUG] Category config keys: {sorted(category_config.keys())}")
     log_with_timestamp("[DEBUG] Stage 0: configuration loading complete")
 
     all_metadata = load_raw_metadata(raw_corpus_file)
     documents, asins = build_documents(all_metadata)
     doc_hash = compute_document_hash(documents)
+    output_root = os.path.join(output_base_dir, f"colbertv2_{doc_hash}")
 
     log_with_timestamp(f"Total documents: {len(documents)}")
     log_with_timestamp(f"Total ASINs: {len(asins)}")
     log_with_timestamp(f"Document hash: {doc_hash}")
+    log_with_timestamp(f"Output root: {output_root}")
 
     log_with_timestamp("[DEBUG] Stage 5/6 orchestration: index build starting")
     collection_path = build_colbert_index(documents, all_metadata, output_root)

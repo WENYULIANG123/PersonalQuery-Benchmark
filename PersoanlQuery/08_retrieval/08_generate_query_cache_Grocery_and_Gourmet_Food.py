@@ -17,13 +17,14 @@
     - 预期收益: 查询评估时间 14.6s → 11-12s (20-30% improvement)
 """
 
-# 完全离线模式 - 避免 HuggingFace 网络验证
 import os
 os.environ["HF_HOME"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_HUB_CACHE"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
+os.environ["HF_HUB_OFFLINE"] = "0"
+os.environ["TRANSFORMERS_OFFLINE"] = "0"
 
 import sys
+import importlib.util
 import json
 import pickle
 import time
@@ -37,6 +38,7 @@ current_dir = Path(__file__).parent.resolve()
 retrieval_root = current_dir.parent
 personquery_root = retrieval_root.parent
 
+sys.path.insert(0, str(current_dir))
 sys.path.insert(0, str(retrieval_root))
 sys.path.insert(0, str(personquery_root))
 
@@ -69,6 +71,7 @@ AVAILABLE_RETRIEVERS = {
     'MiniLM': MiniLMRetriever,
     'STAR': STARRetriever,
     'ANCE': ANCERetriever,
+    'ColBERTv2': None,  # ColBERTv2 使用原生 late-interaction index 生成结果缓存
     'SPLADE': SPLADERetriever,
     'BM25': None,  # BM25 单独处理
 }
@@ -78,6 +81,25 @@ SPARSE_RETRIEVERS = {'SPLADE'}
 
 def log_with_timestamp(msg: str):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+def load_colbertv2_build_module():
+    module_path = current_dir / f"08_build_retriever_indices_{CATEGORY_NAME}.py"
+    if not module_path.exists():
+        raise FileNotFoundError(f"Required ColBERTv2 build module not found: {module_path}")
+
+    spec = importlib.util.spec_from_file_location(
+        f"build_retriever_indices_{CATEGORY_NAME.lower()}",
+        module_path,
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load ColBERTv2 build module: {module_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    if not hasattr(module, "get_colbertv2_template_module"):
+        raise AttributeError(f"ColBERTv2 build module missing get_colbertv2_template_module: {module_path}")
+    return module.get_colbertv2_template_module()
 
 # ============ BM25 查询缓存函数 ============
 def load_bm25_retriever():
@@ -122,6 +144,187 @@ def save_bm25_query_cache(cache: Dict, mode: str):
     with open(cache_file, 'wb') as f:
         pickle.dump(cache, f)
     log_with_timestamp(f"  ✓ BM25 查询缓存已保存: {cache_file}")
+
+def resolve_colbertv2_output_root() -> str:
+    helper = load_colbertv2_build_module()
+
+    metadata_file = CAT_CONFIG['metadata_cache_file']
+    if os.path.exists(metadata_file):
+        with open(metadata_file, 'rb') as f:
+            metadata = pickle.load(f)
+    else:
+        metadata = helper.load_fullscale_metadata(CAT_CONFIG['raw_corpus_file'])
+
+    documents, _ = helper.build_fullscale_documents(CATEGORY_NAME, metadata)
+    doc_hash = helper.compute_document_hash(documents)
+    is_valid, error_msg = helper.validate_retriever_cache(
+        'colbertv2',
+        doc_hash,
+        CAT_CONFIG['retriever_cache_dir'],
+        len(documents),
+    )
+    if not is_valid:
+        raise RuntimeError(f"ColBERTv2 index cache is invalid: {error_msg}")
+
+    paths = helper.get_cache_paths('colbertv2', doc_hash, CAT_CONFIG['retriever_cache_dir'])
+    return paths['index_root']
+
+
+def configure_colbertv2_runtime() -> None:
+    helper = load_colbertv2_build_module()
+    helper.select_cuda_toolkit_for_colbert_extension_build()
+    helper.configure_host_compiler_for_colbert_extension_build()
+    helper.validate_cuda_toolkit_for_colbert()
+    helper.configure_cuda_env_for_colbert_extension_build()
+    helper.preflight_colbert_cuda_extension_build()
+
+
+def load_colbertv2_doc_ids(output_root: str) -> List[str]:
+    doc_ids_path = os.path.join(output_root, "doc_ids.pkl")
+    if not os.path.exists(doc_ids_path):
+        raise FileNotFoundError(f"Required ColBERTv2 doc id mapping not found: {doc_ids_path}")
+
+    with open(doc_ids_path, "rb") as f:
+        doc_ids = pickle.load(f)
+
+    if not isinstance(doc_ids, list):
+        raise TypeError(f"doc_ids.pkl must contain a list, got {type(doc_ids).__name__}")
+    if not doc_ids:
+        raise ValueError(f"doc_ids.pkl is empty: {doc_ids_path}")
+
+    return doc_ids
+
+
+def build_colbertv2_searcher(output_root: str, doc_ids: List[str]):
+    from colbert.infra import Run, RunConfig, ColBERTConfig
+    from colbert import Searcher
+
+    collection = [f"pid {pid} asin {asin}" for pid, asin in enumerate(doc_ids)]
+    with Run().context(RunConfig(experiment="colbertv2_index", root=output_root)):
+        config = ColBERTConfig(root=output_root)
+        return Searcher(
+            index="colbertv2_index",
+            checkpoint="colbert-ir/colbertv2.0",
+            collection=collection,
+            config=config,
+        )
+
+
+def collect_unique_query_texts(queries: List[Dict], mode: str) -> List[str]:
+    unique_queries = []
+    seen = set()
+
+    for index, item in enumerate(queries):
+        query_text = item.get('query')
+        if not isinstance(query_text, str):
+            raise TypeError(f"{mode} query must be a string at index {index}, got {type(query_text).__name__}")
+        if not query_text:
+            raise ValueError(f"{mode} query is empty at index {index}")
+        if query_text not in seen:
+            seen.add(query_text)
+            unique_queries.append(query_text)
+
+    if not unique_queries:
+        raise ValueError(f"No valid queries collected for ColBERTv2 mode: {mode}")
+
+    return unique_queries
+
+
+def convert_colbertv2_ranking_to_cache(ranking, qid_to_query: Dict[int, str], doc_ids: List[str]) -> Dict[str, List[Tuple[str, float]]]:
+    if not hasattr(ranking, "data"):
+        raise TypeError(f"ColBERTv2 search_all returned object without data attribute: {type(ranking).__name__}")
+
+    cache = {}
+    for qid, rows in ranking.data.items():
+        query_text = qid_to_query[qid]
+        converted_rows = []
+
+        for row in rows:
+            if len(row) != 3:
+                raise ValueError(f"Unexpected ColBERTv2 ranking row for qid={qid}: {row}")
+
+            pid, _, score = row
+            pid_int = int(pid)
+            if pid_int < 0 or pid_int >= len(doc_ids):
+                raise IndexError(f"ColBERTv2 pid {pid_int} is outside doc_ids range 0..{len(doc_ids)-1}")
+
+            converted_rows.append((doc_ids[pid_int], float(score)))
+
+        cache[query_text] = converted_rows
+
+    if len(cache) != len(qid_to_query):
+        raise RuntimeError(f"ColBERTv2 cache size mismatch: expected {len(qid_to_query)}, got {len(cache)}")
+
+    return cache
+
+
+def save_colbertv2_query_cache(cache: Dict[str, List[Tuple[str, float]]], mode: str) -> str:
+    subdir = get_cache_subdir(mode)
+    os.makedirs(subdir, exist_ok=True)
+    cache_path = os.path.join(subdir, f"colbertv2__{mode}_cache.pkl")
+    tmp_path = f"{cache_path}.tmp"
+
+    with open(tmp_path, "wb") as f:
+        pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    os.replace(tmp_path, cache_path)
+
+    file_size_mb = os.path.getsize(cache_path) / (1024 * 1024)
+    log_with_timestamp(f"  ✓ ColBERTv2 查询缓存已保存: {cache_path}")
+    log_with_timestamp(f"    - 查询数: {len(cache)}")
+    log_with_timestamp(f"    - 文件大小: {file_size_mb:.2f} MB")
+    return cache_path
+
+
+def generate_colbertv2_query_cache_for_mode(searcher, doc_ids: List[str], queries: List[Dict], mode: str, top_k: int = 100) -> Dict[str, object]:
+    query_texts = collect_unique_query_texts(queries, mode)
+    qid_to_query = {qid: query_text for qid, query_text in enumerate(query_texts)}
+
+    log_with_timestamp(f"  开始生成 ColBERTv2 查询缓存 ({mode}): queries={len(query_texts)}, top_k={top_k}")
+    start_time = time.time()
+    ranking = searcher.search_all(qid_to_query, k=top_k)
+    cache = convert_colbertv2_ranking_to_cache(ranking, qid_to_query, doc_ids)
+    cache_path = save_colbertv2_query_cache(cache, mode)
+    elapsed = time.time() - start_time
+
+    return {
+        'mode': mode,
+        'cache_path': cache_path,
+        'query_count': len(cache),
+        'elapsed_seconds': elapsed,
+    }
+
+
+def generate_colbertv2_cache_from_query_types(query_types: List[Tuple[str, List[Dict], Dict[str, List[Dict]], str]]) -> Dict[str, object]:
+    output_root = resolve_colbertv2_output_root()
+    index_dir = os.path.join(output_root, "colbertv2_index", "indexes", "colbertv2_index")
+    if not os.path.isdir(index_dir):
+        raise FileNotFoundError(f"Required ColBERTv2 index directory not found: {index_dir}")
+
+    log_with_timestamp(f"  ColBERTv2 索引目录: {index_dir}")
+    configure_colbertv2_runtime()
+    doc_ids = load_colbertv2_doc_ids(output_root)
+    searcher = build_colbertv2_searcher(output_root, doc_ids)
+
+    summaries = []
+    total_cached = 0
+    for query_type, queries, _, mode in query_types:
+        if not queries:
+            log_with_timestamp(f"  (无 {query_type} {mode} 查询，跳过)")
+            continue
+
+        summary = generate_colbertv2_query_cache_for_mode(searcher, doc_ids, queries, mode, top_k=100)
+        summaries.append(summary)
+        total_cached += summary['query_count']
+        log_with_timestamp(
+            f"  ✓ {query_type} {mode} ColBERTv2 缓存: "
+            f"{summary['query_count']} 条, 耗时 {summary['elapsed_seconds']:.1f}s"
+        )
+
+    return {
+        'total_cached': total_cached,
+        'summaries': summaries,
+    }
 
 def generate_bm25_cache_from_persona_source():
     """为 BM25 生成所有查询缓存 (ACL + CCOMP - correct)
@@ -853,6 +1056,9 @@ def generate_cache_from_persona_source(retriever_names: Optional[List[str]] = No
                     log_with_timestamp(f"  ✓ {query_type} {mode} BM25 缓存: {len(cache)} 条")
                 else:
                     log_with_timestamp(f"  (无 {query_type} {mode} 查询，跳过)")
+        elif retriever_name == 'ColBERTv2':
+            colbert_stats = generate_colbertv2_cache_from_query_types(query_types)
+            stats['total_cached'] += colbert_stats['total_cached']
         else:
             for query_type, queries, by_user, mode in query_types:
                 if queries:
@@ -957,6 +1163,9 @@ def generate_cache_for_all_retrievers(
         log_with_timestamp(f"【{stats['retrievers_processed'] + 1}/{len(retriever_names)}】正在处理检索器: {retriever_name}")
         log_with_timestamp(f"{'='*80}")
 
+        if retriever_name == 'ColBERTv2':
+            raise NotImplementedError("ColBERTv2 query cache generation only supports persona correct query source")
+
         retriever_class = AVAILABLE_RETRIEVERS[retriever_name]
 
         # ⚡ 性能优化：在用户循环外初始化检索器，每个检索器只加载一次模型
@@ -1045,8 +1254,8 @@ def generate_cache_for_all_retrievers(
 
 def main():
     # ==================== 硬编码配置 ====================
-    # 检索器列表：核心5个 + GritLM + ANCE + SPLADE
-    RETRIEVER_NAMES = ['GRITLM', 'BGE', 'E5', 'MiniLM', 'STAR', 'ANCE', 'SPLADE', 'BM25']
+    # 检索器列表：核心5个 + GritLM + ANCE + ColBERTv2 + SPLADE + BM25
+    RETRIEVER_NAMES = ['GRITLM', 'BGE', 'E5', 'MiniLM', 'STAR', 'ANCE', 'ColBERTv2', 'SPLADE', 'BM25']
     # 是否清理旧缓存
     CLEAR_CACHE_BEFORE = True
     # 数据源：persona_generated_queries.json
