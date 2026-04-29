@@ -9,7 +9,6 @@ import os
 import sys
 import pickle
 import hashlib
-import importlib.util
 import threading
 import numpy as np
 import torch
@@ -44,35 +43,6 @@ from config import get_category_config
 
 CATEGORY_NAME = "Grocery_and_Gourmet_Food"
 CAT_CONFIG = get_category_config(CATEGORY_NAME)
-
-COLBERTV2_TEMPLATE_SCRIPT = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "08_build_retriever_indices_Baby_Products.py",
-)
-_COLBERTV2_TEMPLATE_MODULE = None
-
-
-def get_colbertv2_template_module():
-    """加载 Baby 脚本中已合入的 ColBERTv2 原生索引实现，并绑定当前类别配置。"""
-    global _COLBERTV2_TEMPLATE_MODULE
-    if _COLBERTV2_TEMPLATE_MODULE is not None:
-        return _COLBERTV2_TEMPLATE_MODULE
-
-    if not os.path.exists(COLBERTV2_TEMPLATE_SCRIPT):
-        raise FileNotFoundError(f"ColBERTv2 template script not found: {COLBERTV2_TEMPLATE_SCRIPT}")
-
-    spec = importlib.util.spec_from_file_location("colbertv2_build_template", COLBERTV2_TEMPLATE_SCRIPT)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Unable to load ColBERTv2 template script: {COLBERTV2_TEMPLATE_SCRIPT}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    module.CATEGORY_NAME = CATEGORY_NAME
-    module.CAT_CONFIG = CAT_CONFIG
-    _COLBERTV2_TEMPLATE_MODULE = module
-    return module
-
-
 
 def load_fullscale_metadata(metadata_file: str) -> Dict:
     """Load full metadata"""
@@ -124,7 +94,7 @@ def get_cache_paths(retriever_name: str, doc_hash: str, cache_dir: str) -> Dict[
             'metadata': f"{base_path}_metadata.pkl",
         }
     elif retriever_name == 'colbertv2':
-        return get_colbertv2_template_module().get_cache_paths(retriever_name, doc_hash, cache_dir)
+        return retrievers.get_colbertv2_cache_paths(doc_hash, CAT_CONFIG)
     elif retriever_name in COLBERT_RETRIEVERS:
         # ColBERT 使用 pickle 保存（因为是 token-level 可变长 embeddings）
         return {
@@ -145,9 +115,7 @@ def cache_exists(retriever_name: str, doc_hash: str, cache_dir: str) -> bool:
         paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
         return os.path.exists(paths['config']) and os.path.exists(paths['embeddings'])
     elif retriever_name == 'colbertv2':
-        paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
-        required_files = ['index_metadata', 'plan', 'centroids', 'ivf', 'doc_ids', 'metadata', 'manifest']
-        return all(os.path.exists(paths[key]) and os.path.getsize(paths[key]) > 0 for key in required_files)
+        return retrievers.cache_exists_colbertv2(doc_hash, CAT_CONFIG)
     elif retriever_name in COLBERT_RETRIEVERS:
         # ColBERT 使用 pickle 保存
         paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
@@ -209,9 +177,7 @@ def validate_retriever_cache(retriever_name: str, doc_hash: str, cache_dir: str,
             return False, f"Validation error: {str(e)}"
 
     elif retriever_name == 'colbertv2':
-        return get_colbertv2_template_module().validate_retriever_cache(
-            retriever_name, doc_hash, cache_dir, n_documents
-        )
+        return retrievers.validate_colbertv2_cache(doc_hash, CAT_CONFIG, n_documents)
 
     elif retriever_name in COLBERT_RETRIEVERS:
         paths = get_cache_paths(retriever_name, doc_hash, cache_dir)
@@ -498,9 +464,14 @@ def build_retriever(retriever_name: str, documents: List[Dict], doc_hash: str, c
         if retriever_name == 'colbertv2':
             if all_metadata is None:
                 raise ValueError("ColBERTv2 build requires all_metadata")
-            return get_colbertv2_template_module().build_retriever(
-                retriever_name, documents, doc_hash, cache_dir, all_metadata
+            output_root = retrievers.build_colbertv2_retriever_index(
+                documents,
+                doc_hash,
+                all_metadata,
+                CATEGORY_NAME,
+                CAT_CONFIG,
             )
+            return True, output_root
 
         log_with_timestamp(f"[DEBUG] Creating retriever instance...")
         if retriever_name == 'bm25':

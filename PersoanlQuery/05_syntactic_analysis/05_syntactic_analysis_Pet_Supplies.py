@@ -6,7 +6,7 @@
 - CCOMP (Complement Clause) - 补语从句
 - AttrDensity (Attribute Density) - 属性词密度
 
-仅输出 user_profiles.json 文件
+同时输出 user_profiles.json 和 sentence-level JSONL 文件
 """
 import json, numpy as np
 import warnings
@@ -31,6 +31,8 @@ os.makedirs(BASE_DIR, exist_ok=True)
 ACL_USERS_JSON = f'{BASE_DIR}/acl_user_profiles.json'
 CCOMP_USERS_JSON = f'{BASE_DIR}/ccomp_user_profiles.json'
 ATTR_DENSITY_USERS_JSON = f'{BASE_DIR}/attr_density_user_profiles.json'
+ACL_OUTPUT_JSONL = f'{BASE_DIR}/acl_sentences.jsonl'
+CCOMP_OUTPUT_JSONL = f'{BASE_DIR}/ccomp_sentences.jsonl'
 
 ALL_USERS_FILE = f'/home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction/{CATEGORY}/stage1_filtered_users_reviews.json'
 STAGE1_ATTR_FILE = f'/home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction/{CATEGORY}/attributes_{CATEGORY}.json'
@@ -260,12 +262,14 @@ def process_user(user_data):
     total_token_count = 0
     acl_type_counter = Counter()
     acl_marker_counter = Counter()
+    acl_sentence_details = []
 
     # CCOMP
     sentences_with_ccomp = 0
     total_ccomp_count = 0
     ccomp_type_counter = Counter()
     ccomp_marker_counter = Counter()
+    ccomp_sentence_details = []
 
     # AttrDensity
     sentences_with_attr = 0
@@ -295,6 +299,14 @@ def process_user(user_data):
             acl_type_counter[info['acl_type']] += 1
             if info.get('marker'):
                 acl_marker_counter[info['marker']] += 1
+        acl_sentence_details.append({
+            'user_id': user_id,
+            'sentence': r,
+            'token_count': n,
+            'acl_count': acl_count,
+            'has_acl': acl_count > 0,
+            'acl_info': acl_info,
+        })
 
         # CCOMP
         ccomp_info = analyze_ccomp_in_doc(doc)
@@ -306,6 +318,14 @@ def process_user(user_data):
             ccomp_type_counter[info['comp_type']] += 1
             if info.get('marker'):
                 ccomp_marker_counter[info['marker']] += 1
+        ccomp_sentence_details.append({
+            'user_id': user_id,
+            'sentence': r,
+            'token_count': n,
+            'ccomp_count': ccomp_count,
+            'has_ccomp': ccomp_count > 0,
+            'ccomp_info': ccomp_info,
+        })
 
         # AttrDensity
         attr_count, attr_cat_dist = count_attributes_in_sentence_spacy(doc)
@@ -317,7 +337,7 @@ def process_user(user_data):
         regression_data.append((attr_count, n))
 
     if total_sentences == 0:
-        return None, None, None
+        return None, None, None, [], []
 
     # ACL 指标
     acl_sentence_ratio = sentences_with_acl / total_sentences
@@ -392,7 +412,7 @@ def process_user(user_data):
         'model_r2': model_r2,
     }
 
-    return acl_result, ccomp_result, attr_result
+    return acl_result, ccomp_result, attr_result, acl_sentence_details, ccomp_sentence_details
 
 
 # ============ 主函数 ============
@@ -429,35 +449,53 @@ def main():
     log(f'Stage 1有效商品数: {len(asin_to_attrs)}')
 
     acl_users, ccomp_users, attr_users = [], [], []
+    acl_sentence_count = 0
+    ccomp_sentence_count = 0
 
-    for idx, user_data in enumerate(user_list):
-        if idx % 500 == 0:
-            elapsed = time.time() - start_time
-            log(f'进度: {idx}/{total} ({idx/total*100:.1f}%), 耗时: {elapsed:.1f}s')
+    fp_acl = open(ACL_OUTPUT_JSONL, 'w', encoding='utf-8')
+    fp_ccomp = open(CCOMP_OUTPUT_JSONL, 'w', encoding='utf-8')
 
-        result = process_user(user_data)
-        acl_res, ccomp_res, attr_res = result
+    try:
+        for idx, user_data in enumerate(user_list):
+            if idx % 500 == 0:
+                elapsed = time.time() - start_time
+                log(f'进度: {idx}/{total} ({idx/total*100:.1f}%), 耗时: {elapsed:.1f}s')
 
-        if acl_res is not None:
-            user_id = acl_res['user_id']
-            user_products = []
-            for product in user_data.get('results', []):
-                asin = product.get('asin', '')
-                if asin in asin_to_attrs:
-                    user_products.append({'asin': asin, **asin_to_attrs[asin]})
-            acl_res['products'] = user_products
-            ccomp_res['products'] = user_products
-            attr_res['products'] = user_products
+            result = process_user(user_data)
+            acl_res, ccomp_res, attr_res, acl_sentence_details, ccomp_sentence_details = result
 
-            acl_users.append(acl_res)
-            ccomp_users.append(ccomp_res)
-            attr_users.append(attr_res)
+            for sentence_detail in acl_sentence_details:
+                fp_acl.write(json.dumps(sentence_detail, ensure_ascii=False) + '\n')
+                acl_sentence_count += 1
+            for sentence_detail in ccomp_sentence_details:
+                fp_ccomp.write(json.dumps(sentence_detail, ensure_ascii=False) + '\n')
+                ccomp_sentence_count += 1
+
+            if acl_res is not None:
+                user_id = acl_res['user_id']
+                user_products = []
+                for product in user_data.get('results', []):
+                    asin = product.get('asin', '')
+                    if asin in asin_to_attrs:
+                        user_products.append({'asin': asin, **asin_to_attrs[asin]})
+                acl_res['products'] = user_products
+                ccomp_res['products'] = user_products
+                attr_res['products'] = user_products
+
+                acl_users.append(acl_res)
+                ccomp_users.append(ccomp_res)
+                attr_users.append(attr_res)
+    finally:
+        fp_acl.close()
+        fp_ccomp.close()
 
     elapsed = time.time() - start_time
     log(f'进度: {total}/{total} (100.0%), 耗时: {elapsed:.1f}s')
     log(f'ACL: {len(acl_users)} 用户')
     log(f'CCOMP: {len(ccomp_users)} 用户')
     log(f'AttrDensity: {len(attr_users)} 用户')
+    log(f'ACL sentence rows: {acl_sentence_count} -> {ACL_OUTPUT_JSONL}')
+    log(f'CCOMP sentence rows: {ccomp_sentence_count} -> {CCOMP_OUTPUT_JSONL}')
 
     total_time = time.time() - start_time
 
