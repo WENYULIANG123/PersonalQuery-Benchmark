@@ -5,12 +5,42 @@
 包含 ACL/CCOMP 混淆因素分析 (Check 1-4 + Bootstrap CI)
 """
 
-# 完全离线模式 - 避免 HuggingFace 网络验证
 import os
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_HOME"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
+os.environ["HF_HUB_CACHE"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
+os.environ["HF_HUB_OFFLINE"] = "0"
+os.environ["TRANSFORMERS_OFFLINE"] = "0"
+COLBERTV2_CUDA_HOME = "/usr/local/cuda-12.5"
+COLBERTV2_TORCH_EXTENSIONS_DIR = "/home/wlia0047/ar57_scratch/wenyu/torch_extensions/colbertv2_cuda125"
+COLBERTV2_HOST_CC = "/usr/bin/gcc"
+COLBERTV2_HOST_CXX = "/usr/bin/g++"
+if not os.path.exists(os.path.join(COLBERTV2_CUDA_HOME, "include", "cuda_runtime.h")):
+    raise FileNotFoundError(f"Required CUDA header not found under {COLBERTV2_CUDA_HOME}")
+if not os.path.exists(os.path.join(COLBERTV2_CUDA_HOME, "bin", "nvcc")):
+    raise FileNotFoundError(f"Required nvcc not found under {COLBERTV2_CUDA_HOME}")
+if not os.path.exists(COLBERTV2_HOST_CC):
+    raise FileNotFoundError(f"Required host C compiler not found: {COLBERTV2_HOST_CC}")
+if not os.path.exists(COLBERTV2_HOST_CXX):
+    raise FileNotFoundError(f"Required host C++ compiler not found: {COLBERTV2_HOST_CXX}")
+os.environ["CUDA_HOME"] = COLBERTV2_CUDA_HOME
+os.environ["CUDA_PATH"] = COLBERTV2_CUDA_HOME
+os.environ["CUDACXX"] = os.path.join(COLBERTV2_CUDA_HOME, "bin", "nvcc")
+os.environ["CC"] = COLBERTV2_HOST_CC
+os.environ["CXX"] = COLBERTV2_HOST_CXX
+os.environ["CUDAHOSTCXX"] = COLBERTV2_HOST_CXX
+for _env_name, _env_value in [
+    ("PATH", os.path.join(COLBERTV2_CUDA_HOME, "bin")),
+    ("CPATH", os.path.join(COLBERTV2_CUDA_HOME, "include")),
+    ("LIBRARY_PATH", os.path.join(COLBERTV2_CUDA_HOME, "lib64")),
+    ("LD_LIBRARY_PATH", os.path.join(COLBERTV2_CUDA_HOME, "lib64")),
+]:
+    _existing_env_value = os.environ.get(_env_name)
+    os.environ[_env_name] = _env_value if not _existing_env_value else f"{_env_value}:{_existing_env_value}"
+os.makedirs(COLBERTV2_TORCH_EXTENSIONS_DIR, exist_ok=True)
+os.environ["TORCH_EXTENSIONS_DIR"] = COLBERTV2_TORCH_EXTENSIONS_DIR
 
 import sys
+import importlib.util
 import time
 import pickle
 import json
@@ -46,6 +76,7 @@ RETRIEVER_CONFIG = get_retriever_config()
 RETRIEVERS = RETRIEVER_CONFIG['retrievers']
 DENSE_RETRIEVERS = RETRIEVER_CONFIG['dense_retrievers']
 SPARSE_RETRIEVERS = RETRIEVER_CONFIG.get('sparse_retrievers', [])
+COLBERTV2_RETRIEVERS = ['colbertv2']
 
 # 密集检索批量搜索的 query batch 大小。
 # Pet_Supplies 在显存较小的 GPU（例如 T4）上，如果一次性把所有查询丢进 torch.mm，
@@ -532,6 +563,103 @@ def load_bm25_query_cache(query_type: str = 'correct', query_category: str = 'ac
         return None
     with open(cache_path, 'rb') as f:
         return pickle.load(f)
+
+
+def load_colbertv2_build_module():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    module_path = os.path.join(script_dir, f"08_build_retriever_indices_{CATEGORY_NAME}.py")
+    if not os.path.exists(module_path):
+        raise FileNotFoundError(f"Required ColBERTv2 build module not found: {module_path}")
+
+    spec = importlib.util.spec_from_file_location(f"build_retriever_indices_{CATEGORY_NAME.lower()}", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load ColBERTv2 build module: {module_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if hasattr(module, "get_colbertv2_template_module"):
+        return module.get_colbertv2_template_module()
+    return module
+
+
+def resolve_colbertv2_output_root() -> str:
+    helper = load_colbertv2_build_module()
+
+    metadata_file = CAT_CONFIG['metadata_cache_file']
+    if os.path.exists(metadata_file):
+        with open(metadata_file, 'rb') as f:
+            metadata = pickle.load(f)
+    else:
+        metadata = helper.load_fullscale_metadata(CAT_CONFIG['raw_corpus_file'])
+
+    documents, _ = helper.build_fullscale_documents(CATEGORY_NAME, metadata)
+    doc_hash = helper.compute_document_hash(documents)
+    is_valid, error_msg = helper.validate_retriever_cache(
+        'colbertv2',
+        doc_hash,
+        CAT_CONFIG['retriever_cache_dir'],
+        len(documents),
+    )
+    if not is_valid:
+        raise RuntimeError(f"ColBERTv2 index cache is invalid: {error_msg}")
+
+    paths = helper.get_cache_paths('colbertv2', doc_hash, CAT_CONFIG['retriever_cache_dir'])
+    return paths['index_root']
+
+
+def load_colbertv2_doc_ids(output_root: str) -> List[str]:
+    doc_ids_path = os.path.join(output_root, "doc_ids.pkl")
+    if not os.path.exists(doc_ids_path):
+        raise FileNotFoundError(f"Required ColBERTv2 doc id mapping not found: {doc_ids_path}")
+
+    with open(doc_ids_path, "rb") as f:
+        doc_ids = pickle.load(f)
+
+    if not isinstance(doc_ids, list):
+        raise TypeError(f"doc_ids.pkl must contain a list, got {type(doc_ids).__name__}")
+    if not doc_ids:
+        raise ValueError(f"doc_ids.pkl is empty: {doc_ids_path}")
+    return doc_ids
+
+
+def build_colbertv2_searcher(output_root: str, doc_ids: List[str]):
+    from colbert.infra import Run, RunConfig, ColBERTConfig
+    from colbert import Searcher
+
+    collection = [f"pid {pid} asin {asin}" for pid, asin in enumerate(doc_ids)]
+    with Run().context(RunConfig(experiment="colbertv2_index", root=output_root)):
+        config = ColBERTConfig(root=output_root)
+        return Searcher(
+            index="colbertv2_index",
+            checkpoint="colbert-ir/colbertv2.0",
+            collection=collection,
+            config=config,
+        )
+
+
+def load_colbertv2_query_cache(query_type: str, query_category: str) -> Dict[str, Dict[str, np.ndarray]]:
+    cache = load_query_cache("colbertv2", query_type, query_category)
+    if not isinstance(cache, dict):
+        raise TypeError(f"ColBERTv2 query embedding cache must be dict, got {type(cache).__name__}")
+    return cache
+
+
+def colbertv2_search_from_cached_embedding(searcher, doc_ids: List[str], query_embedding, top_k: int) -> List[Tuple[str, float]]:
+    if not isinstance(query_embedding, np.ndarray):
+        raise TypeError(f"ColBERTv2 cached query embedding must be numpy.ndarray, got {type(query_embedding).__name__}")
+    if query_embedding.ndim != 2:
+        raise ValueError(f"ColBERTv2 cached query embedding must be 2D, got shape {query_embedding.shape}")
+
+    query_tensor = torch.from_numpy(query_embedding).float().unsqueeze(0)
+    pids, _, scores = searcher.dense_search(query_tensor, k=top_k)
+
+    results = []
+    for pid, score in zip(pids, scores):
+        pid_int = int(pid)
+        if pid_int < 0 or pid_int >= len(doc_ids):
+            raise IndexError(f"ColBERTv2 pid {pid_int} is outside doc_ids range 0..{len(doc_ids)-1}")
+        results.append((doc_ids[pid_int], float(score)))
+    return results
 
 def _find_same_level_pairs(data: list) -> set:
     """找出 ACL 和 CCOMP level 一致的 (user_id, asin) 对"""
@@ -1226,6 +1354,182 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: L
         'retriever': 'bm25', 'dim': 0, 'type': 'sparse', 'num_users': len(matched_users),
         'num_queries': len(all_metrics), 'eval_time_seconds': eval_time,
         'metrics': overall_metrics, 'group_metrics': group_metrics, 'group_counts': group_counts,
+        'raw_metrics_per_group': group_groups, 'all_raw_metrics': all_metrics,
+        'word_count_analysis': word_count_analysis,
+        'group_ratio_analysis': group_ratio_analysis,
+        'idf_analysis': idf_analysis,
+        'idf_group_cross': idf_group_analysis,
+        'all_query_records': all_query_records
+    }
+
+
+def evaluate_cached_result_retriever(retriever_name: str, user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float], query_type: str, query_category: str) -> Dict:
+    """评估缓存为 user -> query -> token embedding 的 ColBERTv2 查询缓存"""
+    global GROUP_FIELD, UNIQUE_LEVELS
+    GROUP_FIELD = query_category
+
+    required_k_values = {1, 3, 5, 10}
+    if not required_k_values.issubset(set(k_values)):
+        raise ValueError(f"{retriever_name} evaluation requires k_values to contain {sorted(required_k_values)}")
+    if word_idf is None:
+        raise ValueError(f"{retriever_name} evaluation requires word_idf")
+    if retriever_name != "colbertv2":
+        raise ValueError(f"Token-embedding evaluation only supports colbertv2, got {retriever_name}")
+
+    log(f"\n{'='*60}")
+    log(f"检索器: {retriever_name.upper()} (query token embedding 缓存) - {query_category.upper()}/{query_type.upper()}")
+    log(f"{'='*60}")
+
+    query_cache = load_colbertv2_query_cache(query_type, query_category)
+    missing_users = sorted(set(user_queries.keys()) - set(query_cache.keys()))
+    if missing_users:
+        raise KeyError(
+            f"{retriever_name} query embedding cache missing {len(missing_users)} users "
+            f"for {query_category}/{query_type}; examples: {missing_users[:5]}"
+        )
+
+    matched_users = list(user_queries.keys())
+    output_root = resolve_colbertv2_output_root()
+    index_dir = os.path.join(output_root, "colbertv2_index", "indexes", "colbertv2_index")
+    if not os.path.isdir(index_dir):
+        raise FileNotFoundError(f"Required ColBERTv2 index directory not found: {index_dir}")
+
+    log(f"  用户数: {len(matched_users)}")
+    log(f"  ColBERTv2 索引目录: {index_dir}")
+    doc_ids = load_colbertv2_doc_ids(output_root)
+    searcher = build_colbertv2_searcher(output_root, doc_ids)
+
+    eval_start = time.time()
+    all_query_data = []
+    for user_id in matched_users:
+        cached_queries = query_cache[user_id]
+        if not isinstance(cached_queries, dict):
+            raise TypeError(f"{retriever_name} query embedding cache for user {user_id} must be dict")
+        for q in user_queries[user_id]:
+            query_text = q['query']
+            if query_text not in cached_queries:
+                raise KeyError(
+                    f"{retriever_name} query embedding cache missing query for user={user_id}, "
+                    f"{query_category}/{query_type}: {query_text}"
+                )
+            all_query_data.append((
+                user_id,
+                cached_queries[query_text],
+                q['asin'],
+                q['word_count'],
+                q[f'{GROUP_FIELD}_ratio'],
+                q[GROUP_FIELD],
+                compute_query_idf(query_text, word_idf),
+            ))
+
+    if not all_query_data:
+        raise ValueError(f"{retriever_name} has no queries for {query_category}/{query_type}")
+
+    log(f"  总查询数: {len(all_query_data)}")
+    log(f"  使用 query token embedding 缓存 (用户数 {len(query_cache)})...")
+
+    all_results = []
+    for index, (_, query_embedding, *_rest) in enumerate(all_query_data):
+        all_results.append(
+            colbertv2_search_from_cached_embedding(
+                searcher,
+                doc_ids,
+                query_embedding,
+                max(k_values),
+            )
+        )
+        if (index + 1) % 500 == 0:
+            log(f"    ColBERTv2 搜索进度: {index+1}/{len(all_query_data)} ({100*(index+1)/len(all_query_data):.1f}%)")
+
+    group_groups = {g: [] for g in UNIQUE_LEVELS}
+    all_metrics = []
+    word_bins = [(0, 15), (15, 20), (20, 25), (25, 30), (30, float('inf'))]
+    word_bin_labels = ['很短(1-15)', '短(15-20)', '中(20-25)', '长(25-30)', '很长(30+)']
+    ratio_bins = [(0.0, 0.05), (0.05, 0.1), (0.1, 0.2), (0.2, 0.5), (0.5, 1.0)]
+    ratio_bin_labels = ['很低(0-0.05)', '低(0.05-0.1)', '中(0.1-0.2)', '高(0.2-0.5)', '很高(0.5+)']
+    word_count_groups = {label: [] for label in word_bin_labels}
+    group_ratio_groups = {label: [] for label in ratio_bin_labels}
+    idf_bin_groups = {label: [] for label in IDF_BIN_LABELS}
+    idf_group_cross = defaultdict(list)
+    all_query_records = []
+
+    for i, (retrieved, (user_id, _embedding, relevant_asin, word_count, group_ratio, q_group, q_idf)) in enumerate(zip(all_results, all_query_data)):
+        retrieved_asins = [r[0] for r in retrieved]
+        metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
+        all_metrics.append(metrics)
+        group_groups[q_group].append(metrics)
+
+        all_query_records.append({
+            'user_id': user_id,
+            'asin': relevant_asin,
+            f'{GROUP_FIELD}': q_group,
+            'mean_idf': q_idf,
+            'query_length': word_count,
+            f'{GROUP_FIELD}_ratio': group_ratio,
+            'p_at1': float(metrics['P@1']),
+            'p_at3': float(metrics['P@3']),
+            'p_at5': float(metrics['P@5']),
+            'p_at10': float(metrics['P@10']),
+            'n_at10': float(metrics['N@10']),
+            'mrr_at10': float(metrics['MR@10']),
+            'hit_at10': float(metrics['H@10']),
+        })
+
+        for (low, high), label in zip(word_bins, word_bin_labels):
+            if low <= word_count < high:
+                word_count_groups[label].append(metrics)
+                break
+
+        for (low, high), label in zip(ratio_bins, ratio_bin_labels):
+            if low <= group_ratio < high:
+                group_ratio_groups[label].append(metrics)
+                break
+
+        for (low, high), label in zip(IDF_BINS, IDF_BIN_LABELS):
+            if low <= q_idf < high:
+                idf_bin_groups[label].append(metrics)
+                idf_group_cross[(label, q_group)].append(metrics)
+                break
+
+        if (i + 1) % 500 == 0:
+            log(f"    进度: {i+1}/{len(all_results)} ({100*(i+1)/len(all_results):.1f}%)")
+
+    eval_time = time.time() - eval_start
+    log(f"  评估完成，总耗时: {eval_time:.1f}秒")
+    overall_metrics = compute_average_metrics(all_metrics, k_values)
+
+    group_metrics = {}
+    group_counts = {}
+    for group in UNIQUE_LEVELS:
+        if group_groups[group]:
+            group_metrics[group] = compute_average_metrics(group_groups[group], k_values)
+            group_counts[group] = len(group_groups[group])
+        else:
+            group_metrics[group] = {k: 0.0 for k in [f'P@{i}' for i in k_values] + [f'N@{i}' for i in k_values] + [f'MR@{i}' for i in k_values] + [f'H@{i}' for i in k_values]}
+            group_counts[group] = 0
+
+    word_count_analysis = {
+        label: {'count': len(word_count_groups[label]), 'metrics': compute_average_metrics(word_count_groups[label], k_values)}
+        for label in word_bin_labels if word_count_groups[label]
+    }
+    group_ratio_analysis = {
+        label: {'count': len(group_ratio_groups[label]), 'metrics': compute_average_metrics(group_ratio_groups[label], k_values)}
+        for label in ratio_bin_labels if group_ratio_groups[label]
+    }
+    idf_analysis = {
+        label: {'count': len(idf_bin_groups[label]), 'metrics': compute_average_metrics(idf_bin_groups[label], k_values)}
+        for label in IDF_BIN_LABELS if idf_bin_groups[label]
+    }
+    idf_group_analysis = {
+        (idf_label, group_val): {'count': len(metrics_list), 'metrics': compute_average_metrics(metrics_list, k_values)}
+        for (idf_label, group_val), metrics_list in idf_group_cross.items() if metrics_list
+    }
+
+    return {
+        'retriever': retriever_name, 'dim': 128, 'type': 'late_interaction_query_embedding_cache',
+        'num_users': len(matched_users), 'num_queries': len(all_metrics),
+        'eval_time_seconds': eval_time, 'metrics': overall_metrics,
+        'group_metrics': group_metrics, 'group_counts': group_counts,
         'raw_metrics_per_group': group_groups, 'all_raw_metrics': all_metrics,
         'word_count_analysis': word_count_analysis,
         'group_ratio_analysis': group_ratio_analysis,
@@ -2211,6 +2515,15 @@ def main():
                 query_type_results.append(result)
             except Exception as e:
                 log(f"  BM25 错误: {e}")
+
+            # 评估 ColBERTv2（使用预生成的 query token embedding 缓存）
+            for retriever_name in COLBERTV2_RETRIEVERS:
+                result = evaluate_cached_result_retriever(
+                    retriever_name, user_queries, user_to_group, k_values, word_idf, query_type, query_category
+                )
+                result['query_type'] = query_type
+                result['query_category'] = query_category
+                query_type_results.append(result)
 
             # 评估稀疏检索器（SPLADE）
             for retriever_name in SPARSE_RETRIEVERS:

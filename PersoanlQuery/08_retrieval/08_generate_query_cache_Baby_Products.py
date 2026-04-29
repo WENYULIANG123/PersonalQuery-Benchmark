@@ -71,7 +71,7 @@ AVAILABLE_RETRIEVERS = {
     'MiniLM': MiniLMRetriever,
     'STAR': STARRetriever,
     'ANCE': ANCERetriever,
-    'ColBERTv2': None,  # ColBERTv2 使用原生 late-interaction index 生成结果缓存
+    'ColBERTv2': None,  # ColBERTv2 缓存 query token embeddings
     'SPLADE': SPLADERetriever,
     'BM25': None,  # BM25 单独处理
 }
@@ -366,6 +366,141 @@ def generate_colbertv2_cache_from_query_types(query_types: List[Tuple[str, List[
             f"  ✓ {query_type} {mode} ColBERTv2 缓存: "
             f"{summary['query_count']} 条, 耗时 {summary['elapsed_seconds']:.1f}s"
         )
+
+    return {
+        'total_cached': total_cached,
+        'summaries': summaries,
+    }
+
+
+COLBERTV2_MODEL_NAME = "colbert-ir/colbertv2.0"
+COLBERTV2_QUERY_BATCH_SIZE = 128
+
+
+def load_colbertv2_checkpoint_for_query_encoding():
+    if not torch.cuda.is_available():
+        raise RuntimeError("ColBERTv2 query embedding cache generation requires CUDA")
+
+    from colbert.infra import ColBERTConfig
+    from colbert.modeling.checkpoint import Checkpoint
+
+    config = ColBERTConfig(
+        checkpoint=COLBERTV2_MODEL_NAME,
+        query_maxlen=32,
+    )
+    checkpoint = Checkpoint(COLBERTV2_MODEL_NAME, colbert_config=config, verbose=1)
+    return checkpoint.cuda()
+
+
+def encode_colbertv2_query_texts(checkpoint, query_texts: List[str]) -> Dict[str, np.ndarray]:
+    if not query_texts:
+        raise ValueError("ColBERTv2 query text list is empty")
+
+    embeddings = checkpoint.queryFromText(
+        query_texts,
+        bsize=COLBERTV2_QUERY_BATCH_SIZE,
+        to_cpu=True,
+    )
+    if not isinstance(embeddings, torch.Tensor):
+        raise TypeError(f"ColBERTv2 query encoder returned {type(embeddings).__name__}, expected torch.Tensor")
+    if embeddings.ndim != 3:
+        raise ValueError(f"ColBERTv2 query embeddings must be 3D, got shape {tuple(embeddings.shape)}")
+    if embeddings.shape[0] != len(query_texts):
+        raise RuntimeError(
+            f"ColBERTv2 query embedding count mismatch: expected {len(query_texts)}, got {embeddings.shape[0]}"
+        )
+
+    return {
+        query_text: np.asarray(embeddings[index].detach().cpu().numpy(), dtype=np.float32)
+        for index, query_text in enumerate(query_texts)
+    }
+
+
+def save_colbertv2_query_embedding_cache(cache: Dict[str, Dict[str, np.ndarray]], mode: str) -> str:
+    subdir = get_cache_subdir(mode)
+    os.makedirs(subdir, exist_ok=True)
+    cache_path = os.path.join(subdir, f"colbertv2__{mode}_cache.pkl")
+    tmp_path = f"{cache_path}.tmp"
+
+    with open(tmp_path, "wb") as f:
+        pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    os.replace(tmp_path, cache_path)
+
+    file_size_mb = os.path.getsize(cache_path) / (1024 * 1024)
+    total_cached = sum(len(user_cache) for user_cache in cache.values())
+    log_with_timestamp(f"  ✓ ColBERTv2 query embedding 缓存已保存: {cache_path}")
+    log_with_timestamp(f"    - 用户数: {len(cache)}")
+    log_with_timestamp(f"    - 查询数: {total_cached}")
+    log_with_timestamp(f"    - 文件大小: {file_size_mb:.2f} MB")
+    return cache_path
+
+
+def generate_colbertv2_query_embedding_cache_for_mode(
+    checkpoint,
+    queries: List[Dict],
+    queries_by_user: Dict[str, List[Dict]],
+    mode: str,
+) -> Dict[str, object]:
+    query_texts = collect_unique_query_texts(queries, mode)
+    log_with_timestamp(
+        f"  开始生成 ColBERTv2 query embedding 缓存 ({mode}): "
+        f"unique_queries={len(query_texts)}, batch_size={COLBERTV2_QUERY_BATCH_SIZE}"
+    )
+
+    start_time = time.time()
+    encoded_by_query = encode_colbertv2_query_texts(checkpoint, query_texts)
+
+    result_cache: Dict[str, Dict[str, np.ndarray]] = {uid: {} for uid in queries_by_user.keys()}
+    for uid, user_queries in queries_by_user.items():
+        for item in user_queries:
+            query_text = item.get('query')
+            if query_text not in encoded_by_query:
+                raise KeyError(f"ColBERTv2 encoded query missing for user={uid}, mode={mode}, query={query_text}")
+            result_cache[uid][query_text] = encoded_by_query[query_text]
+
+    cache_path = save_colbertv2_query_embedding_cache(result_cache, mode)
+    elapsed = time.time() - start_time
+    total_cached = sum(len(user_cache) for user_cache in result_cache.values())
+
+    return {
+        'mode': mode,
+        'cache_path': cache_path,
+        'query_count': total_cached,
+        'unique_query_count': len(query_texts),
+        'elapsed_seconds': elapsed,
+    }
+
+
+def generate_colbertv2_cache_from_query_types(query_types: List[Tuple[str, List[Dict], Dict[str, List[Dict]], str]]) -> Dict[str, object]:
+    checkpoint = load_colbertv2_checkpoint_for_query_encoding()
+
+    summaries = []
+    total_cached = 0
+    try:
+        for query_type, queries, queries_by_user, mode in query_types:
+            if not queries:
+                log_with_timestamp(f"  (无 {query_type} {mode} 查询，跳过)")
+                continue
+
+            summary = generate_colbertv2_query_embedding_cache_for_mode(
+                checkpoint,
+                queries,
+                queries_by_user,
+                mode,
+            )
+            summaries.append(summary)
+            total_cached += summary['query_count']
+            log_with_timestamp(
+                f"  ✓ {query_type} {mode} ColBERTv2 query embedding 缓存: "
+                f"{summary['query_count']} 条, unique={summary['unique_query_count']}, "
+                f"耗时 {summary['elapsed_seconds']:.1f}s"
+            )
+    finally:
+        del checkpoint
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
 
     return {
         'total_cached': total_cached,
@@ -1277,8 +1412,11 @@ def generate_cache_for_all_retrievers(
 
 def main():
     # ==================== 硬编码配置 ====================
-    # 检索器列表：核心5个 + GritLM + ANCE + ColBERTv2 + SPLADE + BM25
-    RETRIEVER_NAMES = ['GRITLM', 'BGE', 'E5', 'MiniLM', 'STAR', 'ANCE', 'ColBERTv2', 'SPLADE', 'BM25']
+    # 检索器列表：核心5个 + ANCE + ColBERTv2 + SPLADE + BM25
+    RETRIEVER_NAMES = [
+        # 'GRITLM',  # 已禁用：不生成 GritLM 查询缓存
+        'BGE', 'E5', 'MiniLM', 'STAR', 'ANCE', 'ColBERTv2', 'SPLADE', 'BM25'
+    ]
     # 是否清理旧缓存
     CLEAR_CACHE_BEFORE = True
     # 数据源：persona_generated_queries.json

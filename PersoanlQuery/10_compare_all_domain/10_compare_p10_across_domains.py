@@ -8,7 +8,6 @@ Reads retrieval_all_summary.json from each domain and prints a comparison table.
 """
 
 import json
-import os
 import csv
 from pathlib import Path
 
@@ -23,6 +22,17 @@ CATEGORY_SHORT_NAMES = {
 
 # 对比脚本中禁用的检索器
 DISABLED_RETRIEVERS = set()
+RETRIEVER_ORDER = [
+    "bm25",
+    "splade",
+    "bge",
+    "e5",
+    "minilm",
+    "star",
+    "ance",
+    "colbertv2",
+    "gritlm",
+]
 
 
 def round4(x: float) -> float:
@@ -30,34 +40,73 @@ def round4(x: float) -> float:
     return round(float(x), 4)
 
 
+def sort_retrievers(retrievers) -> list:
+    """按论文表格常用顺序排序，新增检索器排在已知顺序之后。"""
+    order = {name: idx for idx, name in enumerate(RETRIEVER_ORDER)}
+    return sorted(retrievers, key=lambda name: (order.get(name, len(order)), name))
+
+
 def load_clean_data(category: str) -> dict:
-    """Load P@10 data for all retrievers from a category (08_retrieval clean results)."""
+    """Load clean P@10 data for all retrievers from ACL/CCOMP correct results."""
+    summary_path = BASE_DIR_08 / category / "retrieval_all_summary.json"
+    with open(summary_path, "r") as f:
+        data = json.load(f)
+
+    rbct = data["results_by_category_and_type"]
+    correct_keys = ["('acl', 'correct')", "('ccomp', 'correct')"]
+    missing_keys = [key for key in correct_keys if key not in rbct]
+    if missing_keys:
+        raise KeyError(f"{category} missing clean correct result keys: {missing_keys}")
+
+    grouped_values = {}
+    for key in correct_keys:
+        for item in rbct[key]:
+            retriever = item["retriever"]
+            if retriever in DISABLED_RETRIEVERS:
+                continue
+            group_metrics = item["group_metrics"]
+
+            if retriever not in grouped_values:
+                grouped_values[retriever] = {}
+            for level, metrics in group_metrics.items():
+                if "P@10" not in metrics:
+                    raise KeyError(f"{category} {key} {retriever} level {level} missing P@10")
+                if level not in grouped_values[retriever]:
+                    grouped_values[retriever][level] = []
+                grouped_values[retriever][level].append(metrics["P@10"])
+
+    results = {}
+    for retriever, level_values in grouped_values.items():
+        results[retriever] = {}
+        for level, values in level_values.items():
+            if not values:
+                raise ValueError(f"{category} {retriever} level {level} has no P@10 values")
+            results[retriever][level] = sum(values) / len(values)
+
+    return results
+
+
+def load_clean_overall_data(category: str) -> dict:
+    """Load overall clean P@10 by query family from all_results_combined."""
     summary_path = BASE_DIR_08 / category / "retrieval_all_summary.json"
     with open(summary_path, "r") as f:
         data = json.load(f)
 
     results = {}
-    rbct = data["results_by_category_and_type"]
-
-    # Get 'acl' or first available query category with 'correct' query type
-    key = None
-    for k in rbct.keys():
-        if "correct" in k:
-            key = k
-            break
-
-    if key is None:
-        return results
-
-    for item in rbct[key]:
+    for item in data["all_results_combined"]:
         retriever = item["retriever"]
         if retriever in DISABLED_RETRIEVERS:
             continue
-        group_metrics = item["group_metrics"]
-
-        results[retriever] = {}
-        for level, metrics in group_metrics.items():
-            results[retriever][level] = metrics.get("P@10", 0.0)
+        query_category = item["query_category"]
+        query_type = item["query_type"]
+        if query_type != "correct" or query_category not in ("acl", "ccomp"):
+            continue
+        metrics = item["metrics"]
+        if "P@10" not in metrics:
+            raise KeyError(f"{category} {query_category}/{query_type} {retriever} missing P@10")
+        if retriever not in results:
+            results[retriever] = {}
+        results[retriever][query_category] = metrics["P@10"]
 
     return results
 
@@ -94,7 +143,7 @@ def print_clean_comparison(all_data: dict):
     all_retrievers = set()
     for cat_data in all_data.values():
         all_retrievers.update(cat_data.keys())
-    all_retrievers = sorted(r for r in all_retrievers if r not in DISABLED_RETRIEVERS)
+    all_retrievers = sort_retrievers(r for r in all_retrievers if r not in DISABLED_RETRIEVERS)
 
     print("\n" + "=" * 100)
     print("Clean Query P@10 Comparison Across Domains (from 08_retrieval)")
@@ -152,6 +201,47 @@ def print_clean_comparison(all_data: dict):
         print(f"  {cat}: {best_retriever} (P@10 = {best_avg:.4f})")
 
 
+def print_clean_family_overall_comparison(all_data: dict):
+    """Print ACL/CCOMP overall clean P@10 comparison across domains."""
+    all_retrievers = set()
+    for cat_data in all_data.values():
+        all_retrievers.update(cat_data.keys())
+    all_retrievers = sort_retrievers(r for r in all_retrievers if r not in DISABLED_RETRIEVERS)
+
+    print("\n" + "=" * 130)
+    print("Clean Query Overall P@10 by Family Across Domains (from 08_retrieval)")
+    print("=" * 130)
+    print(
+        f"{'Retriever':<12} "
+        f"{'Baby ACL':>10} {'Baby CC':>10} "
+        f"{'Grocery ACL':>12} {'Grocery CC':>12} "
+        f"{'Pet ACL':>10} {'Pet CC':>10} "
+        f"{'Avg ACL':>10} {'Avg CC':>10}"
+    )
+    print("-" * 130)
+
+    for retriever in all_retrievers:
+        row = f"{retriever:<12}"
+        acl_vals = []
+        ccomp_vals = []
+        for cat in CATEGORIES:
+            cat_data = all_data.get(cat, {}).get(retriever, {})
+            acl = cat_data.get("acl")
+            ccomp = cat_data.get("ccomp")
+            if acl is not None:
+                acl_vals.append(acl)
+            if ccomp is not None:
+                ccomp_vals.append(ccomp)
+            row += f" {fmt4(acl):>10} {fmt4(ccomp):>10}"
+
+        avg_acl = sum(acl_vals) / len(acl_vals) if acl_vals else None
+        avg_ccomp = sum(ccomp_vals) / len(ccomp_vals) if ccomp_vals else None
+        row += f" {fmt4(avg_acl):>10} {fmt4(avg_ccomp):>10}"
+        print(row)
+
+    print("-" * 130)
+
+
 def print_correct_vs_noisy_by_domain(all_data: dict):
     """Print correct vs noisy P@10 comparison table, one table per domain."""
     # Collect all retrievers
@@ -161,7 +251,7 @@ def print_correct_vs_noisy_by_domain(all_data: dict):
             all_retrievers.update(cat_data["correct"].keys())
         if "noisy" in cat_data:
             all_retrievers.update(cat_data["noisy"].keys())
-    all_retrievers = sorted(r for r in all_retrievers if r not in DISABLED_RETRIEVERS)
+    all_retrievers = sort_retrievers(r for r in all_retrievers if r not in DISABLED_RETRIEVERS)
 
     for cat in CATEGORIES:
         short = CATEGORY_SHORT_NAMES.get(cat, cat[:10])
@@ -205,7 +295,7 @@ def print_correct_vs_noisy_summary(all_data: dict):
             all_retrievers.update(cat_data["correct"].keys())
         if "noisy" in cat_data:
             all_retrievers.update(cat_data["noisy"].keys())
-    all_retrievers = sorted(r for r in all_retrievers if r not in DISABLED_RETRIEVERS)
+    all_retrievers = sort_retrievers(r for r in all_retrievers if r not in DISABLED_RETRIEVERS)
 
     print("\n" + "=" * 100)
     print("Correct vs Noisy P@10 Summary (All Domains)")
@@ -388,7 +478,7 @@ def print_ols_adjusted_hit10(all_data: dict):
     all_retrievers = set()
     for cat_data in all_data.values():
         all_retrievers.update(cat_data.keys())
-    all_retrievers = sorted(all_retrievers)
+    all_retrievers = sort_retrievers(all_retrievers)
 
     level_order = ["L0", "L1", "L2", "L3"]
     domain_order = [
@@ -483,9 +573,14 @@ def pct_str(value):
     return f"{value * 100:.2f}%" if value is not None else "N/A"
 
 
+def fmt4(value):
+    """4 位小数字符串。"""
+    return f"{value:.4f}" if value is not None else "N/A"
+
+
 def print_ols_adjusted_hit10_avg_wide(all_data: dict):
     """方案 1: 每个 retriever 一行，只显示 Avg，ACL/CCOMP 横向展开。"""
-    all_retrievers = sorted({r for cat_data in all_data.values() for r in cat_data.keys()})
+    all_retrievers = sort_retrievers({r for cat_data in all_data.values() for r in cat_data.keys()})
     levels = ["L0", "L1", "L2", "L3"]
 
     print("\n" + "=" * 120)
@@ -510,7 +605,7 @@ def print_ols_adjusted_hit10_avg_wide(all_data: dict):
 
 def print_ols_adjusted_hit10_compact_cells(all_data: dict):
     """方案 2: 每个 retriever/family 一行，每个单元格为 B/G/P/A。"""
-    all_retrievers = sorted({r for cat_data in all_data.values() for r in cat_data.keys()})
+    all_retrievers = sort_retrievers({r for cat_data in all_data.values() for r in cat_data.keys()})
     levels = ["L0", "L1", "L2", "L3"]
 
     print("\n" + "=" * 160)
@@ -537,7 +632,7 @@ def print_ols_adjusted_hit10_compact_cells(all_data: dict):
 
 def print_ols_adjusted_hit10_trend_strings(all_data: dict):
     """方案 3: 每个 retriever/family 一行，仅显示 Avg 的趋势串。"""
-    all_retrievers = sorted({r for cat_data in all_data.values() for r in cat_data.keys()})
+    all_retrievers = sort_retrievers({r for cat_data in all_data.values() for r in cat_data.keys()})
     levels = ["L0", "L1", "L2", "L3"]
 
     print("\n" + "=" * 100)
@@ -563,7 +658,7 @@ def print_trend_analysis(all_data: dict):
     all_retrievers = set()
     for cat_data in all_data.values():
         all_retrievers.update(cat_data.keys())
-    all_retrievers = sorted(all_retrievers)
+    all_retrievers = sort_retrievers(all_retrievers)
 
     print("\n" + "=" * 100)
     print("CORRECT Query - ACL/CCOMP Step Trend Analysis (Within-Family OLS)")
@@ -637,45 +732,40 @@ def main():
     print("Loading clean query data from 08_retrieval...")
     clean_data = {}
     for cat in CATEGORIES:
-        try:
-            clean_data[cat] = load_clean_data(cat)
-            print(f"  Loaded {cat}: {len(clean_data[cat])} retrievers")
-        except Exception as e:
-            print(f"  Error loading {cat}: {e}")
+        clean_data[cat] = load_clean_data(cat)
+        print(f"  Loaded {cat}: {len(clean_data[cat])} retrievers")
+
+    print("\nLoading clean query family overall data from 08_retrieval...")
+    clean_family_overall_data = {}
+    for cat in CATEGORIES:
+        clean_family_overall_data[cat] = load_clean_overall_data(cat)
+        print(f"  Loaded {cat}: {len(clean_family_overall_data[cat])} retrievers")
 
     # Load correct vs noisy data from 09_noisy_retrieval
     print("\nLoading correct vs noisy data from 09_noisy_retrieval...")
     noisy_data = {}
     for cat in CATEGORIES:
-        try:
-            noisy_data[cat] = load_correct_vs_noisy_data(cat)
-            n_correct = len(noisy_data[cat].get("correct", {}))
-            n_noisy = len(noisy_data[cat].get("noisy", {}))
-            print(f"  Loaded {cat}: {n_correct} correct retrievers, {n_noisy} noisy retrievers")
-        except Exception as e:
-            print(f"  Error loading {cat}: {e}")
+        noisy_data[cat] = load_correct_vs_noisy_data(cat)
+        n_correct = len(noisy_data[cat].get("correct", {}))
+        n_noisy = len(noisy_data[cat].get("noisy", {}))
+        print(f"  Loaded {cat}: {n_correct} correct retrievers, {n_noisy} noisy retrievers")
 
     # Load within-family OLS data for trend analysis
     print("\nLoading within-family OLS data for trend analysis...")
     trend_data = {}
     for cat in CATEGORIES:
-        try:
-            trend_data[cat] = load_segmented_data(cat)
-            print(f"  Loaded {cat}: {len(trend_data[cat])} retrievers")
-        except Exception as e:
-            print(f"  Error loading {cat}: {e}")
+        trend_data[cat] = load_segmented_data(cat)
+        print(f"  Loaded {cat}: {len(trend_data[cat])} retrievers")
 
     print("\nLoading OLS-adjusted hit@10 data...")
     ols_hit10_data = {}
     for cat in CATEGORIES:
-        try:
-            ols_hit10_data[cat] = load_ols_adjusted_hit10(cat)
-            print(f"  Loaded {cat}: {len(ols_hit10_data[cat])} retrievers")
-        except Exception as e:
-            print(f"  Error loading {cat}: {e}")
+        ols_hit10_data[cat] = load_ols_adjusted_hit10(cat)
+        print(f"  Loaded {cat}: {len(ols_hit10_data[cat])} retrievers")
 
     # Print clean comparison
     print_clean_comparison(clean_data)
+    print_clean_family_overall_comparison(clean_family_overall_data)
 
     # Print correct vs noisy comparison (one table per domain)
     print_correct_vs_noisy_by_domain(noisy_data)

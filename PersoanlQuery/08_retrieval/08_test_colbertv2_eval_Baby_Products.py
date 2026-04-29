@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke test for Baby_Products ColBERTv2 cached-result evaluation."""
+"""Smoke test for Baby_Products ColBERTv2 cached query-embedding evaluation."""
 
 import argparse
 import importlib.util
@@ -61,7 +61,7 @@ def main():
     group_rows = []
 
     for query_category in args.query_categories:
-        print(f"\nTesting ColBERTv2 cached evaluation: {query_category}/correct")
+        print(f"\nTesting ColBERTv2 cached query-embedding evaluation: {query_category}/correct")
         user_queries, user_to_group, _ = module.load_user_queries("correct", query_category)
         result = module.evaluate_cached_result_retriever(
             "colbertv2",
@@ -119,7 +119,7 @@ def main():
         group_rows,
     )
 
-    print("\nColBERTv2 cached evaluation smoke test passed.")
+    print("\nColBERTv2 cached query-embedding evaluation smoke test passed.")
 
 
 if __name__ == "__main__":
