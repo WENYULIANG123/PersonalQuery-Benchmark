@@ -1639,10 +1639,9 @@ def evaluate_splade_retriever(user_queries: Dict, user_to_group: Dict, k_values:
 
     # 加载 SPLADE 查询缓存（预编码的查询向量）
     splade_cache = load_splade_query_cache(query_type, query_category)
-    if splade_cache:
-        log(f"  [SPLADE] 使用查询缓存 (共 {len(splade_cache)} 条记录)...")
-    else:
-        log(f"  [SPLADE] 未找到查询缓存，将实时编码查询")
+    if splade_cache is None:
+        raise FileNotFoundError(f"SPLADE query cache not found for {query_category}/{query_type}")
+    log(f"  [SPLADE] 使用查询缓存 (共 {len(splade_cache)} 条记录)...")
 
     # 确保倒排索引已构建（触发 lazy initialization）
     retriever.search(["dummy"], top_k=1)
@@ -1767,66 +1766,65 @@ def evaluate_splade_retriever(user_queries: Dict, user_to_group: Dict, k_values:
         del query_matrix
         del score_matrix
 
-    # 重新组织结果用于后续统计
-    q_idx = 0
-    for user_idx, user_id in enumerate(matched_users):
-        queries = user_queries[user_id]
-        for q in queries:
-            query_text = q['query']
-            relevant_asin = q['asin']
-            word_count = q.get('word_count', 0)
-            group_ratio = q.get(f'{GROUP_FIELD}_ratio', 0.0)
-            q_group = q.get(GROUP_FIELD, 0)
+    if len(batch_scores) != len(all_q_data):
+        raise RuntimeError(f"SPLADE result count mismatch: scores={len(batch_scores)}, queries={len(all_q_data)}")
 
-            retrieved_with_scores = batch_scores[q_idx]
-            q_idx += 1
+    # 重新组织结果用于后续统计。只处理实际进入批量评分的缓存查询。
+    for q_idx, q in enumerate(all_q_data):
+        query_text = q['query']
+        relevant_asin = q['relevant_asin']
+        word_count = q['word_count']
+        group_ratio = q['group_ratio']
+        q_group = q['q_group']
 
-            retrieved_asins = [asin for asin, score in retrieved_with_scores]
+        retrieved_with_scores = batch_scores[q_idx]
 
-            metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
-            all_metrics.append(metrics)
-            group_groups[q_group].append(metrics)
+        retrieved_asins = [asin for asin, score in retrieved_with_scores]
 
-            # 计算 IDF
-            q_idf = compute_query_idf(query_text, word_idf) if word_idf else 0.0
+        metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
+        all_metrics.append(metrics)
+        group_groups[q_group].append(metrics)
 
-            # 记录原始数据
-            all_query_records.append({
-                'user_id': user_id,
-                'asin': relevant_asin,
-                f'{GROUP_FIELD}': q_group,
-                'mean_idf': q_idf,
-                'query_length': word_count,
-                f'{GROUP_FIELD}_ratio': group_ratio,
-                'p_at1': float(metrics.get('P@1', 0.0)),
-                'p_at3': float(metrics.get('P@3', 0.0)),
-                'p_at5': float(metrics.get('P@5', 0.0)),
-                'p_at10': float(metrics.get('P@10', 0.0)),
-                'n_at10': float(metrics.get('N@10', 0.0)),
-                'mrr_at10': float(metrics.get('MR@10', 0.0)),
-                'hit_at10': float(metrics.get('H@10', 0.0)),
-            })
+        # 计算 IDF
+        q_idf = compute_query_idf(query_text, word_idf) if word_idf else 0.0
 
-            # 分组统计
-            for (low, high), label in zip(word_bins, word_bin_labels):
-                if low <= word_count < high:
-                    word_count_groups[label].append(metrics)
-                    break
+        # 记录原始数据
+        all_query_records.append({
+            'user_id': q['user_id'],
+            'asin': relevant_asin,
+            f'{GROUP_FIELD}': q_group,
+            'mean_idf': q_idf,
+            'query_length': word_count,
+            f'{GROUP_FIELD}_ratio': group_ratio,
+            'p_at1': float(metrics.get('P@1', 0.0)),
+            'p_at3': float(metrics.get('P@3', 0.0)),
+            'p_at5': float(metrics.get('P@5', 0.0)),
+            'p_at10': float(metrics.get('P@10', 0.0)),
+            'n_at10': float(metrics.get('N@10', 0.0)),
+            'mrr_at10': float(metrics.get('MR@10', 0.0)),
+            'hit_at10': float(metrics.get('H@10', 0.0)),
+        })
 
-            for (low, high), label in zip(ratio_bins, ratio_bin_labels):
-                if low <= group_ratio < high:
-                    group_ratio_groups[label].append(metrics)
-                    break
+        # 分组统计
+        for (low, high), label in zip(word_bins, word_bin_labels):
+            if low <= word_count < high:
+                word_count_groups[label].append(metrics)
+                break
 
-            for (low, high), label in zip(IDF_BINS, IDF_BIN_LABELS):
-                if low <= q_idf < high:
-                    idf_bin_groups[label].append(metrics)
-                    idf_group_cross[(label, q_group)].append(metrics)
-                    break
+        for (low, high), label in zip(ratio_bins, ratio_bin_labels):
+            if low <= group_ratio < high:
+                group_ratio_groups[label].append(metrics)
+                break
 
-        if (user_idx + 1) % 100 == 0:
+        for (low, high), label in zip(IDF_BINS, IDF_BIN_LABELS):
+            if low <= q_idf < high:
+                idf_bin_groups[label].append(metrics)
+                idf_group_cross[(label, q_group)].append(metrics)
+                break
+
+        if (q_idx + 1) % 100 == 0 or q_idx + 1 == len(all_q_data):
             elapsed = time.time() - eval_start
-            log(f"    进度: {user_idx+1}/{len(matched_users)} ({100*(user_idx+1)/len(matched_users):.1f}%)")
+            log(f"    进度: {q_idx+1}/{len(all_q_data)} ({100*(q_idx+1)/len(all_q_data):.1f}%)")
 
     eval_time = time.time() - eval_start
     log(f"  评估完成，总耗时: {eval_time:.1f}秒")

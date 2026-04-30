@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Use spaCy syntax only to classify writing errors as ACL/CCOMP.
+"""Use Stage 5 syntax cache to classify writing errors as ACL/CCOMP.
 
 Input:
   /home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/{category}/writing_error.json
@@ -10,14 +10,11 @@ Output:
 
 import json
 import re
-import threading
 import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
-import spacy
 
 
 CATEGORIES = [
@@ -29,15 +26,6 @@ WRITING_ANALYSIS_ROOT = Path("/home/wlia0047/ar57/wenyu/result/personal_query/04
 STAGE1_ROOT = Path("/home/wlia0047/ar57/wenyu/result/personal_query/01_preference_extraction")
 SYNTACTIC_ANALYSIS_ROOT = Path("/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis")
 PROGRESS_INTERVAL_USERS = 25
-STRUCTURE_MATCH_WINDOW = 2
-
-ACL_HEAD_DEPS = {"acl", "relcl"}
-CCOMP_HEAD_DEPS = {"ccomp"}
-ACL_MODIFIER_DEPS = {"amod", "acomp", "advmod", "oprd"}
-ACL_NP_DEPS = {"compound", "nmod", "poss", "nsubj", "dobj", "obj", "pobj", "attr"}
-
-_NLP = None
-_NLP_LOCK = threading.Lock()
 
 
 def log(message: str) -> None:
@@ -45,17 +33,102 @@ def log(message: str) -> None:
     print(f"[{timestamp}] {message}", flush=True)
 
 
-def load_nlp():
-    global _NLP
-    if _NLP is None:
-        with _NLP_LOCK:
-            if _NLP is None:
-                _NLP = spacy.load("en_core_web_sm")
-    return _NLP
-
-
 def normalize_space(text: str) -> str:
     return " ".join(text.split())
+
+
+# 常见英语词缀
+COMMON_AFFIXES = ['s', 'es', 'ed', 'ing', 'er', 'est', 'ly', 'd', 'en', 'n']
+
+
+def is_affix_variation(original: str, corrected: str) -> bool:
+    """检查两个词是否仅仅是词缀变化（如 dog->dogs, jump->jumped）
+    或者仅仅相差一个单引号（如 Its->It's）
+    或者编辑距离很小的简单词汇错误（如 creat->create, an->a, to->too）
+    或者仅仅是标点差异（如 a.->a）
+    或者仅仅是单复数/时态/元音变换等简单错误
+    """
+    orig = original.lower().strip()
+    corr = corrected.lower().strip()
+
+    if orig == corr:
+        return False
+
+    # 过滤仅相差标点的错误（如 a. -> a）
+    import string
+    PUNCT = set(string.punctuation)
+    orig_no_punct = ''.join(c for c in orig if c not in PUNCT)
+    corr_no_punct = ''.join(c for c in corr if c not in PUNCT)
+    if orig_no_punct == corr_no_punct and orig != corr:
+        return True
+
+    # 过滤仅相差单引号的错误（如 Its -> It's, dont -> don't）
+    orig_no_quote = orig.replace("'", "")
+    corr_no_quote = corr.replace("'", "")
+    if orig_no_quote == corr_no_quote and orig != corr:
+        return True
+
+    # 计算编辑距离
+    def edit_distance(s1: str, s2: str) -> int:
+        if len(s1) > len(s2):
+            s1, s2 = s2, s1
+        distances = range(len(s1) + 1)
+        for i2, c2 in enumerate(s2):
+            distances_ = [i2 + 1]
+            for i1, c1 in enumerate(s1):
+                if c1 == c2:
+                    distances_.append(distances[i1])
+                else:
+                    distances_.append(1 + min((distances[i1], distances[i1 + 1], distances_[-1])))
+            distances = distances_
+        return distances[-1]
+
+    # 过滤编辑距离 <= 2 的简单词汇错误（如 creat->create, an->a, to->too, was->were）
+    # 这些不是真正的 ACL/CCOMP 语法错误，而是简单的拼写/形态错误
+    if len(orig) >= 2 and len(corr) >= 2:
+        dist = edit_distance(orig, corr)
+        if dist <= 2:
+            return True
+
+    # 过滤长度相差1且所有字符都在另一个词中的情况（如 a->an）
+    if abs(len(orig) - len(corr)) == 1:
+        shorter, longer = (orig, corr) if len(orig) < len(corr) else (corr, orig)
+        if all(c in longer for c in shorter):
+            return True
+
+    # 过滤常见的主谓不一致/动词形式错误（如 was->were, is->are, do->did）
+    COMMON_VERB_VARIATIONS = {
+        ('was', 'were'), ('is', 'are'), ('are', 'is'),
+        ('do', 'did'), ('does', 'did'),
+    }
+    if (orig, corr) in COMMON_VERB_VARIATIONS or (corr, orig) in COMMON_VERB_VARIATIONS:
+        return True
+
+    # 过滤常见的人称代词变化（如 I->me, me->I, he->him 等）
+    COMMON_PRONOUN_VARIATIONS = {
+        ('i', 'me'), ('me', 'i'),
+        ('he', 'him'), ('him', 'he'),
+        ('she', 'her'), ('her', 'she'),
+        ('we', 'us'), ('us', 'we'),
+        ('they', 'them'), ('them', 'they'),
+    }
+    if (orig, corr) in COMMON_PRONOUN_VARIATIONS or (corr, orig) in COMMON_PRONOUN_VARIATIONS:
+        return True
+
+    # 确保 orig 是较短的词
+    if len(orig) > len(corr):
+        orig, corr = corr, orig
+
+    # 词缀差异至少应该是1个字符，且较短词长度至少为3
+    if len(corr) - len(orig) < 1 or len(orig) < 3:
+        return False
+
+    # 检查 corr 是否由 orig + 词缀 组成
+    for affix in COMMON_AFFIXES:
+        if corr == orig + affix:
+            return True
+
+    return False
 
 
 def validate_word_error(original: str, corrected: str) -> Tuple[bool, str]:
@@ -67,91 +140,9 @@ def validate_word_error(original: str, corrected: str) -> Tuple[bool, str]:
         return False, "case_or_identity_error"
     if len(orig.split()) != 1 or len(corr.split()) != 1:
         return False, "non_single_word_error"
+    if is_affix_variation(original, corrected):
+        return False, "affix_only_error"
     return True, "valid"
-
-
-def replace_single_word(sentence_text: str, original: str, corrected: str) -> Tuple[str, int]:
-    pattern = re.compile(rf"\b{re.escape(original)}\b", flags=re.IGNORECASE)
-    match = pattern.search(sentence_text)
-    if match is None:
-        raise ValueError(f"Original word {original!r} not found in sentence: {sentence_text}")
-    replaced = sentence_text[:match.start()] + corrected + sentence_text[match.end():]
-    return replaced, match.start()
-
-
-def locate_sentence(nlp, review_text: str, span_text: str, original: str) -> Optional[str]:
-    doc = nlp(review_text)
-    span = normalize_space(span_text)
-    if span:
-        match = re.search(re.escape(span), review_text, flags=re.IGNORECASE)
-        if match is not None:
-            offset = match.start()
-            end = match.end()
-            for sent in doc.sents:
-                if sent.start_char <= offset < sent.end_char or sent.start_char < end <= sent.end_char:
-                    return sent.text
-
-    pattern = re.compile(rf"\b{re.escape(original)}\b", flags=re.IGNORECASE)
-    match = pattern.search(review_text)
-    if match is None:
-        return None
-    for sent in doc.sents:
-        if sent.start_char <= match.start() < sent.end_char:
-            return sent.text
-    return None
-
-
-def locate_anchor_token(doc, corrected: str, replace_char: int):
-    corrected_lower = corrected.lower().strip()
-    candidates = [token for token in doc if token.text.lower() == corrected_lower]
-    if not candidates:
-        return None
-    return min(candidates, key=lambda token: abs(token.idx - replace_char))
-
-
-def token_in_subtree(anchor, head) -> bool:
-    return anchor == head or anchor in list(head.subtree)
-
-
-def classify_by_spacy(review_text: str, span_text: str, original: str, corrected: str) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
-    nlp = load_nlp()
-    sentence_text = locate_sentence(nlp, review_text, span_text, original)
-    if sentence_text is None:
-        return None, None, None, "syntax_sentence_not_found"
-
-    try:
-        corrected_sentence, replace_char = replace_single_word(sentence_text, original, corrected)
-    except ValueError:
-        return None, None, None, "syntax_original_not_found"
-    doc = nlp(corrected_sentence)
-    anchor = locate_anchor_token(doc, corrected, replace_char)
-    if anchor is None:
-        return None, None, None, "syntax_anchor_not_found"
-
-    ccomp_heads = [token for token in doc if token.dep_ in CCOMP_HEAD_DEPS]
-    if anchor.dep_ == "mark" and anchor.head.dep_ in CCOMP_HEAD_DEPS:
-        return "ccomp", "complement_link", "complement_linking_error", "ok"
-
-    for head in ccomp_heads:
-        if anchor.tag_ == "MD" and token_in_subtree(anchor, head):
-            return "ccomp", "modal", "modal_distortion", "ok"
-        if head.head == anchor or anchor in list(head.ancestors):
-            return "ccomp", "ccomp", "clause_shell_typo", "ok"
-        if token_in_subtree(anchor, head):
-            return "ccomp", "ccomp", "clause_boundary_error", "ok"
-
-    acl_heads = [token for token in doc if token.dep_ in ACL_HEAD_DEPS]
-    for head in acl_heads:
-        if not token_in_subtree(anchor, head):
-            continue
-        if anchor == head:
-            return "acl", head.dep_, "modifier_typo", "ok"
-        if anchor.pos_ in {"ADJ", "ADV"} and anchor.dep_ in ACL_MODIFIER_DEPS:
-            return "acl", head.dep_, "modifier_typo", "ok"
-        if anchor.pos_ in {"NOUN", "PROPN", "PRON"} and anchor.dep_ in ACL_NP_DEPS:
-            return "acl", head.dep_, "np_inflection", "ok"
-
-    return None, None, None, "syntax_no_acl_ccomp_match"
 
 
 def get_category_paths(category: str) -> Tuple[Path, Path, Path]:
@@ -166,8 +157,8 @@ def get_syntax_cache_paths(category: str) -> Tuple[Path, Path]:
     return category_dir / "acl_sentences.jsonl", category_dir / "ccomp_sentences.jsonl"
 
 
-def cache_key(user_id: str, review_text: str) -> Tuple[str, str]:
-    return user_id, normalize_space(review_text)
+def cache_key(user_id: str, review_index: int) -> Tuple[str, int]:
+    return user_id, review_index
 
 
 def load_jsonl(path: Path):
@@ -184,25 +175,25 @@ def load_jsonl(path: Path):
                 raise ValueError(f"Invalid JSONL at {path}:{line_number}: {exc}") from exc
 
 
-def load_syntax_cache(category: str) -> Dict[Tuple[str, str], Dict[str, List[Dict]]]:
+def load_syntax_cache(category: str) -> Dict[Tuple[str, int], Dict[str, List[Dict]]]:
     acl_file, ccomp_file = get_syntax_cache_paths(category)
-    syntax_cache: Dict[Tuple[str, str], Dict[str, List[Dict]]] = {}
+    syntax_cache: Dict[Tuple[str, int], Dict[str, List[Dict]]] = {}
 
     log(f"[{category}] Loading Stage 5 ACL cache from: {acl_file}")
     acl_rows = 0
     for row in load_jsonl(acl_file):
-        if "user_id" not in row or "sentence" not in row or "acl_info" not in row:
+        if "user_id" not in row or "review_index" not in row or "acl_info" not in row:
             raise ValueError(f"Invalid ACL syntax cache row: {row}")
-        key = cache_key(row["user_id"], row["sentence"])
+        key = cache_key(row["user_id"], row["review_index"])
         syntax_cache.setdefault(key, {"acl_info": [], "ccomp_info": []})["acl_info"] = row["acl_info"]
         acl_rows += 1
 
     log(f"[{category}] Loading Stage 5 CCOMP cache from: {ccomp_file}")
     ccomp_rows = 0
     for row in load_jsonl(ccomp_file):
-        if "user_id" not in row or "sentence" not in row or "ccomp_info" not in row:
+        if "user_id" not in row or "review_index" not in row or "ccomp_info" not in row:
             raise ValueError(f"Invalid CCOMP syntax cache row: {row}")
-        key = cache_key(row["user_id"], row["sentence"])
+        key = cache_key(row["user_id"], row["review_index"])
         syntax_cache.setdefault(key, {"acl_info": [], "ccomp_info": []})["ccomp_info"] = row["ccomp_info"]
         ccomp_rows += 1
 
@@ -257,99 +248,98 @@ def find_text_span(text: str, pattern_text: str) -> Optional[Tuple[int, int]]:
     return match.start(), match.end()
 
 
-def token_indices_in_char_span(review_text: str, start_char: int, end_char: int) -> List[int]:
-    doc = load_nlp().make_doc(review_text)
-    indices = []
-    for token in doc:
-        token_end = token.idx + len(token.text)
-        if token.idx < end_char and token_end > start_char:
-            indices.append(token.i)
-    return indices
-
-
-def locate_error_token_indices(review_text: str, span_text: str, original: str) -> Tuple[Optional[List[int]], str]:
+def locate_error_char_span(review_text: str, span_text: str, original: str) -> Tuple[Optional[Tuple[int, int]], str]:
     span = find_text_span(review_text, normalize_space(span_text))
     if span is not None:
         span_start, span_end = span
         original_match = re.search(re.escape(original), review_text[span_start:span_end], flags=re.IGNORECASE)
         if original_match is not None:
-            start_char = span_start + original_match.start()
-            end_char = span_start + original_match.end()
-            indices = token_indices_in_char_span(review_text, start_char, end_char)
-            if indices:
-                return indices, "ok"
-        indices = token_indices_in_char_span(review_text, span_start, span_end)
-        if indices:
-            return indices, "ok"
+            return (span_start + original_match.start(), span_start + original_match.end()), "ok"
+        return (span_start, span_end), "ok"
 
     pattern = re.compile(rf"\b{re.escape(original)}\b", flags=re.IGNORECASE)
     match = pattern.search(review_text)
     if match is None:
         return None, "syntax_original_not_found"
-    indices = token_indices_in_char_span(review_text, match.start(), match.end())
-    if not indices:
-        return None, "syntax_anchor_not_found"
-    return indices, "ok"
+    return (match.start(), match.end()), "ok"
 
 
 def is_modal_word(word: str) -> bool:
     return word.lower().strip() in {"can", "could", "may", "might", "must", "shall", "should", "will", "would"}
 
 
-def expanded_index_set(indices: List[int]) -> set:
-    expanded = set()
-    for index in indices:
-        for candidate in range(index - STRUCTURE_MATCH_WINDOW, index + STRUCTURE_MATCH_WINDOW + 1):
-            expanded.add(candidate)
-    return expanded
+def validate_sentence_metadata(info: Dict) -> None:
+    required_fields = (
+        "sentence_start_char",
+        "sentence_end_char",
+        "position_char",
+    )
+    for field in required_fields:
+        if field not in info:
+            raise ValueError(f"Stage 5 syntax cache missing {field}: {info}")
+        if not isinstance(info[field], int):
+            raise ValueError(f"Stage 5 syntax cache has invalid {field}: {info}")
 
 
-def closest_position_match(indices: List[int], infos: List[Dict]) -> Optional[Dict]:
+def sentence_level_char_match(error_span: Tuple[int, int], infos: List[Dict]) -> Optional[Dict]:
     if not infos:
         return None
-    target_positions = expanded_index_set(indices)
-    positioned_infos = [info for info in infos if isinstance(info.get("position"), int)]
-    for info in positioned_infos:
-        if info["position"] in target_positions:
-            return info
-    return None
+
+    error_start, error_end = error_span
+    positioned_infos = []
+    for info in infos:
+        validate_sentence_metadata(info)
+        if info["sentence_start_char"] <= error_start and error_end <= info["sentence_end_char"]:
+            positioned_infos.append(info)
+    if not positioned_infos:
+        return None
+    return min(
+        positioned_infos,
+        key=lambda info: abs(info["position_char"] - error_start),
+    )
 
 
 def classify_from_stage5_cache(
     user_id: str,
+    review_index: int,
     review_text: str,
     span_text: str,
     original: str,
     corrected: str,
-    syntax_cache: Dict[Tuple[str, str], Dict[str, List[Dict]]],
+    syntax_cache: Dict[Tuple[str, int], Dict[str, List[Dict]]],
 ) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
-    key = cache_key(user_id, review_text)
+    key = cache_key(user_id, review_index)
     if key not in syntax_cache:
-        raise ValueError(f"Stage 5 syntax cache missing review for user={user_id}")
+        raise ValueError(f"Stage 5 syntax cache missing review for user={user_id}, review_index={review_index}")
 
-    token_indices, reason = locate_error_token_indices(review_text, span_text, original)
-    if token_indices is None:
+    error_span, reason = locate_error_char_span(review_text, span_text, original)
+    if error_span is None:
         return None, None, None, reason
 
     syntax_info = syntax_cache[key]
-    ccomp_match = closest_position_match(token_indices, syntax_info["ccomp_info"])
+    # CCOMP: 仅匹配 comp_type == 'ccomp'，排除 mark_advcl 等其他类型
+    ccomp_match = sentence_level_char_match(error_span, syntax_info["ccomp_info"])
     if ccomp_match is not None:
         comp_type = ccomp_match.get("comp_type")
-        if comp_type and str(comp_type).startswith("mark_"):
-            return "ccomp", "complement_link", "complement_linking_error", "ok"
-        if is_modal_word(original) or is_modal_word(corrected):
-            return "ccomp", "modal", "modal_distortion", "ok"
-        return "ccomp", "ccomp", "clause_boundary_error", "ok"
+        if comp_type == "ccomp":
+            if is_modal_word(original) or is_modal_word(corrected):
+                return "ccomp", "modal", "modal_distortion", "ok"
+            return "ccomp", "ccomp", "clause_boundary_error", "ok"
 
-    acl_match = closest_position_match(token_indices, syntax_info["acl_info"])
+    # ACL: 仅匹配 acl 和 relcl_reference，排除 relcl_non_reference
+    acl_match = sentence_level_char_match(error_span, syntax_info["acl_info"])
     if acl_match is not None:
         acl_type = acl_match.get("acl_type")
-        region_type = "relcl" if acl_type == "relcl_reference" else "acl"
-        if original.lower().strip().rstrip("s") == corrected.lower().strip().rstrip("s"):
-            error_type = "np_inflection"
+        if acl_type not in ("acl", "relcl_reference"):
+            # relcl_non_reference 不归类为 ACL，继续检查 CCOMP
+            pass
         else:
-            error_type = "modifier_typo"
-        return "acl", region_type, error_type, "ok"
+            region_type = "relcl" if acl_type == "relcl_reference" else "acl"
+            if original.lower().strip().rstrip("s") == corrected.lower().strip().rstrip("s"):
+                error_type = "np_inflection"
+            else:
+                error_type = "modifier_typo"
+            return "acl", region_type, error_type, "ok"
 
     return None, None, None, "syntax_no_acl_ccomp_match"
 
@@ -358,7 +348,7 @@ def classify_detail(
     user_id: str,
     detail: Dict,
     review_map: Dict[str, List[str]],
-    syntax_cache: Dict[Tuple[str, str], Dict[str, List[Dict]]],
+    syntax_cache: Dict[Tuple[str, int], Dict[str, List[Dict]]],
 ) -> Tuple[List[Dict], Counter]:
     if "asin" not in detail:
         raise ValueError(f"Missing asin in detail: {detail}")
@@ -383,6 +373,7 @@ def classify_detail(
         span_text = error.get("span_text", "")
         category, region_type, error_type, reason = classify_from_stage5_cache(
             user_id=user_id,
+            review_index=detail["review_index"],
             review_text=review_text,
             span_text=span_text,
             original=error["original"],
@@ -420,7 +411,7 @@ def classify_detail(
 def classify_user(
     row: Dict,
     review_map: Dict[str, List[str]],
-    syntax_cache: Dict[Tuple[str, str], Dict[str, List[Dict]]],
+    syntax_cache: Dict[Tuple[str, int], Dict[str, List[Dict]]],
 ) -> Dict:
     for key in ("user_id", "status", "reviews_processed", "detailed_results"):
         if key not in row:

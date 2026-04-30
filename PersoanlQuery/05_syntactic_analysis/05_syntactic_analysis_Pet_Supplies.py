@@ -128,6 +128,46 @@ def analyze_acl_in_doc(doc):
     return results
 
 
+def build_sentence_ranges(doc):
+    sentence_ranges = []
+    for sentence_index, sent in enumerate(doc.sents):
+        sentence_ranges.append({
+            'sentence_index': sentence_index,
+            'sentence_start_token': sent.start,
+            'sentence_end_token': sent.end - 1,
+            'sentence_start_char': sent.start_char,
+            'sentence_end_char': sent.end_char,
+        })
+    if not sentence_ranges and len(doc) > 0:
+        raise ValueError('Failed to build sentence ranges from non-empty doc')
+    return sentence_ranges
+
+
+def attach_sentence_metadata(doc, infos, sentence_ranges):
+    for info in infos:
+        position = info.get('position')
+        if not isinstance(position, int):
+            raise ValueError(f'Invalid structure position: {info}')
+        if position < 0 or position >= len(doc):
+            raise ValueError(f'Structure position out of range: {info}')
+
+        matched_sentence = None
+        for sentence_range in sentence_ranges:
+            if sentence_range['sentence_start_token'] <= position <= sentence_range['sentence_end_token']:
+                matched_sentence = sentence_range
+                break
+        if matched_sentence is None:
+            raise ValueError(f'Unable to locate sentence metadata for structure: {info}')
+
+        info['position_char'] = doc[position].idx
+        info['sentence_index'] = matched_sentence['sentence_index']
+        info['sentence_start_token'] = matched_sentence['sentence_start_token']
+        info['sentence_end_token'] = matched_sentence['sentence_end_token']
+        info['sentence_start_char'] = matched_sentence['sentence_start_char']
+        info['sentence_end_char'] = matched_sentence['sentence_end_char']
+    return infos
+
+
 # ============ CCOMP 分析 ============
 def analyze_ccomp_in_doc(doc):
     results = []
@@ -277,7 +317,7 @@ def process_user(user_data):
     attr_category_counter = Counter()
     regression_data = []
 
-    for r in reviews:
+    for review_index, r in enumerate(reviews):
         if not r:
             continue
         doc = nlp(r)
@@ -285,12 +325,14 @@ def process_user(user_data):
         n = len(tokens)
         if n == 0:
             continue
+        sentence_ranges = build_sentence_ranges(doc)
 
         total_sentences += 1
         total_token_count += n
 
         # ACL
         acl_info = analyze_acl_in_doc(doc)
+        acl_info = attach_sentence_metadata(doc, acl_info, sentence_ranges)
         acl_count = len(acl_info)
         total_acl_count += acl_count
         if acl_count > 0:
@@ -301,7 +343,7 @@ def process_user(user_data):
                 acl_marker_counter[info['marker']] += 1
         acl_sentence_details.append({
             'user_id': user_id,
-            'sentence': r,
+            'review_index': review_index,
             'token_count': n,
             'acl_count': acl_count,
             'has_acl': acl_count > 0,
@@ -310,6 +352,7 @@ def process_user(user_data):
 
         # CCOMP
         ccomp_info = analyze_ccomp_in_doc(doc)
+        ccomp_info = attach_sentence_metadata(doc, ccomp_info, sentence_ranges)
         ccomp_count = len(ccomp_info)
         total_ccomp_count += ccomp_count
         if ccomp_count > 0:
@@ -320,7 +363,7 @@ def process_user(user_data):
                 ccomp_marker_counter[info['marker']] += 1
         ccomp_sentence_details.append({
             'user_id': user_id,
-            'sentence': r,
+            'review_index': review_index,
             'token_count': n,
             'ccomp_count': ccomp_count,
             'has_ccomp': ccomp_count > 0,
