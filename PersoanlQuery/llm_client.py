@@ -1,18 +1,184 @@
 #!/usr/bin/env python3
 """LLM Clients (MiniMax + ZAI + VectorEngine + Qwen8b)."""
 
+import atexit
+import socket
+import subprocess
+import threading
 import time
 import re
 import json
+import traceback
 from datetime import datetime
 from typing import Optional
 
 VLLM_CONFIG_FILE = '/workspace/PersonalQuery/PersoanlQuery/06_query/vllm_config.json'
 
+_MINIMAX_SSH_TARGET = "m3-login2"
+_MINIMAX_HOST_IP_MAP = {
+    "api.minimaxi.com": "47.79.2.234",
+    "api.minimax.io": "47.252.72.253",
+}
+_MINIMAX_NETWORK_READY = False
+_MINIMAX_TUNNEL_PROCESS = None
+_MINIMAX_TUNNEL_PORT = None
+_MINIMAX_NETWORK_LOCK = threading.Lock()
+_ORIGINAL_GETADDRINFO = socket.getaddrinfo
+_ORIGINAL_SOCKET_CLASS = socket.socket
+
 
 def _log(msg: str):
     """带时间戳的日志打印"""
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def _get_raw_socket_class():
+    if getattr(socket.socket, "__module__", "") == "socks":
+        import socks
+        return socks._orgsocket
+    return _ORIGINAL_SOCKET_CLASS
+
+
+def _choose_local_socks_port() -> int:
+    raw_socket_class = _get_raw_socket_class()
+    with raw_socket_class(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _wait_for_socks_tunnel(process, port: int, timeout_seconds: int = 10):
+    raw_socket_class = _get_raw_socket_class()
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        return_code = process.poll()
+        if return_code is not None:
+            stderr = process.stderr.read().strip() if process.stderr else ""
+            raise RuntimeError(
+                f"MiniMax SSH SOCKS 隧道启动失败: return_code={return_code}, stderr={stderr}"
+            )
+
+        with raw_socket_class(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.5)
+            if probe.connect_ex(("127.0.0.1", port)) == 0:
+                return
+
+        time.sleep(0.1)
+
+    process.terminate()
+    raise TimeoutError(f"MiniMax SSH SOCKS 隧道启动超时: 127.0.0.1:{port}")
+
+
+def _cleanup_minimax_socks_tunnel():
+    global _MINIMAX_TUNNEL_PROCESS
+    if _MINIMAX_TUNNEL_PROCESS is None:
+        return
+    if _MINIMAX_TUNNEL_PROCESS.poll() is None:
+        _MINIMAX_TUNNEL_PROCESS.terminate()
+        try:
+            _MINIMAX_TUNNEL_PROCESS.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _MINIMAX_TUNNEL_PROCESS.kill()
+            _MINIMAX_TUNNEL_PROCESS.wait(timeout=5)
+
+
+def _patch_minimax_dns():
+    def patched_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        lookup_host = host.decode("ascii") if isinstance(host, bytes) else host
+        mapped_host = _MINIMAX_HOST_IP_MAP.get(lookup_host)
+        if mapped_host is not None:
+            return _ORIGINAL_GETADDRINFO(mapped_host, port, family, type, proto, flags)
+        return _ORIGINAL_GETADDRINFO(host, port, family, type, proto, flags)
+
+    socket.getaddrinfo = patched_getaddrinfo
+
+
+def _ensure_minimax_compute_node_network():
+    """计算节点外网 DNS/直连不可用时，通过登录节点 SSH SOCKS 隧道访问 MiniMax。"""
+    global _MINIMAX_NETWORK_READY, _MINIMAX_TUNNEL_PROCESS, _MINIMAX_TUNNEL_PORT
+    if _MINIMAX_NETWORK_READY:
+        return
+
+    with _MINIMAX_NETWORK_LOCK:
+        if _MINIMAX_NETWORK_READY:
+            return
+
+        import socks
+
+        port = _choose_local_socks_port()
+        cmd = [
+            "ssh",
+            "-q",
+            "-N",
+            "-D",
+            f"127.0.0.1:{port}",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            _MINIMAX_SSH_TARGET,
+        ]
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        _wait_for_socks_tunnel(process, port)
+
+        socks.set_default_proxy(socks.SOCKS5, "127.0.0.1", port, rdns=True)
+        socket.socket = socks.socksocket
+        _patch_minimax_dns()
+
+        _MINIMAX_TUNNEL_PROCESS = process
+        _MINIMAX_TUNNEL_PORT = port
+        _MINIMAX_NETWORK_READY = True
+        atexit.register(_cleanup_minimax_socks_tunnel)
+        _log(
+            f"MiniMax 计算节点网络补丁已启用: socks=127.0.0.1:{port}, "
+            f"ssh_target={_MINIMAX_SSH_TARGET}, dns_map={_MINIMAX_HOST_IP_MAP}"
+        )
+
+
+def _log_exception_details(prefix: str, exc: Exception):
+    """打印底层 API 异常细节，避免只看到 SDK 的泛化错误。"""
+    exc_type = type(exc)
+    _log(f"{prefix} exception_type: {exc_type.__module__}.{exc_type.__name__}")
+    _log(f"{prefix} exception_repr: {repr(exc)}")
+    _log(f"{prefix} exception_message: {str(exc)}")
+
+    for attr in ("status_code", "request_id", "code", "type"):
+        if hasattr(exc, attr):
+            _log(f"{prefix} {attr}: {getattr(exc, attr)}")
+
+    response = getattr(exc, "response", None)
+    if response is not None:
+        for attr in ("status_code", "reason_phrase"):
+            if hasattr(response, attr):
+                _log(f"{prefix} response.{attr}: {getattr(response, attr)}")
+        response_text = getattr(response, "text", None)
+        if response_text:
+            _log(f"{prefix} response.text(first_2000): {response_text[:2000]}")
+
+    cause = getattr(exc, "__cause__", None)
+    if cause is not None:
+        cause_type = type(cause)
+        _log(f"{prefix} cause_type: {cause_type.__module__}.{cause_type.__name__}")
+        _log(f"{prefix} cause_repr: {repr(cause)}")
+        _log(f"{prefix} cause_message: {str(cause)}")
+
+    context = getattr(exc, "__context__", None)
+    if context is not None and context is not cause:
+        context_type = type(context)
+        _log(f"{prefix} context_type: {context_type.__module__}.{context_type.__name__}")
+        _log(f"{prefix} context_repr: {repr(context)}")
+        _log(f"{prefix} context_message: {str(context)}")
+
+    tb = "".join(traceback.format_exception(exc_type, exc, exc.__traceback__))
+    _log(f"{prefix} traceback:\n{tb}")
 
 
 class MiniMaxAnthropicClient:
@@ -23,6 +189,7 @@ class MiniMaxAnthropicClient:
     """
     def __init__(self, model: str = "MiniMax-M2.7-highspeed"):
         self.model = model
+        _ensure_minimax_compute_node_network()
         import anthropic
         self.client = anthropic.Anthropic(
             base_url="https://api.minimaxi.com/anthropic",
@@ -228,6 +395,7 @@ class MiniMaxIOAnthropicClient:
     """
     def __init__(self, model: str = "MiniMax-M2.7"):
         self.model = model
+        _ensure_minimax_compute_node_network()
         import anthropic
         self.client = anthropic.Anthropic(
             base_url="https://api.minimax.io/anthropic",
@@ -299,7 +467,8 @@ class MiniMaxIOAnthropicClient:
                     time.sleep(wait_time)
                     retry_count += 1
                     continue
-                print(f"[MiniMaxIO-Anthropic] Error calling API: {e}")
+                _log(f"[MiniMaxIO-Anthropic] Error calling API: {e}")
+                _log_exception_details("[MiniMaxIO-Anthropic]", e)
                 return "", ""
 
         return "", ""
@@ -397,6 +566,7 @@ class MiniMaxIOAnthropicClient:
                     retry_count += 1
                     continue
                 _log(f"[MiniMaxIO-Cache] Error calling API: {e}")
+                _log_exception_details("[MiniMaxIO-Cache]", e)
                 return "", {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}
 
         return "", {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}
