@@ -1,7 +1,25 @@
 {
-  "num_users_to_test": 1,
-  "max_workers": 1,
+  "num_users_to_test": 10,
+  "max_workers": 10,
   "use_minimaxio": false,
   "inject_error_count": 3,
-  "error_injection_rate": 0.8
+  "error_injection_rate": 0.8,
+  "prompt_file": "/home/wlia0047/ar57/wenyu/PersoanlQuery/07_inject_noisy/noisy_query_prompts.json",
+  "categories": {
+    "Baby_Products": {
+      "query_file": "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Baby_Products/query.json",
+      "user_error_file": "/home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/Baby_Products/acl_ccomp_error.json",
+      "noisy_output_file": "/home/wlia0047/ar57/wenyu/result/personal_query/07_inject_noisy/Baby_Products/noisy_query.json"
+    },
+    "Grocery_and_Gourmet_Food": {
+      "query_file": "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Grocery_and_Gourmet_Food/query.json",
+      "user_error_file": "/home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/Grocery_and_Gourmet_Food/acl_ccomp_error.json",
+      "noisy_output_file": "/home/wlia0047/ar57/wenyu/result/personal_query/07_inject_noisy/Grocery_and_Gourmet_Food/noisy_query.json"
+    },
+    "Pet_Supplies": {
+      "query_file": "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Pet_Supplies/query.json",
+      "user_error_file": "/home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/Pet_Supplies/acl_ccomp_error.json",
+      "noisy_output_file": "/home/wlia0047/ar57/wenyu/result/personal_query/07_inject_noisy/Pet_Supplies/noisy_query.json"
+    }
+  }
 }

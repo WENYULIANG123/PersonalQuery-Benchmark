@@ -12,59 +12,52 @@ from datetime import datetime
 from typing import Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery')
+sys.path.insert(0, '/home/wlia0047/ar57/wenyu/PersoanlQuery')
 
 # ========================================
 # 配置加载
 # ========================================
-from config import get_category_config
-
 CATEGORY = "Pet_Supplies"
-CAT_CONFIG = get_category_config(CATEGORY)
-
-# Stage 6 查询文件（合并的 query.json）
-QUERY_FILE = "/workspace/result/personal_query/06_query/Pet_Supplies/query.json"
-
-# Stage 4 用户错误文件
-USER_ERROR_FILE = CAT_CONFIG['user_error_file']
-
-# 输出文件 - 按类别分目录
-BASE_OUTPUT_DIR = "/workspace/result/personal_query/07_inject_noisy"
-CATEGORY_OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, CATEGORY)
-NOISY_OUTPUT_FILE = os.path.join(CATEGORY_OUTPUT_DIR, "noisy_query.json")
-
-# Prompt 配置
-NOISY_PROMPT_FILE = '/workspace/PersonalQuery/PersoanlQuery/07_inject_noisy/noisy_query_prompts.json'
 
 # 全局配置
-NOISY_CONFIG_FILE = '/workspace/PersonalQuery/PersoanlQuery/07_inject_noisy/noisy_query_config.json'
-QUERY_CONFIG_FILE = '/workspace/PersonalQuery/PersoanlQuery/06_query/query_config.json'
+NOISY_CONFIG_FILE = '/home/wlia0047/ar57/wenyu/PersoanlQuery/07_inject_noisy/noisy_query_config.json'
 
 
 # ========================================
 # 加载配置和 prompt 模板
 # ========================================
+def get_required_config_value(config: dict, *keys):
+    current = config
+    current_path = []
+    for key in keys:
+        current_path.append(str(key))
+        if not isinstance(current, dict) or key not in current:
+            raise KeyError(f"配置缺少字段: {'.'.join(current_path)}")
+        current = current[key]
+    return current
+
+
 with open(NOISY_CONFIG_FILE, 'r', encoding='utf-8') as f:
     _NOISY_CONFIG = json.load(f)
-with open(QUERY_CONFIG_FILE, 'r', encoding='utf-8') as f:
-    _CONFIG = json.load(f)
 
-NUM_USERS_TO_TEST = _NOISY_CONFIG.get('num_users_to_test', 50)
-MAX_WORKERS = _NOISY_CONFIG.get('max_workers', 10)
-USE_MINIMAXIO = _CONFIG.get('use_minimaxio', False)
-INJECT_ERROR_COUNT = _NOISY_CONFIG.get('inject_error_count', 3)
+_CATEGORY_CONFIG = get_required_config_value(_NOISY_CONFIG, 'categories', CATEGORY)
+
+NUM_USERS_TO_TEST = get_required_config_value(_NOISY_CONFIG, 'num_users_to_test')
+MAX_WORKERS = get_required_config_value(_NOISY_CONFIG, 'max_workers')
+USE_MINIMAXIO = get_required_config_value(_NOISY_CONFIG, 'use_minimaxio')
+INJECT_ERROR_COUNT = get_required_config_value(_NOISY_CONFIG, 'inject_error_count')
+
+QUERY_FILE = get_required_config_value(_CATEGORY_CONFIG, 'query_file')
+USER_ERROR_FILE = get_required_config_value(_CATEGORY_CONFIG, 'user_error_file')
+NOISY_OUTPUT_FILE = get_required_config_value(_CATEGORY_CONFIG, 'noisy_output_file')
+NOISY_PROMPT_FILE = get_required_config_value(_NOISY_CONFIG, 'prompt_file')
 
 # 加载噪声 prompt 模板
 with open(NOISY_PROMPT_FILE, 'r', encoding='utf-8') as f:
     _NOISY_PROMPTS = json.load(f)
 
-_system_base_key = f"system_base_{CATEGORY}"
-if _system_base_key in _NOISY_PROMPTS:
-    NOISY_SYSTEM_BASE = _NOISY_PROMPTS[_system_base_key]
-else:
-    NOISY_SYSTEM_BASE = _NOISY_PROMPTS.get("system_base_Pet_Supplies", "")
-
-NOISY_USER_CONTENT_TEMPLATE = _NOISY_PROMPTS.get("user_content_noisy", "")
+NOISY_SYSTEM_BASE = get_required_config_value(_NOISY_PROMPTS, f"system_base_{CATEGORY}")
+NOISY_USER_CONTENT_TEMPLATE = get_required_config_value(_NOISY_PROMPTS, "user_content_noisy")
 
 
 # ========================================
