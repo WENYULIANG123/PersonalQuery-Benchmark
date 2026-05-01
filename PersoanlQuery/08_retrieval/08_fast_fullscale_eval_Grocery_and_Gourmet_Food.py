@@ -12,7 +12,7 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_DATASETS_OFFLINE"] = "1"
 COLBERTV2_CUDA_HOME = "/usr/local/cuda-12.5"
-COLBERTV2_TORCH_EXTENSIONS_DIR = "/home/wlia0047/ar57_scratch/wenyu/torch_extensions/colbertv2_cuda125"
+COLBERTV2_TORCH_EXTENSIONS_BASE_DIR = "/home/wlia0047/ar57_scratch/wenyu/torch_extensions"
 COLBERTV2_HOST_CC = "/usr/bin/gcc"
 COLBERTV2_HOST_CXX = "/usr/bin/g++"
 if not os.path.exists(os.path.join(COLBERTV2_CUDA_HOME, "include", "cuda_runtime.h")):
@@ -37,15 +37,13 @@ for _env_name, _env_value in [
 ]:
     _existing_env_value = os.environ.get(_env_name)
     os.environ[_env_name] = _env_value if not _existing_env_value else f"{_env_value}:{_existing_env_value}"
-os.makedirs(COLBERTV2_TORCH_EXTENSIONS_DIR, exist_ok=True)
-os.environ["TORCH_EXTENSIONS_DIR"] = COLBERTV2_TORCH_EXTENSIONS_DIR
-
 import sys
 import importlib.util
 import time
 import pickle
 import json
 import gzip
+import shutil
 import numpy as np
 import torch
 import pandas as pd
@@ -90,6 +88,32 @@ SPLADE_QUERY_BATCH_SIZE = 128
 # ============ 日志 ============
 def log(msg):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+def prepare_colbert_torch_extensions_dir() -> str:
+    ext_dir = os.path.join(
+        COLBERTV2_TORCH_EXTENSIONS_BASE_DIR,
+        f"colbertv2_cuda125_{CATEGORY_NAME}_{os.getpid()}"
+    )
+    if os.path.exists(ext_dir):
+        shutil.rmtree(ext_dir)
+    os.makedirs(ext_dir, exist_ok=True)
+    os.environ["TORCH_EXTENSIONS_DIR"] = ext_dir
+    os.environ["COLBERT_LOAD_TORCH_EXTENSION_VERBOSE"] = "True"
+    log(f"[BOOT] ColBERT TORCH_EXTENSIONS_DIR = {ext_dir}")
+    return ext_dir
+
+
+def log_colbert_extension_dir_state(ext_dir: str, prefix: str):
+    if not os.path.exists(ext_dir):
+        log(f"{prefix} extension dir missing: {ext_dir}")
+        return
+    entries = sorted(os.listdir(ext_dir))
+    preview = entries[:20]
+    log(f"{prefix} extension dir entries ({len(entries)}): {preview}")
+
+
+COLBERTV2_TORCH_EXTENSIONS_DIR = prepare_colbert_torch_extensions_dir()
 
 
 def load_query_data_once(query_file: str) -> List[Dict]:
@@ -717,14 +741,21 @@ def build_colbertv2_searcher(output_root: str, doc_ids: List[str]):
 
     collection = [f"pid {pid} asin {asin}" for pid, asin in enumerate(doc_ids)]
     checkpoint_path = resolve_local_hf_snapshot("colbert-ir/colbertv2.0")
+    log(f"[ColBERT] checkpoint_path = {checkpoint_path}")
+    log(f"[ColBERT] output_root = {output_root}")
+    log_colbert_extension_dir_state(COLBERTV2_TORCH_EXTENSIONS_DIR, "[ColBERT][before Searcher]")
+    searcher_start = time.time()
     with Run().context(RunConfig(experiment="colbertv2_index", root=output_root)):
         config = ColBERTConfig(root=output_root)
-        return Searcher(
+        searcher = Searcher(
             index="colbertv2_index",
             checkpoint=checkpoint_path,
             collection=collection,
             config=config,
         )
+    log(f"[ColBERT] Searcher loaded in {time.time() - searcher_start:.1f}s")
+    log_colbert_extension_dir_state(COLBERTV2_TORCH_EXTENSIONS_DIR, "[ColBERT][after Searcher]")
+    return searcher
 
 
 def load_colbertv2_query_cache(query_type: str, query_category: str) -> Dict[str, Dict[str, np.ndarray]]:
