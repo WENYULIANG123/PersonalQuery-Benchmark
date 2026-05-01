@@ -138,6 +138,30 @@ def load_correct_vs_noisy_data(category: str) -> dict:
     return results
 
 
+def load_noisy_family_overall_data(category: str) -> dict:
+    """Load noisy P@10 by query family from 09_noisy_retrieval."""
+    results_path = BASE_DIR_09 / category / "correct_vs_noisy_results.json"
+    with open(results_path, "r") as f:
+        data = json.load(f)
+
+    results = {}
+    for item in data["noisy_results"]:
+        retriever = item["retriever"]
+        if retriever in DISABLED_RETRIEVERS:
+            continue
+
+        metrics_by_category = item["metrics_by_category"]
+        results[retriever] = {}
+        for query_category in ("acl", "ccomp"):
+            family_data = metrics_by_category[query_category]
+            metrics = family_data["metrics"]
+            if "P@10" not in metrics:
+                raise KeyError(f"{category} noisy {query_category} {retriever} missing P@10")
+            results[retriever][query_category] = metrics["P@10"]
+
+    return results
+
+
 def print_clean_comparison(all_data: dict):
     """Print clean query P@10 comparison table."""
     all_retrievers = set()
@@ -240,6 +264,80 @@ def print_clean_family_overall_comparison(all_data: dict):
         print(row)
 
     print("-" * 130)
+
+
+def print_noisy_clean_family_avg_delta(clean_data: dict, noisy_data: dict):
+    """Compare ACL/CCOMP noisy-clean P@10 deltas after averaging each retriever across domains."""
+    candidate_retrievers = set()
+    for cat in CATEGORIES:
+        candidate_retrievers.update(clean_data[cat].keys())
+        candidate_retrievers.update(noisy_data[cat].keys())
+    candidate_retrievers = sort_retrievers(r for r in candidate_retrievers if r not in DISABLED_RETRIEVERS)
+
+    complete_retrievers = []
+    incomplete_details = []
+    for retriever in candidate_retrievers:
+        missing_fields = []
+        for cat in CATEGORIES:
+            for source_name, source_data in (("clean", clean_data), ("noisy", noisy_data)):
+                if retriever not in source_data[cat]:
+                    missing_fields.append(f"{cat}/{source_name}/{retriever}")
+                    continue
+                for query_category in ("acl", "ccomp"):
+                    if query_category not in source_data[cat][retriever]:
+                        missing_fields.append(f"{cat}/{source_name}/{retriever}/{query_category}")
+        if missing_fields:
+            incomplete_details.append((retriever, missing_fields))
+        else:
+            complete_retrievers.append(retriever)
+
+    if not complete_retrievers:
+        raise ValueError("No retriever has complete clean/noisy ACL/CCOMP data across all 3 domains")
+
+    print("\n" + "=" * 118)
+    print("Noisy vs Clean P@10 by Family - Average Across 3 Domains")
+    print("每个检索器先分别读取 Baby/Grocery/Pet 的 ACL/CCOMP noisy 与 clean P@10，再计算三域均值和 noisy-clean 差值")
+    print("=" * 118)
+    if incomplete_details:
+        print("Excluded retrievers with incomplete 3-domain family data:")
+        for retriever, missing_fields in incomplete_details:
+            print(f"  {retriever}: missing {', '.join(missing_fields)}")
+        print("-" * 118)
+    print(
+        f"{'Retriever':<12} "
+        f"{'ACL Clean':>10} {'ACL Noisy':>10} {'ACL Diff':>10} "
+        f"{'CC Clean':>10} {'CC Noisy':>10} {'CC Diff':>10}"
+    )
+    print("-" * 118)
+
+    for retriever in complete_retrievers:
+        family_summary = {}
+        for query_category in ("acl", "ccomp"):
+            clean_values = []
+            noisy_values = []
+            for cat in CATEGORIES:
+                clean_values.append(clean_data[cat][retriever][query_category])
+                noisy_values.append(noisy_data[cat][retriever][query_category])
+
+            clean_avg = sum(clean_values) / len(clean_values)
+            noisy_avg = sum(noisy_values) / len(noisy_values)
+            family_summary[query_category] = {
+                "clean": clean_avg,
+                "noisy": noisy_avg,
+                "diff": noisy_avg - clean_avg,
+            }
+
+        print(
+            f"{retriever:<12} "
+            f"{fmt4(family_summary['acl']['clean']):>10} "
+            f"{fmt4(family_summary['acl']['noisy']):>10} "
+            f"{family_summary['acl']['diff']:>+10.4f} "
+            f"{fmt4(family_summary['ccomp']['clean']):>10} "
+            f"{fmt4(family_summary['ccomp']['noisy']):>10} "
+            f"{family_summary['ccomp']['diff']:>+10.4f}"
+        )
+
+    print("-" * 118)
 
 
 def print_correct_vs_noisy_by_domain(all_data: dict):
@@ -750,6 +848,12 @@ def main():
         n_noisy = len(noisy_data[cat].get("noisy", {}))
         print(f"  Loaded {cat}: {n_correct} correct retrievers, {n_noisy} noisy retrievers")
 
+    print("\nLoading noisy query family overall data from 09_noisy_retrieval...")
+    noisy_family_overall_data = {}
+    for cat in CATEGORIES:
+        noisy_family_overall_data[cat] = load_noisy_family_overall_data(cat)
+        print(f"  Loaded {cat}: {len(noisy_family_overall_data[cat])} retrievers")
+
     # Load within-family OLS data for trend analysis
     print("\nLoading within-family OLS data for trend analysis...")
     trend_data = {}
@@ -766,6 +870,7 @@ def main():
     # Print clean comparison
     print_clean_comparison(clean_data)
     print_clean_family_overall_comparison(clean_family_overall_data)
+    print_noisy_clean_family_avg_delta(clean_family_overall_data, noisy_family_overall_data)
 
     # Print correct vs noisy comparison (one table per domain)
     print_correct_vs_noisy_by_domain(noisy_data)

@@ -12,9 +12,14 @@
 """
 
 import os
-os.environ["HF_HOME"] = "/root/hf_models"
+os.environ["HF_HOME"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
+os.environ["HF_HUB_CACHE"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_DATASETS_OFFLINE"] = "1"
 
 import sys
+import importlib.util
 import json
 import pickle
 import io
@@ -36,8 +41,13 @@ sys.path.insert(0, str(personquery_root))
 
 from utils.retrievers import (
     E5Retriever, BGERetriever,
-    STARRetriever, MiniLMRetriever, GritLMRetriever, BM25,
-    ANCERetriever, SPLADERetriever
+    STARRetriever, MiniLMRetriever, BM25,
+    ANCERetriever, SPLADERetriever,
+    select_cuda_toolkit_for_colbert_extension_build,
+    configure_host_compiler_for_colbert_extension_build,
+    validate_cuda_toolkit_for_colbert,
+    configure_cuda_env_for_colbert_extension_build,
+    preflight_colbert_cuda_extension_build,
 )
 from config import get_category_config, get_global_paths
 
@@ -54,19 +64,201 @@ CACHE_DIR = CAT_CONFIG['query_cache_dir']
 BM25_RETRIEVER_CACHE_DIR = CAT_CONFIG['retriever_cache_dir']
 
 AVAILABLE_RETRIEVERS = {
-    'GRITLM': GritLMRetriever,
+    # 'GRITLM': GritLMRetriever,
     'BGE': BGERetriever,
     'E5': E5Retriever,
     'MiniLM': MiniLMRetriever,
     'STAR': STARRetriever,
     'ANCE': ANCERetriever,
+    'ColBERTv2': None,
     'SPLADE': SPLADERetriever,
     'BM25': None,
 }
 
+COLBERTV2_MODEL_NAME = "colbert-ir/colbertv2.0"
+COLBERTV2_QUERY_BATCH_SIZE = 128
+
 
 def log_with_timestamp(msg: str):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+def load_colbertv2_build_module():
+    module_path = retrieval_root / "08_build_retriever_indices_Grocery_and_Gourmet_Food.py"
+    if not module_path.exists():
+        raise FileNotFoundError(f"Required ColBERTv2 build module not found: {module_path}")
+
+    spec = importlib.util.spec_from_file_location("build_retriever_indices_grocery_and_gourmet_food", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load ColBERTv2 build module: {module_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    os.environ["HF_DATASETS_OFFLINE"] = "1"
+    return module
+
+
+def configure_colbertv2_runtime() -> None:
+    select_cuda_toolkit_for_colbert_extension_build()
+    configure_host_compiler_for_colbert_extension_build()
+    validate_cuda_toolkit_for_colbert()
+    configure_cuda_env_for_colbert_extension_build()
+    preflight_colbert_cuda_extension_build()
+
+
+def collect_unique_query_texts(queries: List[Dict], mode: str) -> List[str]:
+    unique_queries = []
+    seen = set()
+
+    for index, item in enumerate(queries):
+        query_text = item.get('query')
+        if not isinstance(query_text, str):
+            raise TypeError(f"{mode} query must be a string at index {index}, got {type(query_text).__name__}")
+        if not query_text:
+            raise ValueError(f"{mode} query is empty at index {index}")
+        if query_text not in seen:
+            seen.add(query_text)
+            unique_queries.append(query_text)
+
+    if not unique_queries:
+        raise ValueError(f"No valid queries collected for ColBERTv2 mode: {mode}")
+
+    return unique_queries
+
+
+def load_colbertv2_checkpoint_for_query_encoding():
+    if not torch.cuda.is_available():
+        raise RuntimeError("ColBERTv2 query embedding cache generation requires CUDA")
+
+    configure_colbertv2_runtime()
+
+    from colbert.infra import ColBERTConfig
+    from colbert.modeling.checkpoint import Checkpoint
+
+    config = ColBERTConfig(
+        checkpoint=COLBERTV2_MODEL_NAME,
+        query_maxlen=32,
+    )
+    checkpoint = Checkpoint(COLBERTV2_MODEL_NAME, colbert_config=config, verbose=1)
+    return checkpoint.cuda()
+
+
+def encode_colbertv2_query_texts(checkpoint, query_texts: List[str]) -> Dict[str, np.ndarray]:
+    if not query_texts:
+        raise ValueError("ColBERTv2 query text list is empty")
+
+    embeddings = checkpoint.queryFromText(
+        query_texts,
+        bsize=COLBERTV2_QUERY_BATCH_SIZE,
+        to_cpu=True,
+    )
+    if not isinstance(embeddings, torch.Tensor):
+        raise TypeError(f"ColBERTv2 query encoder returned {type(embeddings).__name__}, expected torch.Tensor")
+    if embeddings.ndim != 3:
+        raise ValueError(f"ColBERTv2 query embeddings must be 3D, got shape {tuple(embeddings.shape)}")
+    if embeddings.shape[0] != len(query_texts):
+        raise RuntimeError(
+            f"ColBERTv2 query embedding count mismatch: expected {len(query_texts)}, got {embeddings.shape[0]}"
+        )
+
+    return {
+        query_text: np.asarray(embeddings[index].detach().cpu().numpy(), dtype=np.float32)
+        for index, query_text in enumerate(query_texts)
+    }
+
+
+def save_colbertv2_query_embedding_cache(cache: Dict[str, Dict[str, np.ndarray]], mode: str) -> str:
+    subdir = os.path.join(CACHE_DIR, f"{mode}_query")
+    os.makedirs(subdir, exist_ok=True)
+    cache_path = os.path.join(subdir, f"colbertv2__{mode}_cache.pkl")
+    tmp_path = f"{cache_path}.tmp"
+
+    with open(tmp_path, "wb") as f:
+        pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    os.replace(tmp_path, cache_path)
+
+    file_size_mb = os.path.getsize(cache_path) / (1024 * 1024)
+    total_cached = sum(len(user_cache) for user_cache in cache.values())
+    log_with_timestamp(f"  ✓ ColBERTv2 query embedding 缓存已保存: {cache_path}")
+    log_with_timestamp(f"    - 用户数: {len(cache)}")
+    log_with_timestamp(f"    - 查询数: {total_cached}")
+    log_with_timestamp(f"    - 文件大小: {file_size_mb:.2f} MB")
+    return cache_path
+
+
+def generate_colbertv2_query_embedding_cache_for_mode(
+    checkpoint,
+    queries: List[Dict],
+    queries_by_user: Dict[str, List[Dict]],
+    mode: str,
+) -> Dict[str, object]:
+    query_texts = collect_unique_query_texts(queries, mode)
+    log_with_timestamp(
+        f"  开始生成 ColBERTv2 query embedding 缓存 ({mode}): "
+        f"unique_queries={len(query_texts)}, batch_size={COLBERTV2_QUERY_BATCH_SIZE}"
+    )
+
+    start_time = time.time()
+    encoded_by_query = encode_colbertv2_query_texts(checkpoint, query_texts)
+
+    result_cache: Dict[str, Dict[str, np.ndarray]] = {uid: {} for uid in queries_by_user.keys()}
+    for uid, user_queries in queries_by_user.items():
+        for item in user_queries:
+            query_text = item.get('query')
+            if query_text not in encoded_by_query:
+                raise KeyError(f"ColBERTv2 encoded query missing for user={uid}, mode={mode}, query={query_text}")
+            result_cache[uid][query_text] = encoded_by_query[query_text]
+
+    cache_path = save_colbertv2_query_embedding_cache(result_cache, mode)
+    elapsed = time.time() - start_time
+    total_cached = sum(len(user_cache) for user_cache in result_cache.values())
+
+    return {
+        'mode': mode,
+        'cache_path': cache_path,
+        'query_count': total_cached,
+        'unique_query_count': len(query_texts),
+        'elapsed_seconds': elapsed,
+    }
+
+
+def generate_colbertv2_cache_from_query_types(query_types: List[Tuple[str, List[Dict], Dict[str, List[Dict]], str]]) -> Dict[str, object]:
+    checkpoint = load_colbertv2_checkpoint_for_query_encoding()
+
+    summaries = []
+    total_cached = 0
+    try:
+        for query_type, queries, queries_by_user, mode in query_types:
+            if not queries:
+                log_with_timestamp(f"  (无 {query_type} {mode} 查询，跳过)")
+                continue
+
+            summary = generate_colbertv2_query_embedding_cache_for_mode(
+                checkpoint,
+                queries,
+                queries_by_user,
+                mode,
+            )
+            summaries.append(summary)
+            total_cached += summary['query_count']
+            log_with_timestamp(
+                f"  ✓ {query_type} {mode} ColBERTv2 query embedding 缓存: "
+                f"{summary['query_count']} 条, unique={summary['unique_query_count']}, "
+                f"耗时 {summary['elapsed_seconds']:.1f}s"
+            )
+    finally:
+        del checkpoint
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+    return {
+        'total_cached': total_cached,
+        'summaries': summaries,
+    }
 
 
 def load_noisy_queries() -> Tuple[List[Dict], List[Dict]]:
@@ -328,36 +520,25 @@ def _encode_and_save_bm25_cache(
     cache = {}
     failed_count = 0
 
-    for user_id, user_queries in by_user.items():
-        user_cache = []
-        for q in user_queries:
-            try:
-                text = q.get('query', '')
-                if not text:
-                    continue
-                results = bm25.search(text, top_k=100)
-                user_cache.append({
-                    'query': text,
-                    'results': results,
-                    'user_id': user_id,
-                    'asin': q.get('asin', ''),
-                    'level': q.get('acl') or q.get('ccomp', 0),
-                    'is_ground_truth': q.get('is_ground_truth', True),
-                })
-            except Exception as e:
-                log_with_timestamp(f"      ❌ BM25 搜索失败: {text[:40]}... 错误: {str(e)[:100]}")
-                failed_count += 1
-                import sys
-                sys.exit(1)
-
-        if user_cache:
-            cache[user_id] = user_cache
+    for index, q in enumerate(queries):
+        try:
+            text = q.get('query', '')
+            if not text:
+                raise ValueError(f"BM25 {mode} query is empty at index {index}")
+            if text in cache:
+                continue
+            cache[text] = bm25.search(text, top_k=100)
+        except Exception as e:
+            log_with_timestamp(f"      ❌ BM25 搜索失败: {text[:40]}... 错误: {str(e)[:100]}")
+            failed_count += 1
+            import sys
+            sys.exit(1)
 
     if cache:
-        cache_file = get_cache_file_path("bm25", "", mode)
+        cache_file = os.path.join(CACHE_DIR, f"{mode}_query", f"bm25__{mode}_cache.pkl")
         os.makedirs(os.path.dirname(cache_file), exist_ok=True)
         with open(cache_file, 'wb') as f:
-            pickle.dump(cache, f)
+            pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
         log_with_timestamp(f"  ✓ BM25 缓存已保存: {cache_file}")
 
     if failed_count > 0:
@@ -410,6 +591,13 @@ def main():
     log_with_timestamp(f"Noisy 文件: {NOISY_QUERY_FILE}")
     log_with_timestamp(f"缓存目录: {CACHE_DIR}")
     log_with_timestamp(f"检索器: {', '.join(retriever_names)}")
+    log_with_timestamp(
+        "HF 离线模式: "
+        f"HF_HOME={os.environ.get('HF_HOME')}, "
+        f"HF_HUB_CACHE={os.environ.get('HF_HUB_CACHE')}, "
+        f"HF_HUB_OFFLINE={os.environ.get('HF_HUB_OFFLINE')}, "
+        f"TRANSFORMERS_OFFLINE={os.environ.get('TRANSFORMERS_OFFLINE')}"
+    )
     log_with_timestamp("")
 
     # 加载 noisy queries
@@ -450,6 +638,12 @@ def main():
         log_with_timestamp(f"\n{'='*80}")
         log_with_timestamp(f"正在处理检索器: {retriever_name}")
         log_with_timestamp(f"{'='*80}")
+
+        if retriever_name == 'ColBERTv2':
+            summary = generate_colbertv2_cache_from_query_types(query_types)
+            total_cached += summary['total_cached']
+            log_with_timestamp(f"✓ 检索器 {retriever_name} 处理完成: {summary['total_cached']} 条")
+            continue
 
         for query_type, queries, by_user, mode in query_types:
             if queries:
