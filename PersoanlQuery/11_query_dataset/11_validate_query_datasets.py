@@ -18,6 +18,7 @@ EXPECTED_FIELDS = [
     "profile_complexity_level",
     "correct_query",
     "correct_word_count",
+    "idf",
     "attrs_used",
     "has_error_query",
     "error_query",
@@ -47,6 +48,8 @@ def validate_file(path: Path, counts: Counter[str]) -> None:
             query_category = item["query_category"]
             if query_category not in VALID_QUERY_CATEGORIES:
                 raise ValueError(f"{path}:{lineno} has invalid query_category: {query_category}")
+            if not isinstance(item["idf"], (int, float)):
+                raise TypeError(f"{path}:{lineno} idf must be numeric")
             if not isinstance(item["injected_errors"], list):
                 raise TypeError(f"{path}:{lineno} injected_errors must be a list")
             for error_index, injected_error in enumerate(item["injected_errors"]):

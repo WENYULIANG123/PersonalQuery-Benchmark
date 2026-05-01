@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
+import math
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,12 +15,20 @@ from typing import Any
 
 REPO_ROOT = Path("/home/wlia0047/ar57/wenyu")
 RESULT_ROOT = REPO_ROOT / "result" / "personal_query"
+AMAZON_REVIEWS_ROOT = REPO_ROOT / "data" / "Amazon-Reviews-2023"
+IDF_CACHE_DIR = RESULT_ROOT / "11_query_dataset" / "idf_cache"
+UNKNOWN_WORD_IDF = 5.0
 SOURCE_TO_DATASET_QUERY_CATEGORY = {
     "acl": "wide",
     "ccomp": "deep",
 }
 INJECTED_ERROR_FIELDS = ["correct", "error", "error_type", "note"]
 INJECTED_ERROR_REQUIRED_FIELDS = {"correct", "error", "error_type"}
+METADATA_FILES = {
+    "Baby_Products": AMAZON_REVIEWS_ROOT / "meta_Baby_Products.jsonl.gz",
+    "Grocery_and_Gourmet_Food": AMAZON_REVIEWS_ROOT / "raw" / "meta_categories" / "meta_Grocery_and_Gourmet_Food.jsonl.gz",
+    "Pet_Supplies": AMAZON_REVIEWS_ROOT / "raw" / "meta_categories" / "meta_Pet_Supplies.jsonl.gz",
+}
 
 
 @dataclass(frozen=True)
@@ -189,11 +199,155 @@ def normalize_injected_errors(errors: Any, label: str) -> list[dict[str, Any]]:
     return normalized_errors
 
 
+def get_metadata_file(category: str) -> Path:
+    if category not in METADATA_FILES:
+        raise KeyError(f"Missing metadata file configuration for category: {category}")
+    metadata_file = METADATA_FILES[category]
+    require_file(metadata_file, f"{category} metadata")
+    return metadata_file
+
+
+def idf_cache_file(category: str) -> Path:
+    return IDF_CACHE_DIR / f"{category}_full_word_idf.json"
+
+
+def idf_cache_meta_file(category: str) -> Path:
+    return IDF_CACHE_DIR / f"{category}_full_word_idf.meta.json"
+
+
+def metadata_signature(metadata_file: Path) -> dict[str, Any]:
+    stat = metadata_file.stat()
+    return {
+        "metadata_file": str(metadata_file),
+        "metadata_size": stat.st_size,
+        "metadata_mtime_ns": stat.st_mtime_ns,
+        "idf_mode": "full_metadata",
+        "formula": "log(N / (df + 1)); unknown query token idf = 5.0",
+        "text_fields": ["title", "brand", "description"],
+    }
+
+
+def load_cached_word_idf(category: str, metadata_file: Path) -> dict[str, float] | None:
+    cache_file = idf_cache_file(category)
+    cache_meta_file = idf_cache_meta_file(category)
+    if not cache_file.is_file() or not cache_meta_file.is_file():
+        return None
+    cache_meta = read_json_object(cache_meta_file, f"{category} IDF cache metadata")
+    expected_signature = metadata_signature(metadata_file)
+    if cache_meta.get("signature") != expected_signature:
+        return None
+    with cache_file.open("r", encoding="utf-8") as f:
+        cached_word_idf = json.load(f)
+    if not isinstance(cached_word_idf, dict):
+        raise TypeError(f"IDF cache must contain a JSON object: {cache_file}")
+    word_idf = {}
+    for word, value in cached_word_idf.items():
+        if not isinstance(word, str):
+            raise TypeError(f"IDF cache contains a non-string token in {cache_file}")
+        if not isinstance(value, (int, float)):
+            raise TypeError(f"IDF cache value for token {word!r} must be numeric")
+        word_idf[word] = float(value)
+    print(f"[IDF] loaded cache category={category} tokens={len(word_idf)} file={cache_file}", flush=True)
+    return word_idf
+
+
+def read_json_object(path: Path, label: str) -> dict[str, Any]:
+    require_file(path, label)
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    return require_dict(data, label)
+
+
+def extract_metadata_text(item: dict[str, Any]) -> str:
+    description = item.get("description")
+    if description is None:
+        description_text = ""
+    elif isinstance(description, list):
+        description_text = " ".join(str(part) for part in description if part is not None)
+    elif isinstance(description, str):
+        description_text = description
+    else:
+        raise TypeError(f"Unexpected description type in metadata: {type(description).__name__}")
+
+    fields = [
+        item.get("title", ""),
+        item.get("brand", ""),
+        description_text,
+    ]
+    return " ".join(str(field) for field in fields if field)
+
+
+def build_full_word_idf(metadata_file: Path) -> tuple[dict[str, float], int]:
+    word_doc_freq: Counter[str] = Counter()
+    total_docs = 0
+    with gzip.open(metadata_file, "rt", encoding="utf-8") as f:
+        for line in f:
+            item = json.loads(line)
+            item = require_dict(item, f"metadata line {total_docs + 1}")
+            words = set(extract_metadata_text(item).lower().split())
+            for word in words:
+                if len(word) > 1:
+                    word_doc_freq[word] += 1
+            total_docs += 1
+            if total_docs % 100000 == 0:
+                print(f"[IDF] scanned docs={total_docs} metadata={metadata_file}", flush=True)
+
+    if total_docs == 0:
+        raise ValueError(f"Metadata file contains no documents: {metadata_file}")
+
+    word_idf = {word: math.log(total_docs / (df + 1)) for word, df in word_doc_freq.items()}
+    rare_word_floor = math.log(total_docs / 10)
+    for word, df in word_doc_freq.items():
+        if len(word) >= 4 and df < 10:
+            word_idf[word] = max(word_idf[word], rare_word_floor)
+    return word_idf, total_docs
+
+
+def save_word_idf_cache(category: str, metadata_file: Path, word_idf: dict[str, float], total_docs: int) -> None:
+    IDF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_file = idf_cache_file(category)
+    cache_meta_file = idf_cache_meta_file(category)
+    with cache_file.open("w", encoding="utf-8") as f:
+        json.dump(dict(sorted(word_idf.items())), f, ensure_ascii=False)
+        f.write("\n")
+    cache_meta = {
+        "category": category,
+        "total_docs": total_docs,
+        "num_tokens": len(word_idf),
+        "signature": metadata_signature(metadata_file),
+    }
+    write_json(cache_meta_file, cache_meta)
+    print(
+        f"[IDF] saved cache category={category} docs={total_docs} tokens={len(word_idf)} file={cache_file}",
+        flush=True,
+    )
+
+
+def get_or_build_word_idf(category: str) -> dict[str, float]:
+    metadata_file = get_metadata_file(category)
+    cached_word_idf = load_cached_word_idf(category, metadata_file)
+    if cached_word_idf is not None:
+        return cached_word_idf
+    print(f"[IDF] building full metadata IDF category={category} metadata={metadata_file}", flush=True)
+    word_idf, total_docs = build_full_word_idf(metadata_file)
+    save_word_idf_cache(category, metadata_file, word_idf, total_docs)
+    return word_idf
+
+
+def compute_query_idf(query_text: str, word_idf: dict[str, float]) -> float:
+    words = query_text.lower().split()
+    if not words:
+        return 0.0
+    idf_values = [word_idf.get(word, UNKNOWN_WORD_IDF) for word in words]
+    return float(sum(idf_values) / len(idf_values))
+
+
 def build_dataset_rows(
     category: str,
     clean_rows: list[Any],
     noisy_index: dict[tuple[str, str, str], dict[str, Any]],
     level_index: dict[str, dict[str, int]],
+    word_idf: dict[str, float],
 ) -> list[dict[str, Any]]:
     dataset_rows: list[dict[str, Any]] = []
     seen_sample_keys: set[tuple[str, str, str, str]] = set()
@@ -233,6 +387,7 @@ def build_dataset_rows(
                 "profile_complexity_level": profile_complexity_level,
                 "correct_query": clean_query,
                 "correct_word_count": word_count,
+                "idf": compute_query_idf(clean_query, word_idf),
                 "attrs_used": attrs_used,
                 "has_error_query": noisy_item is not None,
                 "error_query": None,
@@ -295,7 +450,8 @@ def build_one_category(paths: DatasetPaths) -> dict[str, Any]:
     noisy_rows = read_adjacent_json_objects(paths.noisy_query_file, f"{paths.category} noisy query")
     level_index = load_level_index(paths.level_file)
     noisy_index = build_noisy_index(noisy_rows)
-    dataset_rows = build_dataset_rows(paths.category, clean_rows, noisy_index, level_index)
+    word_idf = get_or_build_word_idf(paths.category)
+    dataset_rows = build_dataset_rows(paths.category, clean_rows, noisy_index, level_index, word_idf)
     paired_rows = [row for row in dataset_rows if row["has_error_query"]]
 
     write_jsonl(paths.dataset_file, dataset_rows)

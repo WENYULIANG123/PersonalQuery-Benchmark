@@ -4,18 +4,33 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import shutil
+import socket
+import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import requests
 from huggingface_hub import HfApi
 
 
 SOURCE_ROOT = Path("/home/wlia0047/ar57/wenyu/result/personal_query/11_query_dataset")
 UPLOAD_ROOT = Path("/home/wlia0047/ar57/wenyu/result/personal_query/12_personalized_query_hf")
 REPO_NAME = "personalized-query"
+HF_SSH_TARGET = "m3-login2"
+
+_NETWORK_READY = False
+_NETWORK_LOCK = threading.Lock()
+_TUNNEL_PROCESS = None
+_TUNNEL_PORT = None
+_ORIGINAL_GETADDRINFO = socket.getaddrinfo
+_ORIGINAL_SOCKET_CLASS = socket.socket
+_REMOTE_DNS_CACHE: dict[tuple[str, int | str], list] = {}
 
 
 @dataclass(frozen=True)
@@ -36,7 +51,182 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Upload one unified Hugging Face dataset repository.")
     parser.add_argument("--namespace", required=True, help="Hugging Face user or organization namespace.")
     parser.add_argument("--create-repo", action="store_true", help="Create the public dataset repo before upload.")
+    parser.add_argument("--max-upload-attempts", type=int, default=5, help="Maximum upload attempts for transient network errors.")
+    parser.add_argument(
+        "--network-mode",
+        choices=["ssh-socks", "direct"],
+        default="ssh-socks",
+        help="Network mode. ssh-socks routes Hugging Face traffic through the login node.",
+    )
     return parser.parse_args()
+
+
+def get_raw_socket_class():
+    if getattr(socket.socket, "__module__", "") == "socks":
+        import socks
+        return socks._orgsocket
+    return _ORIGINAL_SOCKET_CLASS
+
+
+def choose_local_socks_port() -> int:
+    raw_socket_class = get_raw_socket_class()
+    with raw_socket_class(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def wait_for_socks_tunnel(process, port: int, timeout_seconds: int = 10) -> None:
+    raw_socket_class = get_raw_socket_class()
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        return_code = process.poll()
+        if return_code is not None:
+            stderr = process.stderr.read().strip() if process.stderr else ""
+            raise RuntimeError(f"SSH SOCKS tunnel failed: return_code={return_code}, stderr={stderr}")
+
+        with raw_socket_class(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.5)
+            if probe.connect_ex(("127.0.0.1", port)) == 0:
+                return
+
+        time.sleep(0.1)
+
+    process.terminate()
+    raise TimeoutError(f"SSH SOCKS tunnel startup timed out: 127.0.0.1:{port}")
+
+
+def cleanup_socks_tunnel() -> None:
+    global _TUNNEL_PROCESS
+    if _TUNNEL_PROCESS is None:
+        return
+    if _TUNNEL_PROCESS.poll() is None:
+        _TUNNEL_PROCESS.terminate()
+        try:
+            _TUNNEL_PROCESS.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _TUNNEL_PROCESS.kill()
+            _TUNNEL_PROCESS.wait(timeout=5)
+
+
+def should_use_remote_dns(host: str) -> bool:
+    if not host:
+        return False
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return False
+    if host.endswith(".local"):
+        return False
+    return any(
+        marker in host
+        for marker in (
+            "huggingface.co",
+            "hf.co",
+            "hf.space",
+            "xethub.hf.co",
+            "amazonaws.com",
+            "cloudfront.net",
+        )
+    )
+
+
+def resolve_host_on_login_node(host: str, port: int | str, family=0, type=0, proto=0, flags=0):
+    cache_key = (host, port)
+    cached = _REMOTE_DNS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    cmd = [
+        "ssh",
+        "-q",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        HF_SSH_TARGET,
+        "getent",
+        "ahostsv4",
+        host,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
+    if result.returncode != 0:
+        raise socket.gaierror(f"login-node DNS failed for {host}: {result.stderr.strip()}")
+
+    ips = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        ip = parts[0]
+        if ip not in ips:
+            ips.append(ip)
+
+    if not ips:
+        raise socket.gaierror(f"login-node DNS returned no IPv4 addresses for {host}")
+
+    resolved = []
+    for ip in ips:
+        resolved.extend(_ORIGINAL_GETADDRINFO(ip, port, family, type, proto, flags))
+    _REMOTE_DNS_CACHE[cache_key] = resolved
+    print(f"[NETWORK] login-node DNS host={host} ips={ips[:4]}", flush=True)
+    return resolved
+
+
+def patch_dns_for_socks() -> None:
+    def patched_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        lookup_host = host.decode("ascii") if isinstance(host, bytes) else host
+        if isinstance(lookup_host, str) and should_use_remote_dns(lookup_host):
+            return resolve_host_on_login_node(lookup_host, port, family, type, proto, flags)
+        return _ORIGINAL_GETADDRINFO(host, port, family, type, proto, flags)
+
+    socket.getaddrinfo = patched_getaddrinfo
+
+
+def ensure_ssh_socks_network() -> None:
+    global _NETWORK_READY, _TUNNEL_PROCESS, _TUNNEL_PORT
+    if _NETWORK_READY:
+        return
+
+    with _NETWORK_LOCK:
+        if _NETWORK_READY:
+            return
+
+        import socks
+
+        port = choose_local_socks_port()
+        cmd = [
+            "ssh",
+            "-q",
+            "-N",
+            "-D",
+            f"127.0.0.1:{port}",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            HF_SSH_TARGET,
+        ]
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        wait_for_socks_tunnel(process, port)
+
+        socks.set_default_proxy(socks.SOCKS5, "127.0.0.1", port, rdns=True)
+        socket.socket = socks.socksocket
+        patch_dns_for_socks()
+
+        _TUNNEL_PROCESS = process
+        _TUNNEL_PORT = port
+        _NETWORK_READY = True
+        atexit.register(cleanup_socks_tunnel)
+        print(f"[NETWORK] SSH SOCKS enabled socks=127.0.0.1:{port} ssh_target={HF_SSH_TARGET}", flush=True)
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -211,6 +401,7 @@ Total paired rows: {aggregate_summary["num_paired_rows"]}
 | `profile_complexity_level` | integer | User profile complexity level from Stage 5. |
 | `correct_query` | string | Correct query generated in Stage 6. |
 | `correct_word_count` | integer | Word count of `correct_query`. |
+| `idf` | float | Mean token IDF of `correct_query`, computed from the full product metadata corpus for the category. |
 | `attrs_used` | object | Product attributes used to generate the query. |
 | `has_error_query` | boolean | Whether a Stage 7 error query is available. |
 | `error_query` | string or null | Error query generated in Stage 7. |
@@ -233,6 +424,7 @@ pets_full = load_dataset("{namespace}/{REPO_NAME}", name="pets", split="full")
 - Stage 5 provides the user profile complexity level.
 - Stage 6 generates correct personalized queries.
 - Stage 7 injects user-specific error query variants when a matching error pattern is available.
+- IDF is computed from each category's full product metadata corpus and cached locally for reuse.
 
 ## Intended Use
 
@@ -261,19 +453,41 @@ def verify_upload_root() -> None:
         raise RuntimeError(f"Upload root contains unexpected files: {unexpected_files}")
 
 
-def upload(namespace: str, create_repo: bool) -> str:
+def upload(namespace: str, create_repo: bool, max_upload_attempts: int) -> str:
     repo_id = f"{namespace}/{REPO_NAME}"
     api = HfApi()
     if create_repo:
         api.create_repo(repo_id=repo_id, repo_type="dataset", private=False, exist_ok=False)
         print(f"[CREATED] repo_id={repo_id}", flush=True)
 
-    commit_info = api.upload_folder(
-        folder_path=str(UPLOAD_ROOT),
-        repo_id=repo_id,
-        repo_type="dataset",
-        commit_message="Upload unified personalized query dataset",
-    )
+    if max_upload_attempts < 1:
+        raise ValueError("--max-upload-attempts must be >= 1")
+
+    commit_info = None
+    for attempt in range(1, max_upload_attempts + 1):
+        try:
+            print(f"[UPLOAD] attempt={attempt}/{max_upload_attempts} repo_id={repo_id}", flush=True)
+            commit_info = api.upload_folder(
+                folder_path=str(UPLOAD_ROOT),
+                repo_id=repo_id,
+                repo_type="dataset",
+                commit_message="Upload unified personalized query dataset",
+            )
+            break
+        except requests.exceptions.RequestException as exc:
+            if attempt == max_upload_attempts:
+                raise
+            sleep_seconds = min(60, 10 * attempt)
+            print(
+                f"[UPLOAD_RETRY] attempt={attempt} failed error={exc.__class__.__name__}; "
+                f"sleep_seconds={sleep_seconds}",
+                flush=True,
+            )
+            time.sleep(sleep_seconds)
+
+    if commit_info is None:
+        raise RuntimeError(f"Upload did not produce a commit for {repo_id}")
+
     remote_files = set(api.list_repo_files(repo_id=repo_id, repo_type="dataset"))
     expected_remote_files = {str(path) for path in required_upload_files()}
     missing_remote_files = sorted(expected_remote_files - remote_files)
@@ -285,10 +499,12 @@ def upload(namespace: str, create_repo: bool) -> str:
 
 def main() -> None:
     args = parse_args()
+    if args.network_mode == "ssh-socks":
+        ensure_ssh_socks_network()
     copy_required_files()
     write_readme(args.namespace)
     verify_upload_root()
-    repo_id = upload(args.namespace, args.create_repo)
+    repo_id = upload(args.namespace, args.create_repo, args.max_upload_attempts)
     print(f"[SUMMARY] repo_id={repo_id} local_upload_root={UPLOAD_ROOT}", flush=True)
 
 
