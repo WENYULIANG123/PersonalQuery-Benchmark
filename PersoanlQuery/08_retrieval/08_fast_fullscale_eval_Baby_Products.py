@@ -909,6 +909,38 @@ def compute_idf(queries: List[str], doc_count: int) -> float:
     avg_df = sum(word_freq.values()) / len(word_freq) if word_freq else 1
     return np.log(doc_count / avg_df + 1)
 
+
+def save_word_idf_dict(word_idf: Dict[str, float], sample_size: int, output_dir: str) -> Tuple[str, str]:
+    """保存构建好的词级 IDF 字典。
+
+    保存两份文件：
+    1. `word_idf.pkl`：完整词典，供后续直接加载复用
+    2. `word_idf_summary.json`：概要信息，便于快速检查
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    idf_pickle_path = os.path.join(output_dir, "word_idf.pkl")
+    idf_summary_path = os.path.join(output_dir, "word_idf_summary.json")
+
+    with open(idf_pickle_path, "wb") as f:
+        pickle.dump(word_idf, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    sorted_items = sorted(word_idf.items(), key=lambda x: x[1], reverse=True)
+    summary = {
+        "timestamp": datetime.now().isoformat(),
+        "category_name": CATEGORY_NAME,
+        "sample_size": sample_size,
+        "vocab_size": len(word_idf),
+        "top_100_highest_idf": [
+            {"token": token, "idf": float(idf_value)}
+            for token, idf_value in sorted_items[:100]
+        ]
+    }
+    with open(idf_summary_path, "w") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    return idf_pickle_path, idf_summary_path
+
 def compute_oracle_random_baseline(relevant_asin: str, doc_ids: List[str], n_trials: int = 100, seed: int = 42) -> Dict:
     """计算oracle-aware随机基线：给定相关文档在随机位置时的期望性能"""
     np.random.seed(seed)
@@ -2439,7 +2471,11 @@ def main():
 
     # 构建词IDF字典（用于分层分析）- 只需构建一次
     log("\n构建词IDF字典（用于分层分析）...")
-    word_idf = build_word_idf_dict(META_FILE, sample_size=50000)
+    idf_sample_size = 50000
+    word_idf = build_word_idf_dict(META_FILE, sample_size=idf_sample_size)
+    idf_pickle_path, idf_summary_path = save_word_idf_dict(word_idf, idf_sample_size, OUTPUT_DIR)
+    log(f"  词级IDF已保存到: {idf_pickle_path}")
+    log(f"  IDF概要已保存到: {idf_summary_path}")
 
     # 加载 doc_ids 用于随机基线
     embeddings_path = None
@@ -2644,6 +2680,8 @@ def main():
             'category_name': CATEGORY_NAME,
             'query_types': QUERY_TYPES,
             'query_categories': QUERY_CATEGORIES,
+            'word_idf_pickle_file': idf_pickle_path,
+            'word_idf_summary_file': idf_summary_path,
             'results_by_category_and_type': sanitize_for_json(all_results_by_category_and_type),
             'all_results_combined': sanitize_for_json(all_results_combined),
             'experiment1_paired_ttest': sanitize_for_json(pttest_results) if pttest_results else None,
