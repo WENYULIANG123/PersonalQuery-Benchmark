@@ -33,6 +33,22 @@ from utils import log_with_timestamp, build_document_text
 # Prevents CUDA/GIL deadlocks when multiple threads call model.encode() simultaneously
 _model_inference_lock = threading.Lock()
 
+
+def _resolve_local_hf_snapshot(repo_id: str) -> str:
+    hf_home = os.environ.get("HF_HOME")
+    if not hf_home:
+        raise RuntimeError("HF_HOME must be set for offline Hugging Face loading")
+    repo_cache_dir = os.path.join(hf_home, "models--" + repo_id.replace("/", "--"))
+    ref_file = os.path.join(repo_cache_dir, "refs", "main")
+    if not os.path.exists(ref_file):
+        raise FileNotFoundError(f"Hugging Face ref file not found for {repo_id}: {ref_file}")
+    with open(ref_file, "r") as f:
+        snapshot_hash = f.read().strip()
+    snapshot_dir = os.path.join(repo_cache_dir, "snapshots", snapshot_hash)
+    if not os.path.exists(snapshot_dir):
+        raise FileNotFoundError(f"Hugging Face snapshot not found for {repo_id}: {snapshot_dir}")
+    return snapshot_dir
+
 def _require_cuda_device() -> torch.device:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for retrieval models in this codepath")
@@ -1533,8 +1549,9 @@ class ColBERTRetriever:
         if self.model is None:
             log_with_timestamp(f"  Loading ColBERTv2 model: {self.model_name}")
             from transformers import AutoModel, AutoTokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self.model = AutoModel.from_pretrained(self.model_name)
+            model_path = _resolve_local_hf_snapshot(self.model_name)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+            self.model = AutoModel.from_pretrained(model_path, local_files_only=True)
             self.model = self.model.to(self.device)
             self.model.eval()
         return self.model
@@ -1641,7 +1658,8 @@ class ColBERTRetriever:
         try:
             with Run().context(RunConfig(nranks=nranks, experiment=exp_name, root=self._temp_dir)):
                 config = ColBERTConfig(nbits=self.nbits, root=self._temp_dir)
-                indexer = Indexer(checkpoint=self.model_name, config=config)
+                checkpoint_path = _resolve_local_hf_snapshot(self.model_name)
+                indexer = Indexer(checkpoint=checkpoint_path, config=config)
                 indexer.index(name=exp_name, collection=doc_tsv_path, overwrite=True)
 
             # 完成
@@ -2836,10 +2854,9 @@ class SPLADERetriever:
         if self.model is None:
             log_with_timestamp(f"  Loading SPLADE++ model: {self.model_name}")
             from transformers import AutoModelForMaskedLM, AutoTokenizer
-            import os
-            # Use model_name directly so transformers handles cache automatically
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self.model = AutoModelForMaskedLM.from_pretrained(self.model_name)
+            model_path = _resolve_local_hf_snapshot(self.model_name)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+            self.model = AutoModelForMaskedLM.from_pretrained(model_path, local_files_only=True)
             self.model = self.model.half()  # Use FP16 to reduce memory
             self.model = self.model.to(self.device)
             self.model.eval()

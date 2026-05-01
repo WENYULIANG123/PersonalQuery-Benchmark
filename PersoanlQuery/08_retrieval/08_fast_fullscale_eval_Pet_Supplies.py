@@ -8,8 +8,9 @@
 import os
 os.environ["HF_HOME"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
 os.environ["HF_HUB_CACHE"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
-os.environ["HF_HUB_OFFLINE"] = "0"
-os.environ["TRANSFORMERS_OFFLINE"] = "0"
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_DATASETS_OFFLINE"] = "1"
 COLBERTV2_CUDA_HOME = "/usr/local/cuda-12.5"
 COLBERTV2_TORCH_EXTENSIONS_DIR = "/home/wlia0047/ar57_scratch/wenyu/torch_extensions/colbertv2_cuda125"
 COLBERTV2_HOST_CC = "/usr/bin/gcc"
@@ -622,16 +623,33 @@ def load_colbertv2_doc_ids(output_root: str) -> List[str]:
     return doc_ids
 
 
+def resolve_local_hf_snapshot(repo_id: str) -> str:
+    repo_cache_dir = os.path.join(
+        os.environ["HF_HOME"],
+        "models--" + repo_id.replace("/", "--")
+    )
+    ref_file = os.path.join(repo_cache_dir, "refs", "main")
+    if not os.path.exists(ref_file):
+        raise FileNotFoundError(f"Hugging Face ref file not found for {repo_id}: {ref_file}")
+    with open(ref_file, "r") as f:
+        snapshot_hash = f.read().strip()
+    snapshot_dir = os.path.join(repo_cache_dir, "snapshots", snapshot_hash)
+    if not os.path.exists(snapshot_dir):
+        raise FileNotFoundError(f"Hugging Face snapshot not found for {repo_id}: {snapshot_dir}")
+    return snapshot_dir
+
+
 def build_colbertv2_searcher(output_root: str, doc_ids: List[str]):
     from colbert.infra import Run, RunConfig, ColBERTConfig
     from colbert import Searcher
 
     collection = [f"pid {pid} asin {asin}" for pid, asin in enumerate(doc_ids)]
+    checkpoint_path = resolve_local_hf_snapshot("colbert-ir/colbertv2.0")
     with Run().context(RunConfig(experiment="colbertv2_index", root=output_root)):
         config = ColBERTConfig(root=output_root)
         return Searcher(
             index="colbertv2_index",
-            checkpoint="colbert-ir/colbertv2.0",
+            checkpoint=checkpoint_path,
             collection=collection,
             config=config,
         )
