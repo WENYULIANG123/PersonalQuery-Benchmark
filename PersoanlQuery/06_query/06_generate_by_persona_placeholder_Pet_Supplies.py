@@ -192,6 +192,23 @@ def _format_attrs_for_prompt(attrs: dict) -> str:
     return '\n'.join(lines)
 
 
+def _attrs_used_from_source(attrs: dict) -> dict:
+    """Return the source product attributes used for both ACL and CCOMP queries."""
+    if not attrs:
+        raise ValueError("source attrs must not be empty")
+    attrs_used = {}
+    for key, info in attrs.items():
+        if not isinstance(info, dict):
+            raise TypeError(f"source attr {key} must be a dict")
+        if 'value' not in info:
+            raise KeyError(f"source attr {key} is missing value")
+        value = info['value']
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"source attr {key}.value must be a non-empty string")
+        attrs_used[key] = value.strip()
+    return attrs_used
+
+
 def build_direct_level0_prompt(attrs: dict) -> tuple:
     """直接生成 Level 0 查询（简单句，无 which/that）"""
     system_base = _PROMPTS[f'system_base_shared_{CATEGORY}']
@@ -202,13 +219,13 @@ Product attributes:
 
 Requirements:
 - Output JSON only: {{"level": 0, "query": "...", "attrs_used": {{"A1": "{{value}}", ...}}}}
-- Include ALL 5 attributes in the query
+- Include every listed attribute in the query
 - Query must be a natural e-commerce search phrase in FIRST PERSON
 - Level 0 = simple sentence with NO clauses (no 'which', no 'that')
 - Each attribute value appears EXACTLY ONCE in the query
 
 Example output:
-{{"level": 0, "query": "I need a product that has these features", "attrs_used": {{"A1": "...", "A2": "...", "A3": "...", "A4": "...", "A5": "..."}}}}"""
+{{"level": 0, "query": "I need a product that has these features", "attrs_used": {{"A1": "...", "A2": "..."}}}}"""
     return system_base, user_content
 
 
@@ -222,13 +239,13 @@ Product attributes:
 
 Requirements:
 - Output JSON only: {{"level": {target_level}, "query": "...", "attrs_used": {{"A1": "{{value}}", "A2": "{{value}}", ...}}}}
-- Include ALL 5 attributes in the query
+- Include every listed attribute in the query
 - Add EXACTLY {target_level} 'which' clauses (each with ONE characteristic)
 - Query must be a natural e-commerce search phrase in FIRST PERSON
 - Each attribute value appears EXACTLY ONCE in the query
 
 Example output:
-{{"level": {target_level}, "query": "I need ... which is ... which is ...", "attrs_used": {{"A1": "...", "A2": "...", "A3": "...", "A4": "...", "A5": "..."}}}}"""
+{{"level": {target_level}, "query": "I need ... which is ... which is ...", "attrs_used": {{"A1": "...", "A2": "..."}}}}"""
     return system_base, user_content
 
 
@@ -242,13 +259,13 @@ Product attributes:
 
 Requirements:
 - Output JSON only: {{"level": {target_level}, "query": "...", "attrs_used": {{"A1": "...", ...}}}}
-- Include ALL 5 attributes in the query
+- Include every listed attribute in the query
 - Add EXACTLY {target_level} 'that' clauses (each with ONE user need/preference)
 - Query must be a natural e-commerce search phrase in FIRST PERSON
 - Each attribute value appears EXACTLY ONCE in the query
 
 Example output:
-{{"level": {target_level}, "query": "I need ... that ... that ...", "attrs_used": {{"A1": "...", "A2": "...", "A3": "...", "A4": "...", "A5": "..."}}}}"""
+{{"level": {target_level}, "query": "I need ... that ... that ...", "attrs_used": {{"A1": "...", "A2": "..."}}}}"""
     return system_base, user_content
 
 
@@ -684,6 +701,7 @@ def main():
         """处理单个用户，直接生成对应等级的查询"""
         uid = persona['user_id']
         attrs = persona['original_attrs']
+        source_attrs_used = _attrs_used_from_source(attrs)
         target_acl_level = persona['acl_level']
         target_ccomp_level = persona['ccomp_level']
 
@@ -709,7 +727,7 @@ def main():
                 'level': target_acl_level,
                 'query': query,
                 'word_count': count_words(query),
-                'attrs_used': acl_data.get('attrs_used', {}),
+                'attrs_used': dict(source_attrs_used),
             }
         else:
             # Level 0: 生成简单句查询
@@ -732,7 +750,7 @@ def main():
                 'level': 0,
                 'query': query,
                 'word_count': count_words(query),
-                'attrs_used': acl_data.get('attrs_used', {}),
+                'attrs_used': dict(source_attrs_used),
             }
 
         # ========== 直接生成 CCOMP 查询 ==========
@@ -757,7 +775,7 @@ def main():
                 'level': target_ccomp_level,
                 'query': query,
                 'word_count': count_words(query),
-                'attrs_used': ccomp_data.get('attrs_used', {}),
+                'attrs_used': dict(source_attrs_used),
             }
         else:
             # Level 0: 生成简单句查询
@@ -780,7 +798,7 @@ def main():
                 'level': 0,
                 'query': query,
                 'word_count': count_words(query),
-                'attrs_used': ccomp_data.get('attrs_used', {}),
+                'attrs_used': dict(source_attrs_used),
             }
 
         # ========== 构建最终结果 ==========
