@@ -15,6 +15,7 @@ from typing import Any
 
 REPO_ROOT = Path("/home/wlia0047/ar57/wenyu")
 RESULT_ROOT = REPO_ROOT / "result" / "personal_query"
+DATASET_ROOT = REPO_ROOT / "dataset"
 AMAZON_REVIEWS_ROOT = REPO_ROOT / "data" / "Amazon-Reviews-2023"
 IDF_CACHE_DIR = RESULT_ROOT / "11_query_dataset" / "idf_cache"
 UNKNOWN_WORD_IDF = 5.0
@@ -55,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-root",
-        required=True,
+        default=str(DATASET_ROOT),
         help="Directory where per-category dataset folders will be written.",
     )
     return parser.parse_args()

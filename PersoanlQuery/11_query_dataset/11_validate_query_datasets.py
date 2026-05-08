@@ -8,7 +8,7 @@ from collections import Counter
 from pathlib import Path
 
 
-DATASET_ROOT = Path("/home/wlia0047/ar57/wenyu/result/personal_query/11_query_dataset")
+DATASET_ROOT = Path("/home/wlia0047/ar57/wenyu/dataset")
 EXPECTED_FIELDS = [
     "category",
     "uuid",

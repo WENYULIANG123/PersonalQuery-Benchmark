@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -15,11 +16,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# hf-xet uses native networking and bypasses the Python socket/DNS patches below.
+os.environ["HF_HUB_DISABLE_XET"] = "1"
+
 import requests
 from huggingface_hub import HfApi
 
 
-SOURCE_ROOT = Path("/home/wlia0047/ar57/wenyu/result/personal_query/11_query_dataset")
+SOURCE_ROOT = Path("/home/wlia0047/ar57/wenyu/dataset")
 UPLOAD_ROOT = Path("/home/wlia0047/ar57/wenyu/result/personal_query/12_personalized_query_hf")
 REPO_NAME = "personalized-query"
 HF_SSH_TARGET = "m3-login2"
