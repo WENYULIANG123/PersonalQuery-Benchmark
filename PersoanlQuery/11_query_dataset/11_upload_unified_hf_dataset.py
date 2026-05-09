@@ -378,7 +378,7 @@ Each config corresponds to one product category:
 
 Each config has two splits:
 
-- `full`: all correct Stage 6 queries. Rows without Stage 7 error query keep `error_query` as `null`.
+- `full`: all final correct queries. Rows without a Stage 7 noisy pair keep `error_query` as `null`.
 - `paired`: only rows where a correct query has a paired error query.
 
 ## Dataset Size
@@ -401,8 +401,8 @@ Total paired rows: {aggregate_summary["num_paired_rows"]}
 | `uuid` | string | User identifier. |
 | `asin` | string | Amazon product identifier. |
 | `query_category` | string | Query type: `wide` or `deep`. |
-| `complexity_level` | integer | Complexity level of the generated Stage 6 query. |
-| `correct_query` | string | Correct query generated in Stage 6. |
+| `complexity_level` | integer | Complexity level of the underlying generated query. |
+| `correct_query` | string | Final correct query used for evaluation; this may be the original Stage 6 query or a Stage 7 revised query. |
 | `correct_word_count` | integer | Word count of `correct_query`. |
 | `idf` | float | Mean token IDF of `correct_query`, computed from the full product metadata corpus for the category. |
 | `attrs_used` | object | Product attributes used to generate the query. |
@@ -425,7 +425,7 @@ pets_full = load_dataset("{namespace}/{REPO_NAME}", name="pets", split="full")
 ## Source Pipeline
 
 - Stage 5 provides the user profile complexity level.
-- Stage 6 generates correct personalized queries.
+- Stage 6 generates the base personalized queries, and Stage 7 may revise a correct query before noisy injection.
 - Stage 7 injects user-specific error query variants when a matching error pattern is available.
 - IDF is computed from each category's full product metadata corpus and cached locally for reuse.
 

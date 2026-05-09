@@ -107,13 +107,13 @@ This dataset contains personalized product search queries for the `{target.categ
 
 Each record is built from the Personal Query pipeline:
 
-- Stage 6 generated correct personalized queries.
+- Stage 6 generated the base personalized queries, and Stage 7 may revise a correct query when an anchor must be inserted before noisy injection.
 - Stage 7 injected user-specific error query variants when a matching error pattern was available.
 - Stage 5 provided the user profile complexity level.
 
 ## Files
 
-- `data.jsonl`: all correct Stage 6 queries. Rows without Stage 7 error query keep `error_query` as `null`.
+- `data.jsonl`: all final correct queries. Rows without a Stage 7 noisy pair keep `error_query` as `null`.
 - `paired_data.jsonl`: only rows where a correct query has a paired error query.
 - `summary.json`: generation statistics for this category.
 
@@ -145,8 +145,8 @@ Each record is built from the Personal Query pipeline:
 | `uuid` | string | User identifier. |
 | `asin` | string | Amazon product identifier. |
 | `query_category` | string | Query type: `wide` or `deep`. |
-| `complexity_level` | integer | Complexity level of the generated Stage 6 query. |
-| `correct_query` | string | Correct query generated in Stage 6. |
+| `complexity_level` | integer | Complexity level of the underlying generated query. |
+| `correct_query` | string | Final correct query used for evaluation; this may be the original Stage 6 query or a Stage 7 revised query. |
 | `correct_word_count` | integer | Word count of `correct_query`. |
 | `attrs_used` | object | Product attributes used to generate the query. |
 | `has_error_query` | boolean | Whether a Stage 7 error query is available. |

@@ -390,11 +390,12 @@ def build_dataset_rows(
 
             if noisy_item is not None:
                 ground_truth_query = require_text(noisy_item, "ground_truth_query", f"noisy item {noisy_key}")
-                if ground_truth_query != clean_query:
-                    raise ValueError(
-                        "Stage 7 ground_truth_query does not match Stage 6 clean query for "
-                        f"{noisy_key}: {ground_truth_query!r} != {clean_query!r}"
-                    )
+                # When Stage 7 rewrites a query to insert a valid typo anchor,
+                # the revised ground-truth query becomes the canonical clean query
+                # for downstream dataset construction.
+                row["correct_query"] = ground_truth_query
+                row["correct_word_count"] = len(ground_truth_query.split())
+                row["idf"] = compute_query_idf(ground_truth_query, word_idf)
                 row["error_query"] = require_text(noisy_item, "noisy_query", f"noisy item {noisy_key}")
                 row["injected_errors"] = normalize_injected_errors(
                     noisy_item["injected_errors"], f"noisy item {noisy_key}.injected_errors"
