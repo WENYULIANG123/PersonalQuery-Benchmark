@@ -1274,8 +1274,39 @@ def configure_cuda_env_for_colbert_extension_build() -> None:
     log_with_timestamp(f"[DEBUG] ColBERTv2: CPLUS_INCLUDE_PATH={os.environ.get('CPLUS_INCLUDE_PATH')}")
 
 
+def _get_torch_extension_build_root() -> str:
+    from torch.utils.cpp_extension import get_default_build_root
+
+    root_extensions_directory = os.environ.get("TORCH_EXTENSIONS_DIR")
+    if root_extensions_directory is None:
+        root_extensions_directory = get_default_build_root()
+        if torch.version.hip is not None:
+            accelerator_str = f"rocm{torch.version.hip.replace('.', '')}"
+        elif torch.version.cuda is not None:
+            accelerator_str = f"cu{torch.version.cuda.replace('.', '')}"
+        else:
+            accelerator_str = "cpu"
+        python_version = f"py{sys.version_info.major}{sys.version_info.minor}{getattr(sys, 'abiflags', '')}"
+        root_extensions_directory = os.path.join(root_extensions_directory, f"{python_version}_{accelerator_str}")
+
+    return root_extensions_directory
+
+
+def remove_stale_colbert_extension_locks() -> None:
+    build_root = _get_torch_extension_build_root()
+    extension_names = ("decompress_residuals_cpp", "packbits_cpp")
+
+    for extension_name in extension_names:
+        lock_path = os.path.join(build_root, extension_name, "lock")
+        if not os.path.exists(lock_path):
+            continue
+        os.remove(lock_path)
+        log_with_timestamp(f"[DEBUG] ColBERTv2: removed stale lock file {lock_path}")
+
+
 def preflight_colbert_cuda_extension_build() -> None:
     log_with_timestamp("[DEBUG] ColBERTv2: CUDA extension preflight build started")
+    remove_stale_colbert_extension_locks()
 
     include_candidates = []
     for env_key in ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"):

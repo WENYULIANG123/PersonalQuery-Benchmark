@@ -46,6 +46,7 @@ with open(QUERY_CONFIG_FILE, 'r', encoding='utf-8') as f:
 NUM_USERS_TO_TEST = _CONFIG['num_users_to_test']
 MAX_WORKERS = _CONFIG['max_workers']
 USE_MINIMAXIO = _CONFIG.get('use_minimaxio', False)
+REQUIRED_ATTR_COUNT = 5
 
 with open(CCOMP_PROMPTS_FILE, 'r', encoding='utf-8') as f:
     _PROMPTS = json.load(f)
@@ -66,14 +67,54 @@ def count_words(text: str) -> int:
     return len(text.split())
 
 
+def _format_dict_key(key: str) -> str:
+    """Convert metadata dict keys into readable attribute labels."""
+    return re.sub(r'\s+', ' ', key.replace('_', ' ')).strip()
+
+
+def _normalize_scalar_attr(value) -> str | None:
+    if value is None or value == '':
+        return None
+    if isinstance(value, (int, float)):
+        raw_value = str(value).strip()
+    elif isinstance(value, str):
+        raw_value = value.strip()
+    else:
+        return None
+    if not raw_value:
+        return None
+    if ';' in raw_value:
+        raw_value = raw_value.split(';')[0].strip()
+    elif ',' in raw_value:
+        raw_value = raw_value.split(',')[0].strip()
+    return raw_value if raw_value else None
+
+
+def _normalize_attr_value(value) -> str | None:
+    if isinstance(value, dict):
+        parts = []
+        for child_key, child_value in value.items():
+            child_text = _normalize_attr_value(child_value)
+            if child_text:
+                parts.append(f"{_format_dict_key(str(child_key))}: {child_text}")
+        return '; '.join(parts) if parts else None
+    if isinstance(value, list):
+        for item in value:
+            item_text = _normalize_attr_value(item)
+            if item_text:
+                return item_text
+        return None
+    return _normalize_scalar_attr(value)
+
+
 def _extract_attrs_from_product(prod: dict) -> dict:
-    """从产品中提取5个非空属性，优先选择 A1, A2...
+    """从产品中提取最多 REQUIRED_ATTR_COUNT 个非空属性，优先选择 A1, A2...
 
     返回格式: {"A1": {"value": "xxx", "type": "product_type"}, ...}
-    只选择有效的简单属性值（字符串或列表中的字符串），跳过 dict 类型和无效值。
+    选择有效的简单属性值，并将 dict 类型属性展开成可读字符串。
     规则：
     1. 跳过 A14 (size) 类型
-    2. 如果属性值包含分号，只取分号前的第一个值
+    2. 如果字符串属性值包含分号或逗号，只取第一个值
     """
     SKIP_KEYS = {'A14'}  # 跳过 size 类型
     ATTR_TYPES = {
@@ -86,7 +127,7 @@ def _extract_attrs_from_product(prod: dict) -> dict:
     attr_keys = [f'A{i}' for i in range(1, 19)]  # A1-A18
     attrs = {}
     for key in attr_keys:
-        if len(attrs) >= 5:
+        if len(attrs) >= REQUIRED_ATTR_COUNT:
             break
         # 跳过 A14 (size)
         if key in SKIP_KEYS:
@@ -98,33 +139,11 @@ def _extract_attrs_from_product(prod: dict) -> dict:
             'A13': 'reusability', 'A14': 'size', 'A15': 'weight', 'A16': 'compatibility',
             'A17': 'flavor', 'A18': 'quality',
         }.get(key, '')
-        value = prod.get(prod_key)
-        # 跳过 None、空字符串、空列表、字典
-        if value is None or value == '':
-            continue
-        if isinstance(value, dict):
-            continue
-        if isinstance(value, list):
-            if len(value) == 0:
-                continue
-            # 取列表中第一个非空字符串
-            for item in value:
-                if item and isinstance(item, str) and item.strip():
-                    value = item.strip()
-                    break
-            else:
-                continue
-        if isinstance(value, str) and value.strip():
-            # 如果值包含分号或逗号，只取第一个值
-            raw_value = value.strip()
-            if ';' in raw_value:
-                raw_value = raw_value.split(';')[0].strip()
-            elif ',' in raw_value:
-                raw_value = raw_value.split(',')[0].strip()
-            if raw_value:
-                attrs[key] = {'value': raw_value, 'type': ATTR_TYPES.get(key, 'unknown')}
-                if len(attrs) >= 5:
-                    break
+        raw_value = _normalize_attr_value(prod.get(prod_key))
+        if raw_value:
+            attrs[key] = {'value': raw_value, 'type': ATTR_TYPES.get(key, 'unknown')}
+            if len(attrs) >= REQUIRED_ATTR_COUNT:
+                break
     return attrs
 
 
@@ -196,6 +215,8 @@ def _attrs_used_from_source(attrs: dict) -> dict:
     """Return the source product attributes used for both ACL and CCOMP queries."""
     if not attrs:
         raise ValueError("source attrs must not be empty")
+    if len(attrs) < REQUIRED_ATTR_COUNT:
+        raise ValueError(f"source attrs must contain at least {REQUIRED_ATTR_COUNT} attributes, got {len(attrs)}")
     attrs_used = {}
     for key, info in attrs.items():
         if not isinstance(info, dict):
@@ -219,13 +240,13 @@ Product attributes:
 
 Requirements:
 - Output JSON only: {{"level": 0, "query": "...", "attrs_used": {{"A1": "{{value}}", ...}}}}
-- Include every listed attribute in the query
+- Include all 5 listed attributes in the query
 - Query must be a natural e-commerce search phrase in FIRST PERSON
 - Level 0 = simple sentence with NO clauses (no 'which', no 'that')
 - Each attribute value appears EXACTLY ONCE in the query
 
 Example output:
-{{"level": 0, "query": "I need a product that has these features", "attrs_used": {{"A1": "...", "A2": "..."}}}}"""
+{{"level": 0, "query": "I need a product that has these features", "attrs_used": {{"A1": "...", "A2": "...", "A3": "...", "A4": "...", "A5": "..."}}}}"""
     return system_base, user_content
 
 
@@ -239,13 +260,13 @@ Product attributes:
 
 Requirements:
 - Output JSON only: {{"level": {target_level}, "query": "...", "attrs_used": {{"A1": "{{value}}", "A2": "{{value}}", ...}}}}
-- Include every listed attribute in the query
+- Include all 5 listed attributes in the query
 - Add EXACTLY {target_level} 'which' clauses (each with ONE characteristic)
 - Query must be a natural e-commerce search phrase in FIRST PERSON
 - Each attribute value appears EXACTLY ONCE in the query
 
 Example output:
-{{"level": {target_level}, "query": "I need ... which is ... which is ...", "attrs_used": {{"A1": "...", "A2": "..."}}}}"""
+{{"level": {target_level}, "query": "I need ... which is ... which is ...", "attrs_used": {{"A1": "...", "A2": "...", "A3": "...", "A4": "...", "A5": "..."}}}}"""
     return system_base, user_content
 
 
@@ -259,13 +280,13 @@ Product attributes:
 
 Requirements:
 - Output JSON only: {{"level": {target_level}, "query": "...", "attrs_used": {{"A1": "...", ...}}}}
-- Include every listed attribute in the query
+- Include all 5 listed attributes in the query
 - Add EXACTLY {target_level} 'that' clauses (each with ONE user need/preference)
 - Query must be a natural e-commerce search phrase in FIRST PERSON
 - Each attribute value appears EXACTLY ONCE in the query
 
 Example output:
-{{"level": {target_level}, "query": "I need ... that ... that ...", "attrs_used": {{"A1": "...", "A2": "..."}}}}"""
+{{"level": {target_level}, "query": "I need ... that ... that ...", "attrs_used": {{"A1": "...", "A2": "...", "A3": "...", "A4": "...", "A5": "..."}}}}"""
     return system_base, user_content
 
 
@@ -687,15 +708,30 @@ def main():
 
     # 构建用户任务列表
     user_tasks = []
+    skipped_by_attr_count = []
     for u in target_users:
+        original_attrs = _extract_attrs_from_product(u['prod'])
+        if len(original_attrs) < REQUIRED_ATTR_COUNT:
+            skipped_by_attr_count.append({
+                'user_id': u['uid'],
+                'asin': u['prod'].get('asin', ''),
+                'attr_count': len(original_attrs),
+            })
+            continue
         persona_base = {
             'user_id': u['uid'],
             'asin': u['prod'].get('asin', ''),
             'acl_level': u['acl_level'],
             'ccomp_level': u['ccomp_level'],
-            'original_attrs': _extract_attrs_from_product(u['prod']),
+            'original_attrs': original_attrs,
         }
         user_tasks.append(persona_base)
+
+    if skipped_by_attr_count:
+        log(f"跳过属性数少于 {REQUIRED_ATTR_COUNT} 的用户商品: {len(skipped_by_attr_count)}")
+        log(f"  示例: {skipped_by_attr_count[:5]}")
+    if not user_tasks:
+        raise ValueError(f"No user-product tasks have at least {REQUIRED_ATTR_COUNT} extracted attributes")
 
     def process_one_user(persona):
         """处理单个用户，直接生成对应等级的查询"""

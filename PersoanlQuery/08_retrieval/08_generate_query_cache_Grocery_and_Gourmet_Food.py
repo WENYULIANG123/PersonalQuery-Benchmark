@@ -50,6 +50,7 @@ from utils.retrievers import (
 
 # ============ 配置加载 ============
 from config import get_category_config, get_global_paths
+from revised_query_utils import load_revised_query_map
 
 CATEGORY_NAME = "Grocery_and_Gourmet_Food"
 CAT_CONFIG = get_category_config(CATEGORY_NAME)
@@ -563,35 +564,53 @@ def load_acl_queries() -> Tuple[List[Dict], List[Dict]]:
         log_with_timestamp(f"⚠️  query.json 格式错误：期望 list，实际 {type(data)}")
         return [], []
 
+    revised_query_map = load_revised_query_map(CATEGORY_NAME)
     correct_queries = []
+    revised_used = 0
 
     for item in data:
         user_id = item.get('user_id', '')
         asin = item.get('asin', '')
 
-        # 新格式：直接有 acl_query 字段
         acl_query = item.get('acl_query')
         if isinstance(acl_query, dict):
             query_text = acl_query.get('query', '')
-            if query_text:
-                correct_queries.append({
-                    'user_id': user_id,
-                    'asin': asin,
-                    'acl': acl_query.get('level', 0),
-                    'is_ground_truth': True,
-                    'query': query_text,
-                })
+            if not query_text:
+                raise ValueError(f"ACL query text missing for user={user_id}, asin={asin}")
+            revised_query = revised_query_map.get((user_id, asin, 'acl'))
+            query_value = revised_query if revised_query else query_text
+            if revised_query:
+                revised_used += 1
+            correct_queries.append({
+                'user_id': user_id,
+                'asin': asin,
+                'acl': acl_query.get('level', 0),
+                'is_ground_truth': True,
+                'query': query_value,
+                'source_query': query_text,
+                'revised_query': revised_query,
+            })
         elif isinstance(acl_query, str) and acl_query:
-            # 兼容字符串格式
+            revised_query = revised_query_map.get((user_id, asin, 'acl'))
+            query_value = revised_query if revised_query else acl_query
+            if revised_query:
+                revised_used += 1
             correct_queries.append({
                 'user_id': user_id,
                 'asin': asin,
                 'acl': 0,
                 'is_ground_truth': True,
-                'query': acl_query,
+                'query': query_value,
+                'source_query': acl_query,
+                'revised_query': revised_query,
             })
+        else:
+            raise ValueError(f"ACL query missing or invalid for user={user_id}, asin={asin}")
 
-    log_with_timestamp(f"✓ 从 {ACL_QUERY_FILE} 加载了 {len(correct_queries)} 条 correct 查询 (ACL)")
+    log_with_timestamp(
+        f"✓ 从 {ACL_QUERY_FILE} 加载了 {len(correct_queries)} 条 correct 查询 (ACL)，"
+        f"其中 revised: {revised_used}"
+    )
     return correct_queries, []
 
 
@@ -611,35 +630,53 @@ def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
         log_with_timestamp(f"⚠️  query.json 格式错误：期望 list，实际 {type(data)}")
         return [], []
 
+    revised_query_map = load_revised_query_map(CATEGORY_NAME)
     correct_queries = []
+    revised_used = 0
 
     for item in data:
         user_id = item.get('user_id', '')
         asin = item.get('asin', '')
 
-        # 新格式：直接有 ccomp_query 字段
         ccomp_query = item.get('ccomp_query')
         if isinstance(ccomp_query, dict):
             query_text = ccomp_query.get('query', '')
-            if query_text:
-                correct_queries.append({
-                    'user_id': user_id,
-                    'asin': asin,
-                    'ccomp': ccomp_query.get('level', 0),
-                    'is_ground_truth': True,
-                    'query': query_text,
-                })
+            if not query_text:
+                raise ValueError(f"CCOMP query text missing for user={user_id}, asin={asin}")
+            revised_query = revised_query_map.get((user_id, asin, 'ccomp'))
+            query_value = revised_query if revised_query else query_text
+            if revised_query:
+                revised_used += 1
+            correct_queries.append({
+                'user_id': user_id,
+                'asin': asin,
+                'ccomp': ccomp_query.get('level', 0),
+                'is_ground_truth': True,
+                'query': query_value,
+                'source_query': query_text,
+                'revised_query': revised_query,
+            })
         elif isinstance(ccomp_query, str) and ccomp_query:
-            # 兼容字符串格式
+            revised_query = revised_query_map.get((user_id, asin, 'ccomp'))
+            query_value = revised_query if revised_query else ccomp_query
+            if revised_query:
+                revised_used += 1
             correct_queries.append({
                 'user_id': user_id,
                 'asin': asin,
                 'ccomp': 0,
                 'is_ground_truth': True,
-                'query': ccomp_query,
+                'query': query_value,
+                'source_query': ccomp_query,
+                'revised_query': revised_query,
             })
+        else:
+            raise ValueError(f"CCOMP query missing or invalid for user={user_id}, asin={asin}")
 
-    log_with_timestamp(f"✓ 从 {CCOMP_QUERY_FILE} 加载了 {len(correct_queries)} 条 correct 查询 (CCOMP)")
+    log_with_timestamp(
+        f"✓ 从 {CCOMP_QUERY_FILE} 加载了 {len(correct_queries)} 条 correct 查询 (CCOMP)，"
+        f"其中 revised: {revised_used}"
+    )
     return correct_queries, []
 
 

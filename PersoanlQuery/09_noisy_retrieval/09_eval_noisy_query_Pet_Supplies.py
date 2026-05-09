@@ -26,6 +26,7 @@ from typing import List, Dict, Tuple, Set
 # 设置路径
 sys.path.insert(0, '/home/wlia0047/ar57/wenyu/PersoanlQuery/08_retrieval')
 from config import get_category_config
+from revised_query_utils import load_revised_query_map
 
 # ============ 日志 ============
 def log(msg):
@@ -121,14 +122,28 @@ def build_retriever_result(
     retriever_name: str,
     all_metrics: List[Dict],
     all_categories: List[str],
-    k_values: List[int]
+    k_values: List[int],
+    all_query_records: List[Dict] = None,
 ) -> Dict:
-    return {
+    result = {
         'retriever': retriever_name,
         'num_queries': len(all_metrics),
         'metrics': compute_average_metrics(all_metrics, k_values),
         'metrics_by_category': compute_metrics_by_query_category(all_metrics, all_categories, k_values),
     }
+    if all_query_records is not None:
+        if len(all_query_records) != len(all_metrics):
+            raise ValueError(
+                f"Query record length mismatch for {retriever_name}: "
+                f"{len(all_query_records)} records vs {len(all_metrics)} metrics"
+            )
+        packed_records = []
+        for record, metric in zip(all_query_records, all_metrics):
+            packed_record = dict(record)
+            packed_record['p_at10'] = metric.get('P@10', 0.0)
+            packed_records.append(packed_record)
+        result['all_query_records'] = packed_records
+    return result
 
 # ============ 数据加载 ============
 def load_dense_retriever(retriever_name: str) -> Tuple[np.ndarray, List[str], int]:
@@ -241,6 +256,7 @@ def load_correct_queries_for_pairs(user_asin_pairs: Set[Tuple[str, str]], noisy_
         noisy_keys.add((q['user_id'], q['asin'], q['query_category']))
 
     queries = []
+    revised_query_map = load_revised_query_map(CATEGORY_NAME)
 
     with open(QUERY_FILE, 'r') as f:
         data = json.load(f)
@@ -252,33 +268,51 @@ def load_correct_queries_for_pairs(user_asin_pairs: Set[Tuple[str, str]], noisy_
         if (user_id, asin) not in user_asin_pairs:
             continue
 
-        acl_query = item.get('acl_query', {})
-        if acl_query:
+        acl_key = (user_id, asin, 'acl')
+        if acl_key in noisy_keys:
+            acl_query = item.get('acl_query')
+            if not isinstance(acl_query, dict):
+                raise ValueError(f"ACL query missing for paired item: user={user_id}, asin={asin}")
             query_text = acl_query.get('query', '')
             level = acl_query.get('level', 0)
-            if query_text and (user_id, asin, 'acl') in noisy_keys:
-                queries.append({
-                    'user_id': user_id,
-                    'asin': asin,
-                    'query': query_text,
-                    'query_category': 'acl',
-                    'level': level,
-                    'query_type': 'correct'
-                })
+            if not query_text:
+                raise ValueError(f"ACL query text missing for paired item: user={user_id}, asin={asin}")
+            revised_query = revised_query_map.get(acl_key)
+            if not revised_query:
+                raise KeyError(f"Revised ACL query missing for paired item: user={user_id}, asin={asin}")
+            queries.append({
+                'user_id': user_id,
+                'asin': asin,
+                'query': revised_query,
+                'query_category': 'acl',
+                'level': level,
+                'query_type': 'correct',
+                'source_query': query_text,
+                'revised_query': revised_query,
+            })
 
-        ccomp_query = item.get('ccomp_query', {})
-        if ccomp_query:
+        ccomp_key = (user_id, asin, 'ccomp')
+        if ccomp_key in noisy_keys:
+            ccomp_query = item.get('ccomp_query')
+            if not isinstance(ccomp_query, dict):
+                raise ValueError(f"CCOMP query missing for paired item: user={user_id}, asin={asin}")
             query_text = ccomp_query.get('query', '')
             level = ccomp_query.get('level', 0)
-            if query_text and (user_id, asin, 'ccomp') in noisy_keys:
-                queries.append({
-                    'user_id': user_id,
-                    'asin': asin,
-                    'query': query_text,
-                    'query_category': 'ccomp',
-                    'level': level,
-                    'query_type': 'correct'
-                })
+            if not query_text:
+                raise ValueError(f"CCOMP query text missing for paired item: user={user_id}, asin={asin}")
+            revised_query = revised_query_map.get(ccomp_key)
+            if not revised_query:
+                raise KeyError(f"Revised CCOMP query missing for paired item: user={user_id}, asin={asin}")
+            queries.append({
+                'user_id': user_id,
+                'asin': asin,
+                'query': revised_query,
+                'query_category': 'ccomp',
+                'level': level,
+                'query_type': 'correct',
+                'source_query': query_text,
+                'revised_query': revised_query,
+            })
 
     return queries
 
@@ -570,7 +604,13 @@ def evaluate_colbertv2_queries(queries: List[Dict], k_values: List[int], query_t
         if (index + 1) % 500 == 0:
             log(f"    ColBERTv2 搜索进度: {index+1}/{len(all_query_embeddings)}")
 
-    return build_retriever_result('colbertv2', all_metrics, all_categories, k_values)
+    return build_retriever_result(
+        'colbertv2',
+        all_metrics,
+        all_categories,
+        k_values,
+        all_query_records=queries,
+    )
 
 # ============ 评估函数 ============
 def evaluate_correct_queries(retriever_name: str, queries: List[Dict], k_values: List[int]) -> Dict:
@@ -607,6 +647,21 @@ def evaluate_correct_queries(retriever_name: str, queries: List[Dict], k_values:
             metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
             all_metrics.append(metrics)
         evaluated_categories = all_categories
+        valid_query_records = queries
+        return build_retriever_result(
+            retriever_name,
+            all_metrics,
+            evaluated_categories,
+            k_values,
+            all_query_records=valid_query_records,
+        )
+        return build_retriever_result(
+            retriever_name,
+            all_metrics,
+            evaluated_categories,
+            k_values,
+            all_query_records=valid_query_records,
+        )
 
     elif retriever_name == 'colbertv2':
         return evaluate_colbertv2_queries(queries, k_values, 'correct')
@@ -652,7 +707,7 @@ def evaluate_correct_queries(retriever_name: str, queries: List[Dict], k_values:
 
         # 收集所有查询的 sparse vectors
         all_q_data = []
-        for user_id, query_text, category, asin in zip(all_user_ids, all_query_texts, all_categories, all_asins):
+        for idx, (user_id, query_text, category, asin) in enumerate(zip(all_user_ids, all_query_texts, all_categories, all_asins)):
             cache = acl_cache if category == 'acl' else ccomp_cache
             if cache and user_id in cache and query_text in cache[user_id]:
                 all_q_data.append({
@@ -660,6 +715,7 @@ def evaluate_correct_queries(retriever_name: str, queries: List[Dict], k_values:
                     'q_vec': cache[user_id][query_text],
                     'relevant_asin': asin,
                     'query_category': category,
+                    'query_record': queries[idx],
                 })
 
         log(f"  有效查询: {len(all_q_data)}")
@@ -729,7 +785,14 @@ def evaluate_correct_queries(retriever_name: str, queries: List[Dict], k_values:
             all_metrics.append(metrics)
 
         evaluated_categories = [qd['query_category'] for qd in all_q_data]
-        return build_retriever_result(retriever_name, all_metrics, evaluated_categories, k_values)
+        valid_query_records = [qd['query_record'] for qd in all_q_data]
+        return build_retriever_result(
+            retriever_name,
+            all_metrics,
+            evaluated_categories,
+            k_values,
+            all_query_records=valid_query_records,
+        )
 
     else:
         embeddings, doc_ids, dim = load_dense_retriever(retriever_name)
@@ -758,6 +821,7 @@ def evaluate_correct_queries(retriever_name: str, queries: List[Dict], k_values:
         valid_embeddings = [query_embeddings[i] for i in valid_indices]
         valid_asins = [all_asins[i] for i in valid_indices]
         valid_categories = [all_categories[i] for i in valid_indices]
+        valid_query_records = [queries[i] for i in valid_indices]
 
         log(f"  有效查询: {len(valid_embeddings)}")
 
@@ -778,7 +842,13 @@ def evaluate_correct_queries(retriever_name: str, queries: List[Dict], k_values:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    return build_retriever_result(retriever_name, all_metrics, evaluated_categories, k_values)
+    return build_retriever_result(
+        retriever_name,
+        all_metrics,
+        evaluated_categories,
+        k_values,
+        all_query_records=valid_query_records,
+    )
 
 def evaluate_noisy_queries(retriever_name: str, queries: List[Dict], k_values: List[int]) -> Dict:
     """评估 noisy 查询（使用 noisy cache，按 user_id 索引）"""
@@ -814,6 +884,7 @@ def evaluate_noisy_queries(retriever_name: str, queries: List[Dict], k_values: L
             metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
             all_metrics.append(metrics)
         evaluated_categories = all_categories
+        valid_query_records = queries
 
     elif retriever_name == 'colbertv2':
         return evaluate_colbertv2_queries(queries, k_values, 'noisy')
@@ -859,7 +930,7 @@ def evaluate_noisy_queries(retriever_name: str, queries: List[Dict], k_values: L
 
         # 收集所有查询的 sparse vectors
         all_q_data = []
-        for user_id, query_text, category, asin in zip(all_user_ids, all_query_texts, all_categories, all_asins):
+        for idx, (user_id, query_text, category, asin) in enumerate(zip(all_user_ids, all_query_texts, all_categories, all_asins)):
             cache = acl_cache if category == 'acl' else ccomp_cache
             if cache and user_id in cache and query_text in cache[user_id]:
                 all_q_data.append({
@@ -867,6 +938,7 @@ def evaluate_noisy_queries(retriever_name: str, queries: List[Dict], k_values: L
                     'q_vec': cache[user_id][query_text],
                     'relevant_asin': asin,
                     'query_category': category,
+                    'query_record': queries[idx],
                 })
 
         log(f"  有效查询: {len(all_q_data)}")
@@ -936,7 +1008,14 @@ def evaluate_noisy_queries(retriever_name: str, queries: List[Dict], k_values: L
             all_metrics.append(metrics)
 
         evaluated_categories = [qd['query_category'] for qd in all_q_data]
-        return build_retriever_result(retriever_name, all_metrics, evaluated_categories, k_values)
+        valid_query_records = [qd['query_record'] for qd in all_q_data]
+        return build_retriever_result(
+            retriever_name,
+            all_metrics,
+            evaluated_categories,
+            k_values,
+            all_query_records=valid_query_records,
+        )
 
     else:
         embeddings, doc_ids, dim = load_dense_retriever(retriever_name)
@@ -991,13 +1070,20 @@ def evaluate_noisy_queries(retriever_name: str, queries: List[Dict], k_values: L
             metrics = compute_metrics(relevant_asin, retrieved_asins, k_values)
             all_metrics.append(metrics)
         evaluated_categories = valid_categories
+        valid_query_records = [queries[i] for i in valid_indices]
 
         del embeddings
         del searcher
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    return build_retriever_result(retriever_name, all_metrics, evaluated_categories, k_values)
+    return build_retriever_result(
+        retriever_name,
+        all_metrics,
+        evaluated_categories,
+        k_values,
+        all_query_records=valid_query_records,
+    )
 
 def print_results_table(all_results: List[Dict], title: str, category: str = ""):
     log(f"\n{'='*100}")

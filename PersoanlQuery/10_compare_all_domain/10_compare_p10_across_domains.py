@@ -11,6 +11,9 @@ import json
 import csv
 from pathlib import Path
 
+import numpy as np
+from scipy import stats
+
 BASE_DIR_08 = Path("/home/wlia0047/ar57/wenyu/result/personal_query/08_retrieval")
 BASE_DIR_09 = Path("/home/wlia0047/ar57/wenyu/result/personal_query/09_noisy_retrieval")
 CATEGORIES = ["Baby_Products", "Grocery_and_Gourmet_Food", "Pet_Supplies"]
@@ -160,6 +163,129 @@ def load_noisy_family_overall_data(category: str) -> dict:
             results[retriever][query_category] = metrics["P@10"]
 
     return results
+
+
+def build_query_pair_key(record: dict) -> tuple:
+    """构建 noisy / clean 逐查询配对键。"""
+    user_id = record.get("user_id")
+    asin = record.get("asin")
+    query_category = record.get("query_category")
+    level = record.get("level")
+    if user_id is None or asin is None or query_category is None or level is None:
+        raise KeyError(f"Query record missing pairing fields: {record}")
+    return (user_id, asin, query_category, int(level))
+
+
+def bootstrap_mean_ci(values, n_boot: int = 2000, confidence: float = 0.95, seed: int = 42):
+    """对配对差值均值做 bootstrap 置信区间。"""
+    values = np.asarray(values, dtype=float)
+    if values.size < 2:
+        raise ValueError(f"Bootstrap requires at least 2 paired values, got {values.size}")
+
+    rng = np.random.default_rng(seed)
+    boot_means = np.empty(n_boot, dtype=float)
+    for idx in range(n_boot):
+        sample = rng.choice(values, size=values.size, replace=True)
+        boot_means[idx] = float(np.mean(sample))
+
+    alpha = (1.0 - confidence) / 2.0
+    lower = float(np.quantile(boot_means, alpha))
+    upper = float(np.quantile(boot_means, 1.0 - alpha))
+    return lower, upper
+
+
+def format_p_value(p_value: float) -> str:
+    """格式化 p 值。"""
+    if p_value < 0.001:
+        return f"{p_value:.3e}"
+    return f"{p_value:.4f}"
+
+
+def significance_star(p_value: float) -> str:
+    """根据 p 值返回显著性标记。"""
+    if p_value < 0.001:
+        return "***"
+    if p_value < 0.01:
+        return "**"
+    if p_value < 0.05:
+        return "*"
+    return ""
+
+
+def load_noisy_clean_paired_diffs(category: str) -> dict:
+    """从 09_noisy_retrieval 的逐查询结果中加载 noisy-clean 配对差值。"""
+    results_path = BASE_DIR_09 / category / "correct_vs_noisy_results.json"
+    with open(results_path, "r") as f:
+        data = json.load(f)
+
+    correct_items = {item["retriever"]: item for item in data.get("correct_results", [])}
+    noisy_items = {item["retriever"]: item for item in data.get("noisy_results", [])}
+
+    missing_retrievers = sorted(set(correct_items) ^ set(noisy_items))
+    if missing_retrievers:
+        raise KeyError(
+            f"{category} correct/noisy retriever sets do not match: {missing_retrievers}"
+        )
+
+    retriever_diffs = {}
+    for retriever in sort_retrievers(correct_items.keys()):
+        if retriever in DISABLED_RETRIEVERS:
+            continue
+
+        correct_item = correct_items[retriever]
+        noisy_item = noisy_items[retriever]
+        correct_records = correct_item.get("all_query_records")
+        noisy_records = noisy_item.get("all_query_records")
+        if correct_records is None:
+            raise KeyError(f"{category} correct_results/{retriever} missing all_query_records")
+        if noisy_records is None:
+            raise KeyError(f"{category} noisy_results/{retriever} missing all_query_records")
+
+        clean_maps = {"acl": {}, "ccomp": {}}
+        noisy_maps = {"acl": {}, "ccomp": {}}
+
+        for record in correct_records:
+            family = record.get("query_category")
+            if family not in clean_maps:
+                raise KeyError(f"{category} {retriever} unexpected clean query_category: {family}")
+            key = build_query_pair_key(record)
+            if key in clean_maps[family]:
+                raise ValueError(f"{category} {retriever} duplicate clean key detected: {key}")
+            clean_maps[family][key] = float(record.get("p_at10", 0.0))
+
+        for record in noisy_records:
+            family = record.get("query_category")
+            if family not in noisy_maps:
+                raise KeyError(f"{category} {retriever} unexpected noisy query_category: {family}")
+            key = build_query_pair_key(record)
+            if key in noisy_maps[family]:
+                print(
+                    f"[Pairing] {category} {retriever} {family}: duplicate noisy key ignored: {key}"
+                )
+                continue
+            noisy_maps[family][key] = float(record.get("p_at10", 0.0))
+
+        retriever_diffs[retriever] = {}
+        for family in ("acl", "ccomp"):
+            clean_keys = set(clean_maps[family])
+            noisy_keys = set(noisy_maps[family])
+            paired_keys = sorted(clean_keys & noisy_keys)
+            missing_clean = sorted(noisy_keys - clean_keys)
+            missing_noisy = sorted(clean_keys - noisy_keys)
+            if missing_clean or missing_noisy:
+                print(
+                    f"[Pairing] {category} {retriever} {family}: "
+                    f"paired={len(paired_keys)}, clean_only={len(missing_noisy)}, noisy_only={len(missing_clean)}"
+                )
+            ordered_keys = paired_keys
+            if len(ordered_keys) < 2:
+                raise ValueError(
+                    f"{category} {retriever} {family} needs at least 2 paired samples, got {len(ordered_keys)}"
+                )
+            diffs = [noisy_maps[family][key] - clean_maps[family][key] for key in ordered_keys]
+            retriever_diffs[retriever][family] = diffs
+
+    return retriever_diffs
 
 
 def print_clean_comparison(all_data: dict):
@@ -476,6 +602,126 @@ def print_correct_vs_noisy_summary(all_data: dict):
     print("\nMost Robust to Noise (Smallest Avg Diff):")
     best_robust = min(retriever_diff_avgs, key=lambda x: x[1] if x[1] is not None else float('inf'))
     print(f"  {best_robust[0]} (Avg Diff = {best_robust[1]:+.4f})")
+
+
+def print_noisy_clean_paired_significance_analysis(all_data: dict):
+    """Print paired significance analysis for noisy P@10 - clean P@10."""
+    candidate_retrievers = set()
+    for cat_data in all_data.values():
+        candidate_retrievers.update(cat_data.keys())
+    candidate_retrievers = sort_retrievers(r for r in candidate_retrievers if r not in DISABLED_RETRIEVERS)
+
+    complete_retrievers = []
+    incomplete_details = []
+    for retriever in candidate_retrievers:
+        missing_fields = []
+        for cat in CATEGORIES:
+            cat_data = all_data.get(cat, {})
+            if retriever not in cat_data:
+                missing_fields.append(f"{cat}/missing_retriever")
+                continue
+            for family in ("acl", "ccomp"):
+                if family not in cat_data[retriever]:
+                    missing_fields.append(f"{cat}/{family}/missing_diffs")
+        if missing_fields:
+            incomplete_details.append((retriever, missing_fields))
+        else:
+            complete_retrievers.append(retriever)
+
+    if not complete_retrievers:
+        raise ValueError("No retriever has complete noisy/clean paired data across all 3 domains")
+
+    print("\n" + "=" * 120)
+    print("Paired Significance Analysis: Noisy P@10 - Clean P@10")
+    print("基于 09_noisy_retrieval 的逐查询配对记录：按 retriever × family 汇总三域的 noisy-clean 差值")
+    print("=" * 120)
+
+    if incomplete_details:
+        print("Excluded retrievers with incomplete 3-domain paired data:")
+        for retriever, missing_fields in incomplete_details:
+            print(f"  {retriever}: missing {', '.join(missing_fields)}")
+        print("-" * 120)
+
+    overall_rows = []
+    for family in ("acl", "ccomp"):
+        print(f"\n[{family.upper()}]")
+        print(
+            f"{'Retriever':<12} {'N_pairs':>10} {'Mean_Diff':>12} {'95% CI':>18} "
+            f"{'p-value':>12} {'Sig':>6}"
+        )
+        print("-" * 100)
+
+        family_rows = []
+        for retriever in complete_retrievers:
+            diffs = []
+            for cat in CATEGORIES:
+                diffs.extend(all_data[cat][retriever][family])
+
+            if len(diffs) < 2:
+                raise ValueError(f"{family} {retriever} has insufficient paired samples: {len(diffs)}")
+
+            diffs_array = np.asarray(diffs, dtype=float)
+            mean_diff = float(np.mean(diffs_array))
+            ci_lower, ci_upper = bootstrap_mean_ci(diffs_array)
+            t_result = stats.ttest_1samp(diffs_array, popmean=0.0, nan_policy="raise")
+            p_value = float(t_result.pvalue)
+            sig = significance_star(p_value)
+            n_pairs = int(diffs_array.size)
+
+            print(
+                f"{retriever:<12} {n_pairs:>10} {mean_diff:>+12.4f} "
+                f"{f'[{ci_lower:+.4f}, {ci_upper:+.4f}]':>18} {format_p_value(p_value):>12} {sig:>6}"
+            )
+
+            family_rows.append(
+                {
+                    "retriever": retriever,
+                    "n_pairs": n_pairs,
+                    "mean_diff": mean_diff,
+                    "ci_lower": ci_lower,
+                    "ci_upper": ci_upper,
+                    "p_value": p_value,
+                    "sig": sig,
+                }
+            )
+            overall_rows.append(
+                {
+                    "family": family,
+                    "retriever": retriever,
+                    "n_pairs": n_pairs,
+                    "mean_diff": mean_diff,
+                    "ci_lower": ci_lower,
+                    "ci_upper": ci_upper,
+                    "p_value": p_value,
+                    "sig": sig,
+                }
+            )
+
+        bonf_threshold = 0.05 / len(family_rows)
+        sig_count = [row for row in family_rows if row["p_value"] < 0.05]
+        bonf_count = [row for row in family_rows if row["p_value"] < bonf_threshold]
+        positive_sig = [row for row in sig_count if row["mean_diff"] > 0]
+        negative_sig = [row for row in sig_count if row["mean_diff"] < 0]
+        print("-" * 100)
+        print(
+            f"  统计: sig<0.05={len(sig_count)}, "
+            f"sig<Bonferroni({bonf_threshold:.4g})={len(bonf_count)}, "
+            f"正差值={len(positive_sig)}, 负差值={len(negative_sig)}"
+        )
+
+    if overall_rows:
+        total_sig = [r for r in overall_rows if r["p_value"] < 0.05]
+        total_bonf = [r for r in overall_rows if r["p_value"] < (0.05 / len(overall_rows))]
+        total_pos = [r for r in total_sig if r["mean_diff"] > 0]
+        total_neg = [r for r in total_sig if r["mean_diff"] < 0]
+        print("\n" + "-" * 120)
+        print(
+            f"总体统计: rows={len(overall_rows)}, "
+            f"sig<0.05={len(total_sig)}, "
+            f"sig<Bonferroni({0.05 / len(overall_rows):.4g})={len(total_bonf)}, "
+            f"正差值显著={len(total_pos)}, 负差值显著={len(total_neg)}"
+        )
+        print("-" * 120)
 
 
 # ============ Trend Analysis Functions ============
@@ -854,6 +1100,12 @@ def main():
         noisy_family_overall_data[cat] = load_noisy_family_overall_data(cat)
         print(f"  Loaded {cat}: {len(noisy_family_overall_data[cat])} retrievers")
 
+    print("\nLoading noisy-clean paired significance data from 09_noisy_retrieval...")
+    noisy_clean_significance_data = {}
+    for cat in CATEGORIES:
+        noisy_clean_significance_data[cat] = load_noisy_clean_paired_diffs(cat)
+        print(f"  Loaded {cat}: {len(noisy_clean_significance_data[cat])} retrievers with paired diffs")
+
     # Load within-family OLS data for trend analysis
     print("\nLoading within-family OLS data for trend analysis...")
     trend_data = {}
@@ -877,6 +1129,9 @@ def main():
 
     # Print summary
     print_correct_vs_noisy_summary(noisy_data)
+
+    # Print paired significance analysis
+    print_noisy_clean_paired_significance_analysis(noisy_clean_significance_data)
 
     # Print OLS-adjusted hit@10
     print_ols_adjusted_hit10(ols_hit10_data)
