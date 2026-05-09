@@ -263,6 +263,42 @@ def fix_incomplete_json(text: str) -> str:
     return text
 
 
+def count_keyword_in_query(query: str, keyword: str) -> int:
+    if not isinstance(query, str):
+        raise TypeError("query 必须是字符串")
+    if not isinstance(keyword, str) or not keyword:
+        raise ValueError("keyword 必须是非空字符串")
+    return len(re.findall(rf'\b{re.escape(keyword)}\b', query, flags=re.IGNORECASE))
+
+
+def build_complexity_constraint_text(query_category: str, target_level: int) -> str:
+    if query_category == 'acl':
+        return (
+            f"This query is an ACL / wide query with complexity level {target_level}.\n"
+            f"- The rewritten correct query must contain exactly {target_level} occurrence(s) of the word 'which'.\n"
+            "- The rewritten correct query must contain zero occurrences of the word 'that'.\n"
+            "- Do not increase or decrease the ACL complexity level during rewriting.\n"
+        )
+    if query_category == 'ccomp':
+        return (
+            f"This query is a CCOMP / deep query with complexity level {target_level}.\n"
+            f"- The rewritten correct query must contain exactly {target_level} occurrence(s) of the word 'that'.\n"
+            "- The rewritten correct query must contain zero occurrences of the word 'which'.\n"
+            "- Do not increase or decrease the CCOMP complexity level during rewriting.\n"
+        )
+    raise ValueError(f"未知 query_category: {query_category}")
+
+
+def revised_query_matches_expected_complexity(query: str, query_category: str, target_level: int) -> bool:
+    which_count = count_keyword_in_query(query, 'which')
+    that_count = count_keyword_in_query(query, 'that')
+    if query_category == 'acl':
+        return which_count == target_level and that_count == 0
+    if query_category == 'ccomp':
+        return that_count == target_level and which_count == 0
+    raise ValueError(f"未知 query_category: {query_category}")
+
+
 def build_noisy_prompt(query: str, error_patterns: list) -> tuple:
     system_base = NOISY_SYSTEM_BASE
     if error_patterns:
@@ -282,7 +318,7 @@ def build_noisy_prompt(query: str, error_patterns: list) -> tuple:
     return system_base, user_content
 
 
-def build_anchor_rewrite_prompt(query: str, error_patterns: list) -> tuple:
+def build_anchor_rewrite_prompt(query: str, error_patterns: list, query_category: str, target_level: int) -> tuple:
     system_base = NOISY_SYSTEM_BASE
     error_lines = []
     for i, ep in enumerate(error_patterns[:10], 1):
@@ -291,13 +327,15 @@ def build_anchor_rewrite_prompt(query: str, error_patterns: list) -> tuple:
         err_type = ep.get('error_type', 'unknown')
         error_lines.append(f"{i}. '{corr}' -> '{orig}' (error_type: {err_type})")
     errors_section = "User's typical spelling error patterns:\n" + "\n".join(error_lines) + "\n"
+    complexity_section = build_complexity_constraint_text(query_category, target_level)
     user_content = (
         f"Original correct query:\n{query}\n\n"
         f"{errors_section}"
+        f"{complexity_section}"
         "Task:\n"
         "1. The original query currently does not contain a usable exact anchor for the user's real spelling patterns.\n"
         "2. First minimally rewrite the correct query so that at least one exact 'correct' text from the listed patterns appears naturally.\n"
-        "3. The rewritten correct query must stay grammatical, natural, and preserve the original product, brand, price, attributes, and search intent.\n"
+        "3. The rewritten correct query must stay grammatical, natural, and preserve the original product, brand, price, attributes, search intent, and complexity style.\n"
         f"4. Then inject 1-{INJECT_ERROR_COUNT} user spelling errors into that rewritten correct query.\n"
         "5. You must use only exact listed pairs. Do not invent approximations.\n\n"
         "Output format (JSON):\n"
@@ -312,7 +350,7 @@ def build_anchor_rewrite_prompt(query: str, error_patterns: list) -> tuple:
         "- revised_correct_query must be a natural search query\n"
         "- noisy_query must be derived from revised_correct_query\n"
         "- injected_errors.correct must literally appear in revised_correct_query\n"
-        "- Preserve product attributes and search intent"
+        "- Preserve product attributes, search intent, and required ACL/CCOMP complexity pattern exactly"
     )
     return system_base, user_content
 
@@ -570,7 +608,7 @@ def main():
     def process_one_acl_task(task):
         uid, query, errors = task['uid'], task['ground_truth_query'], task['errors']
         if not query_has_any_real_anchor(query, errors):
-            system_base, user_content = build_anchor_rewrite_prompt(query, errors)
+            system_base, user_content = build_anchor_rewrite_prompt(query, errors, 'acl', task['level'])
             response = call_llm(user_content, system_base=system_base)
             parsed = parse_anchor_rewrite_response(response)
             if not parsed:
@@ -579,6 +617,14 @@ def main():
             revised_query = parsed['revised_correct_query']
             noisy_query = parsed['noisy_query']
             injected_errors = parsed['injected_errors']
+            if not revised_query_matches_expected_complexity(revised_query, 'acl', task['level']):
+                return {
+                    'uid': uid, 'asin': task['asin'], 'ground_truth_query': revised_query,
+                    'ground_truth_word_count': len(revised_query.split()),
+                    'noisy_query': noisy_query, 'injected_errors': injected_errors,
+                    'status': 'complexity_mismatch', 'user_errors': errors, 'user_data': task['user_data'],
+                    'query_info': task['query_info'], 'query_rewritten': revised_query != query,
+                }
             if revised_query == query or noisy_query == revised_query or not injected_errors:
                 return {
                     'uid': uid, 'asin': task['asin'], 'ground_truth_query': revised_query,
@@ -660,6 +706,7 @@ def main():
     acl_no_injection = []
     acl_no_anchor = []
     acl_pattern_mismatch = []
+    acl_complexity_mismatch = []
     acl_rewritten_success = 0
     with ThreadPoolExecutor(max_workers=EFFECTIVE_MAX_WORKERS) as executor:
         futures = {executor.submit(process_one_acl_task, t): t for t in acl_tasks}
@@ -679,8 +726,10 @@ def main():
                     acl_no_anchor.append(r['uid'])
                 elif r['status'] == 'pattern_mismatch':
                     acl_pattern_mismatch.append(r['uid'])
-                log(f"  [ACL] 成功:{len(acl_results)} 改写成功:{acl_rewritten_success} 无注入:{len(acl_no_injection)} 无锚点:{len(acl_no_anchor)} 模式不匹配:{len(acl_pattern_mismatch)} LLM错误:{len(acl_llm_errors)} user={r['uid'][:20]}")
-    log(f"ACL 完成: 成功注入 {len(acl_results)}, 其中改写成功 {acl_rewritten_success}, 无注入 {len(acl_no_injection)}, 无锚点 {len(acl_no_anchor)}, 模式不匹配 {len(acl_pattern_mismatch)}, LLM错误 {len(acl_llm_errors)}")
+                elif r['status'] == 'complexity_mismatch':
+                    acl_complexity_mismatch.append(r['uid'])
+                log(f"  [ACL] 成功:{len(acl_results)} 改写成功:{acl_rewritten_success} 无注入:{len(acl_no_injection)} 无锚点:{len(acl_no_anchor)} 模式不匹配:{len(acl_pattern_mismatch)} 复杂度不匹配:{len(acl_complexity_mismatch)} LLM错误:{len(acl_llm_errors)} user={r['uid'][:20]}")
+    log(f"ACL 完成: 成功注入 {len(acl_results)}, 其中改写成功 {acl_rewritten_success}, 无注入 {len(acl_no_injection)}, 无锚点 {len(acl_no_anchor)}, 模式不匹配 {len(acl_pattern_mismatch)}, 复杂度不匹配 {len(acl_complexity_mismatch)}, LLM错误 {len(acl_llm_errors)}")
 
     # CCOMP
     log("\n=== 处理 CCOMP 查询 ===")
@@ -715,7 +764,7 @@ def main():
     def process_one_ccomp_task(task):
         uid, query, errors = task['uid'], task['ground_truth_query'], task['errors']
         if not query_has_any_real_anchor(query, errors):
-            system_base, user_content = build_anchor_rewrite_prompt(query, errors)
+            system_base, user_content = build_anchor_rewrite_prompt(query, errors, 'ccomp', task['level'])
             response = call_llm(user_content, system_base=system_base)
             parsed = parse_anchor_rewrite_response(response)
             if not parsed:
@@ -724,6 +773,14 @@ def main():
             revised_query = parsed['revised_correct_query']
             noisy_query = parsed['noisy_query']
             injected_errors = parsed['injected_errors']
+            if not revised_query_matches_expected_complexity(revised_query, 'ccomp', task['level']):
+                return {
+                    'uid': uid, 'asin': task['asin'], 'ground_truth_query': revised_query,
+                    'ground_truth_word_count': len(revised_query.split()),
+                    'noisy_query': noisy_query, 'injected_errors': injected_errors,
+                    'status': 'complexity_mismatch', 'user_errors': errors, 'user_data': task['user_data'],
+                    'query_info': task['query_info'], 'query_rewritten': revised_query != query,
+                }
             if revised_query == query or noisy_query == revised_query or not injected_errors:
                 return {
                     'uid': uid, 'asin': task['asin'], 'ground_truth_query': revised_query,
@@ -805,6 +862,7 @@ def main():
     ccomp_no_injection = []
     ccomp_no_anchor = []
     ccomp_pattern_mismatch = []
+    ccomp_complexity_mismatch = []
     ccomp_rewritten_success = 0
     with ThreadPoolExecutor(max_workers=EFFECTIVE_MAX_WORKERS) as executor:
         futures = {executor.submit(process_one_ccomp_task, t): t for t in ccomp_tasks}
@@ -824,8 +882,10 @@ def main():
                     ccomp_no_anchor.append(r['uid'])
                 elif r['status'] == 'pattern_mismatch':
                     ccomp_pattern_mismatch.append(r['uid'])
-                log(f"  [CCOMP] 成功注入:{len(ccomp_results)} 改写成功:{ccomp_rewritten_success} 无注入:{len(ccomp_no_injection)} 无锚点:{len(ccomp_no_anchor)} 模式不匹配:{len(ccomp_pattern_mismatch)} LLM错误:{len(ccomp_llm_errors)} user={r['uid'][:20]}")
-    log(f"CCOMP 完成: 成功注入 {len(ccomp_results)}, 其中改写成功 {ccomp_rewritten_success}, 无注入 {len(ccomp_no_injection)}, 无锚点 {len(ccomp_no_anchor)}, 模式不匹配 {len(ccomp_pattern_mismatch)}, LLM错误 {len(ccomp_llm_errors)}")
+                elif r['status'] == 'complexity_mismatch':
+                    ccomp_complexity_mismatch.append(r['uid'])
+                log(f"  [CCOMP] 成功注入:{len(ccomp_results)} 改写成功:{ccomp_rewritten_success} 无注入:{len(ccomp_no_injection)} 无锚点:{len(ccomp_no_anchor)} 模式不匹配:{len(ccomp_pattern_mismatch)} 复杂度不匹配:{len(ccomp_complexity_mismatch)} LLM错误:{len(ccomp_llm_errors)} user={r['uid'][:20]}")
+    log(f"CCOMP 完成: 成功注入 {len(ccomp_results)}, 其中改写成功 {ccomp_rewritten_success}, 无注入 {len(ccomp_no_injection)}, 无锚点 {len(ccomp_no_anchor)}, 模式不匹配 {len(ccomp_pattern_mismatch)}, 复杂度不匹配 {len(ccomp_complexity_mismatch)}, LLM错误 {len(ccomp_llm_errors)}")
 
     # 最终保存（如需额外后处理可在此添加）
     # 由于使用了增量写入，此处无需再次保存
