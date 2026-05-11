@@ -1189,25 +1189,17 @@ def main():
 
     correct_results = []
     for retriever_name in RETRIEVERS:
-        try:
-            result = evaluate_correct_queries(retriever_name, queries_correct, k_values)
-            if result:
-                correct_results.append(result)
-        except FileNotFoundError as e:
-            log(f"  跳过 {retriever_name}: {e}")
-        except Exception as e:
-            log(f"  错误 {retriever_name}: {e}")
+        result = evaluate_correct_queries(retriever_name, queries_correct, k_values)
+        if result is None:
+            raise RuntimeError(f"{retriever_name} correct evaluation returned no result")
+        correct_results.append(result)
 
     noisy_results = []
     for retriever_name in RETRIEVERS:
-        try:
-            result = evaluate_noisy_queries(retriever_name, queries_noisy, k_values)
-            if result:
-                noisy_results.append(result)
-        except FileNotFoundError as e:
-            log(f"  跳过 {retriever_name}: {e}")
-        except Exception as e:
-            log(f"  错误 {retriever_name}: {e}")
+        result = evaluate_noisy_queries(retriever_name, queries_noisy, k_values)
+        if result is None:
+            raise RuntimeError(f"{retriever_name} noisy evaluation returned no result")
+        noisy_results.append(result)
 
     print_results_table(correct_results, "CORRECT 查询结果（有 noisy 配对）", CATEGORY_NAME)
     print_results_table(noisy_results, "NOISY 查询结果", CATEGORY_NAME)

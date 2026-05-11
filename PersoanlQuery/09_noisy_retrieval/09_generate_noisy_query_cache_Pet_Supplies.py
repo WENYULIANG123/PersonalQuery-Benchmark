@@ -101,6 +101,8 @@ def load_colbertv2_build_module():
 
 
 def configure_colbertv2_runtime() -> None:
+    # 为每个域的 09 作业隔离 torch extension build 目录，避免并发作业争抢同一个 lock 文件。
+    os.environ["TORCH_EXTENSIONS_DIR"] = f"/home/wlia0047/ar57_scratch/wenyu/tmp/torch_extensions_09_{CATEGORY_NAME}"
     select_cuda_toolkit_for_colbert_extension_build()
     configure_host_compiler_for_colbert_extension_build()
     validate_cuda_toolkit_for_colbert()

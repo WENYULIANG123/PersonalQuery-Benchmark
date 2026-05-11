@@ -269,7 +269,14 @@ def count_keyword_in_query(query: str, keyword: str) -> int:
         raise TypeError("query 必须是字符串")
     if not isinstance(keyword, str) or not keyword:
         raise ValueError("keyword 必须是非空字符串")
-    return len(re.findall(rf'\b{re.escape(keyword)}\b', query, flags=re.IGNORECASE))
+    token_strip_chars = " \t\n\r\f\v.,;:!?\"“”‘’()[]{}<>"
+    keyword_lower = keyword.lower()
+    count = 0
+    for raw_token in query.split():
+        token = raw_token.strip(token_strip_chars)
+        if token.lower() == keyword_lower:
+            count += 1
+    return count
 
 
 def build_complexity_constraint_text(query_category: str, target_level: int) -> str:
@@ -277,6 +284,7 @@ def build_complexity_constraint_text(query_category: str, target_level: int) -> 
         return (
             f"This query is an ACL / wide query with complexity level {target_level}.\n"
             f"- The rewritten correct query must contain exactly {target_level} occurrence(s) of the word 'which'.\n"
+            "- Count only standalone word tokens; contractions such as \"which's\" do not count as 'which'.\n"
             "- The rewritten correct query must contain zero occurrences of the word 'that'.\n"
             "- Do not increase or decrease the ACL complexity level during rewriting.\n"
         )
@@ -284,6 +292,7 @@ def build_complexity_constraint_text(query_category: str, target_level: int) -> 
         return (
             f"This query is a CCOMP / deep query with complexity level {target_level}.\n"
             f"- The rewritten correct query must contain exactly {target_level} occurrence(s) of the word 'that'.\n"
+            "- Count only standalone word tokens; contractions such as \"that's\" do not count as 'that'.\n"
             "- The rewritten correct query must contain zero occurrences of the word 'which'.\n"
             "- Do not increase or decrease the CCOMP complexity level during rewriting.\n"
         )
@@ -469,6 +478,25 @@ def injected_errors_have_query_anchor(query: str, injected_errors: list) -> bool
     return True
 
 
+def injected_errors_align_with_queries(ground_truth_query: str, noisy_query: str, injected_errors: list) -> bool:
+    if not isinstance(ground_truth_query, str) or not isinstance(noisy_query, str):
+        return False
+    if not isinstance(injected_errors, list) or not injected_errors:
+        return False
+    for idx, injected_error in enumerate(injected_errors):
+        if not isinstance(injected_error, dict):
+            raise TypeError(f"injected_errors[{idx}] 必须是 dict")
+        correct = injected_error.get('correct')
+        error = injected_error.get('error')
+        if not isinstance(correct, str) or not isinstance(error, str):
+            return False
+        if not query_contains_exact_anchor(ground_truth_query, correct):
+            return False
+        if not query_contains_exact_anchor(noisy_query, error):
+            return False
+    return True
+
+
 # ========================================
 # 增量写入辅助函数
 # ========================================
@@ -624,6 +652,14 @@ def main():
                     'status': 'complexity_mismatch', 'user_errors': errors, 'user_data': task['user_data'],
                     'query_info': task['query_info'], 'query_rewritten': revised_query != query,
                 }
+            if not revised_query_matches_expected_complexity(noisy_query, 'acl', task['level']):
+                return {
+                    'uid': uid, 'asin': task['asin'], 'ground_truth_query': revised_query,
+                    'ground_truth_word_count': len(revised_query.split()),
+                    'noisy_query': noisy_query, 'injected_errors': injected_errors,
+                    'status': 'complexity_mismatch', 'user_errors': errors, 'user_data': task['user_data'],
+                    'query_info': task['query_info'], 'query_rewritten': revised_query != query,
+                }
             if revised_query == query or noisy_query == revised_query or not injected_errors:
                 return {
                     'uid': uid, 'asin': task['asin'], 'ground_truth_query': revised_query,
@@ -633,6 +669,14 @@ def main():
                     'query_info': task['query_info'], 'query_rewritten': revised_query != query,
                 }
             if not injected_errors_have_query_anchor(revised_query, injected_errors):
+                return {
+                    'uid': uid, 'asin': task['asin'], 'ground_truth_query': revised_query,
+                    'ground_truth_word_count': len(revised_query.split()),
+                    'noisy_query': noisy_query, 'injected_errors': injected_errors,
+                    'status': 'no_anchor', 'user_errors': errors, 'user_data': task['user_data'],
+                    'query_info': task['query_info'], 'query_rewritten': revised_query != query,
+                }
+            if not injected_errors_align_with_queries(revised_query, noisy_query, injected_errors):
                 return {
                     'uid': uid, 'asin': task['asin'], 'ground_truth_query': revised_query,
                     'ground_truth_word_count': len(revised_query.split()),
@@ -666,6 +710,22 @@ def main():
         noisy_query = parsed['noisy_query']
         injected_errors = parsed['injected_errors']
 
+        if not revised_query_matches_expected_complexity(query, 'acl', task['level']):
+            return {
+                'uid': uid, 'asin': task['asin'], 'ground_truth_query': query,
+                'ground_truth_word_count': len(query.split()),
+                'noisy_query': noisy_query, 'injected_errors': injected_errors,
+                'status': 'complexity_mismatch', 'user_errors': errors, 'user_data': task['user_data'], 'query_info': task['query_info'],
+                'query_rewritten': False,
+            }
+        if not revised_query_matches_expected_complexity(noisy_query, 'acl', task['level']):
+            return {
+                'uid': uid, 'asin': task['asin'], 'ground_truth_query': query,
+                'ground_truth_word_count': len(query.split()),
+                'noisy_query': noisy_query, 'injected_errors': injected_errors,
+                'status': 'complexity_mismatch', 'user_errors': errors, 'user_data': task['user_data'], 'query_info': task['query_info'],
+                'query_rewritten': False,
+            }
         if noisy_query == query or not injected_errors:
             return {
                 'uid': uid, 'asin': task['asin'], 'ground_truth_query': query,
@@ -675,6 +735,14 @@ def main():
                 'query_rewritten': False,
             }
         if not injected_errors_have_query_anchor(query, injected_errors):
+            return {
+                'uid': uid, 'asin': task['asin'], 'ground_truth_query': query,
+                'ground_truth_word_count': len(query.split()),
+                'noisy_query': noisy_query, 'injected_errors': injected_errors,
+                'status': 'no_anchor', 'user_errors': errors, 'user_data': task['user_data'], 'query_info': task['query_info'],
+                'query_rewritten': False,
+            }
+        if not injected_errors_align_with_queries(query, noisy_query, injected_errors):
             return {
                 'uid': uid, 'asin': task['asin'], 'ground_truth_query': query,
                 'ground_truth_word_count': len(query.split()),
@@ -778,6 +846,14 @@ def main():
                     'status': 'complexity_mismatch', 'user_errors': errors, 'user_data': task['user_data'],
                     'query_info': task['query_info'], 'query_rewritten': revised_query != query,
                 }
+            if not revised_query_matches_expected_complexity(noisy_query, 'ccomp', task['level']):
+                return {
+                    'uid': uid, 'asin': task['asin'], 'ground_truth_query': revised_query,
+                    'ground_truth_word_count': len(revised_query.split()),
+                    'noisy_query': noisy_query, 'injected_errors': injected_errors,
+                    'status': 'complexity_mismatch', 'user_errors': errors, 'user_data': task['user_data'],
+                    'query_info': task['query_info'], 'query_rewritten': revised_query != query,
+                }
             if revised_query == query or noisy_query == revised_query or not injected_errors:
                 return {
                     'uid': uid, 'asin': task['asin'], 'ground_truth_query': revised_query,
@@ -787,6 +863,14 @@ def main():
                     'query_info': task['query_info'], 'query_rewritten': revised_query != query,
                 }
             if not injected_errors_have_query_anchor(revised_query, injected_errors):
+                return {
+                    'uid': uid, 'asin': task['asin'], 'ground_truth_query': revised_query,
+                    'ground_truth_word_count': len(revised_query.split()),
+                    'noisy_query': noisy_query, 'injected_errors': injected_errors,
+                    'status': 'no_anchor', 'user_errors': errors, 'user_data': task['user_data'],
+                    'query_info': task['query_info'], 'query_rewritten': revised_query != query,
+                }
+            if not injected_errors_align_with_queries(revised_query, noisy_query, injected_errors):
                 return {
                     'uid': uid, 'asin': task['asin'], 'ground_truth_query': revised_query,
                     'ground_truth_word_count': len(revised_query.split()),
@@ -820,6 +904,22 @@ def main():
         noisy_query = parsed['noisy_query']
         injected_errors = parsed['injected_errors']
 
+        if not revised_query_matches_expected_complexity(query, 'acl', task['level']):
+            return {
+                'uid': uid, 'asin': task['asin'], 'ground_truth_query': query,
+                'ground_truth_word_count': len(query.split()),
+                'noisy_query': noisy_query, 'injected_errors': injected_errors,
+                'status': 'complexity_mismatch', 'user_errors': errors, 'user_data': task['user_data'], 'query_info': task['query_info'],
+                'query_rewritten': False,
+            }
+        if not revised_query_matches_expected_complexity(noisy_query, 'ccomp', task['level']):
+            return {
+                'uid': uid, 'asin': task['asin'], 'ground_truth_query': query,
+                'ground_truth_word_count': len(query.split()),
+                'noisy_query': noisy_query, 'injected_errors': injected_errors,
+                'status': 'complexity_mismatch', 'user_errors': errors, 'user_data': task['user_data'], 'query_info': task['query_info'],
+                'query_rewritten': False,
+            }
         if noisy_query == query or not injected_errors:
             return {
                 'uid': uid, 'asin': task['asin'], 'ground_truth_query': query,
@@ -829,6 +929,14 @@ def main():
                 'query_rewritten': False,
             }
         if not injected_errors_have_query_anchor(query, injected_errors):
+            return {
+                'uid': uid, 'asin': task['asin'], 'ground_truth_query': query,
+                'ground_truth_word_count': len(query.split()),
+                'noisy_query': noisy_query, 'injected_errors': injected_errors,
+                'status': 'no_anchor', 'user_errors': errors, 'user_data': task['user_data'], 'query_info': task['query_info'],
+                'query_rewritten': False,
+            }
+        if not injected_errors_align_with_queries(query, noisy_query, injected_errors):
             return {
                 'uid': uid, 'asin': task['asin'], 'ground_truth_query': query,
                 'ground_truth_word_count': len(query.split()),

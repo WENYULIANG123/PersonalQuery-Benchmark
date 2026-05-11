@@ -400,7 +400,6 @@ def print_noisy_clean_family_avg_delta(clean_data: dict, noisy_data: dict):
         candidate_retrievers.update(noisy_data[cat].keys())
     candidate_retrievers = sort_retrievers(r for r in candidate_retrievers if r not in DISABLED_RETRIEVERS)
 
-    complete_retrievers = []
     incomplete_details = []
     for retriever in candidate_retrievers:
         missing_fields = []
@@ -414,21 +413,20 @@ def print_noisy_clean_family_avg_delta(clean_data: dict, noisy_data: dict):
                         missing_fields.append(f"{cat}/{source_name}/{retriever}/{query_category}")
         if missing_fields:
             incomplete_details.append((retriever, missing_fields))
-        else:
-            complete_retrievers.append(retriever)
 
-    if not complete_retrievers:
-        raise ValueError("No retriever has complete clean/noisy ACL/CCOMP data across all 3 domains")
+    if incomplete_details:
+        detail = "; ".join(
+            f"{retriever}: missing {', '.join(missing_fields)}"
+            for retriever, missing_fields in incomplete_details
+        )
+        raise KeyError(f"Incomplete 3-domain family data is not allowed: {detail}")
+
+    complete_retrievers = candidate_retrievers
 
     print("\n" + "=" * 118)
     print("Noisy vs Clean P@10 by Family - Average Across 3 Domains")
     print("每个检索器先分别读取 Baby/Grocery/Pet 的 ACL/CCOMP noisy 与 clean P@10，再计算三域均值和 noisy-clean 差值")
     print("=" * 118)
-    if incomplete_details:
-        print("Excluded retrievers with incomplete 3-domain family data:")
-        for retriever, missing_fields in incomplete_details:
-            print(f"  {retriever}: missing {', '.join(missing_fields)}")
-        print("-" * 118)
     print(
         f"{'Retriever':<12} "
         f"{'ACL Clean':>10} {'ACL Noisy':>10} {'ACL Diff':>10} "
@@ -611,7 +609,6 @@ def print_noisy_clean_paired_significance_analysis(all_data: dict):
         candidate_retrievers.update(cat_data.keys())
     candidate_retrievers = sort_retrievers(r for r in candidate_retrievers if r not in DISABLED_RETRIEVERS)
 
-    complete_retrievers = []
     incomplete_details = []
     for retriever in candidate_retrievers:
         missing_fields = []
@@ -625,22 +622,20 @@ def print_noisy_clean_paired_significance_analysis(all_data: dict):
                     missing_fields.append(f"{cat}/{family}/missing_diffs")
         if missing_fields:
             incomplete_details.append((retriever, missing_fields))
-        else:
-            complete_retrievers.append(retriever)
 
-    if not complete_retrievers:
-        raise ValueError("No retriever has complete noisy/clean paired data across all 3 domains")
+    if incomplete_details:
+        detail = "; ".join(
+            f"{retriever}: missing {', '.join(missing_fields)}"
+            for retriever, missing_fields in incomplete_details
+        )
+        raise KeyError(f"Incomplete 3-domain paired data is not allowed: {detail}")
+
+    complete_retrievers = candidate_retrievers
 
     print("\n" + "=" * 120)
     print("Paired Significance Analysis: Noisy P@10 - Clean P@10")
     print("基于 09_noisy_retrieval 的逐查询配对记录：按 retriever × family 汇总三域的 noisy-clean 差值")
     print("=" * 120)
-
-    if incomplete_details:
-        print("Excluded retrievers with incomplete 3-domain paired data:")
-        for retriever, missing_fields in incomplete_details:
-            print(f"  {retriever}: missing {', '.join(missing_fields)}")
-        print("-" * 120)
 
     overall_rows = []
     for family in ("acl", "ccomp"):

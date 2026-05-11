@@ -911,7 +911,9 @@ def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str 
                 return cache
 
             log_with_timestamp(f"      使用批处理编码 {len(query_texts)} 条查询...")
-            batch_size = 1024
+            # SPLADE 稀疏编码显存占用明显更高，固定 1024 容易在 GPU 上触发 OOM。
+            # 对 SPLADE 使用更保守的批大小，其他 retriever 维持原批量。
+            batch_size = 64 if retriever_name == 'SPLADE' else 1024
             n_batches = (len(query_texts) + batch_size - 1) // batch_size
 
             for batch_idx in range(n_batches):
