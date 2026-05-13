@@ -58,6 +58,7 @@ sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery/12_retrieval')
 
 # ============ 配置加载 ============
 from config import get_category_config, get_retriever_config
+from revised_query_utils import load_revised_query_map
 
 CATEGORY_NAME = "Grocery_and_Gourmet_Food"
 CAT_CONFIG = get_category_config(CATEGORY_NAME)
@@ -80,6 +81,7 @@ RETRIEVERS = RETRIEVER_CONFIG['retrievers']
 DENSE_RETRIEVERS = RETRIEVER_CONFIG['dense_retrievers']
 SPARSE_RETRIEVERS = RETRIEVER_CONFIG.get('sparse_retrievers', [])
 COLBERTV2_RETRIEVERS = ['colbertv2']
+DENSE_SEARCH_BATCH_SIZE = 64
 
 IDF_BINS = [(2.5, 3.5), (3.5, 4.5), (4.5, 5.0), (5.0, float('inf'))]
 IDF_BIN_LABELS = RETRIEVER_CONFIG['idf_bin_labels']
@@ -308,7 +310,7 @@ def _find_same_level_pairs(data: list) -> set:
     return valid_pairs
 
 
-def load_paired_queries(query_category: str = 'acl', filter_same_level: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def load_paired_queries(query_category: str = 'acl', filter_same_level: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """加载 ACL 和 CCOMP 查询数据用于配对分析，返回 (acl_df, ccomp_df)
 
     每条记录包含: user_id, asin, level, retriever, P@10, query, word_count, mean_idf
@@ -782,13 +784,13 @@ def colbertv2_search_from_cached_embedding(searcher, doc_ids: List[str], query_e
         results.append((doc_ids[pid_int], float(score)))
     return results
 
-def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', filter_same_level: bool = True) -> Tuple[Dict[str, List[Dict]], Dict[str, int], List[Tuple[int, float, float]]]:
+def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', filter_same_level: bool = False) -> Tuple[Dict[str, List[Dict]], Dict[str, int], List[Tuple[int, float, float]]]:
     """加载用户查询，每个查询项包含word_count和group_ratio（POS ratio代理）
 
     Args:
         query_type: 查询类型 ('correct' 使用 filled_query, 'noisy' 使用 noisy_query)
         query_category: 查询类别 ('acl' 或 'ccomp')
-        filter_same_level: 是否只保留 ACL 和 CCOMP level 一致的用户（默认 True）
+        filter_same_level: 是否只保留 ACL 和 CCOMP level 一致的用户（默认 False）
     """
     global GROUP_FIELD, UNIQUE_LEVELS
 
@@ -825,6 +827,10 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', 
     if filter_same_level:
         valid_pairs = _find_same_level_pairs(data)
 
+    revised_query_map = {}
+    if query_type != 'noisy':
+        revised_query_map = load_revised_query_map(CATEGORY_NAME)
+
     # 根据 query_type 确定查询文本字段
     # correct: correct_query (ground truth) / filled_query / generated_query / query
     # noisy: noisy_query
@@ -857,6 +863,10 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', 
                 query_text = get_query_text(q)
                 gv = q.get(GROUP_FIELD, 0)
                 word_count = q.get('word_count', 0)
+                if query_type != 'noisy':
+                    revised_query = revised_query_map.get((user_id, asin, query_category))
+                    if revised_query:
+                        query_text = revised_query
                 if user_id not in user_queries:
                     user_queries[user_id] = []
                     user_to_group[user_id] = gv
@@ -881,6 +891,10 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', 
             query_text = query_obj.get('query', '')
             gv = query_obj.get('level', 0)
             word_count = query_obj.get('word_count', 0)
+            if query_type != 'noisy':
+                revised_query = revised_query_map.get((user_id, asin, query_category))
+                if revised_query:
+                    query_text = revised_query
             if user_id not in user_queries:
                 user_queries[user_id] = []
                 user_to_group[user_id] = gv
@@ -904,6 +918,10 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', 
             if filter_same_level and (user_id, asin) not in valid_pairs:
                 continue
             query_text = get_query_text(item)
+            if query_type != 'noisy':
+                revised_query = revised_query_map.get((user_id, asin, query_category))
+                if revised_query:
+                    query_text = revised_query
             gv = item.get(f'target_{GROUP_FIELD}', item.get(GROUP_FIELD, 0))
             word_count = item.get('word_count') or 0
             group_ratio = item.get('persona', {}).get(f'{GROUP_FIELD}_sentence_ratio', 0.0)
@@ -1052,20 +1070,35 @@ class DenseSearcher:
         normalized_embeddings = embeddings / norms
         self.embeddings_tensor = torch.from_numpy(normalized_embeddings).float().to(self.device)
 
-    def search_batch(self, query_embeddings: List[np.ndarray], top_k: int = 10) -> List[List[Tuple[str, float]]]:
+    def search_batch(self, query_embeddings: List[np.ndarray], top_k: int = 10, batch_size: int = DENSE_SEARCH_BATCH_SIZE) -> List[List[Tuple[str, float]]]:
         if not query_embeddings:
             return []
-        query_tensor = torch.from_numpy(np.array(query_embeddings)).float().to(self.device)
-        # 归一化 query embeddings
-        q_norms = np.linalg.norm(query_embeddings, axis=1, keepdims=True)
-        q_norms = np.where(q_norms == 0, 1, q_norms)
-        query_tensor = query_tensor / torch.from_numpy(q_norms).float().to(self.device)
-        # 余弦相似度 = 归一化点积
-        scores = torch.mm(query_tensor, self.embeddings_tensor.T)
+        if batch_size <= 0:
+            raise ValueError(f"batch_size 必须 > 0, 实际为 {batch_size}")
+
         results = []
-        for i in range(len(query_embeddings)):
-            top_scores, top_indices = torch.topk(scores[i], min(top_k, len(self.doc_ids)))
-            results.append([(self.doc_ids[idx.item()], top_scores[j].item()) for j, idx in enumerate(top_indices)])
+        n = len(query_embeddings)
+        top_k = min(top_k, len(self.doc_ids))
+
+        with torch.no_grad():
+            for start in range(0, n, batch_size):
+                end = min(start + batch_size, n)
+                batch_embeddings = query_embeddings[start:end]
+                query_tensor = torch.from_numpy(np.array(batch_embeddings)).float().to(self.device)
+                # 归一化 query embeddings
+                q_norms = np.linalg.norm(batch_embeddings, axis=1, keepdims=True)
+                q_norms = np.where(q_norms == 0, 1, q_norms)
+                query_tensor = query_tensor / torch.from_numpy(q_norms).float().to(self.device)
+                # 余弦相似度 = 归一化点积
+                scores = torch.mm(query_tensor, self.embeddings_tensor.T)
+                for i in range(scores.shape[0]):
+                    top_scores, top_indices = torch.topk(scores[i], top_k)
+                    results.append([(self.doc_ids[idx.item()], top_scores[j].item()) for j, idx in enumerate(top_indices)])
+                del scores
+                del query_tensor
+
+        if len(results) != n:
+            raise RuntimeError(f"批量搜索结果条数不匹配: results={len(results)} queries={n}")
         return results
 
 class BM25Searcher:
@@ -1117,14 +1150,31 @@ class SPLADESearcher:
         row_indices = []
         col_indices = []
         data_values = []
+        max_doc_term_id = -1
         for doc_idx, d_vec in enumerate(self.doc_vectors):
             for term_id, d_weight in d_vec.items():
+                term_id = int(term_id)
                 row_indices.append(term_id)
                 col_indices.append(doc_idx)
                 data_values.append(d_weight)
+                if term_id > max_doc_term_id:
+                    max_doc_term_id = term_id
 
-        max_term_id = max((max(d_vec.keys()) for d_vec in self.doc_vectors if d_vec), default=0)
-        n_terms = max_term_id + 1
+        if max_doc_term_id < 0:
+            raise ValueError("SPLADE 文档向量为空，无法构建稀疏矩阵")
+
+        max_query_term_id = -1
+        for q_vec in query_vectors:
+            if isinstance(q_vec, np.ndarray) and q_vec.ndim == 0:
+                q_vec = q_vec.item()
+            if not hasattr(q_vec, 'items'):
+                raise TypeError(f"SPLADE 查询向量类型错误: {type(q_vec)}")
+            for term_id in q_vec.keys():
+                term_id = int(term_id)
+                if term_id > max_query_term_id:
+                    max_query_term_id = term_id
+
+        n_terms = max(max_doc_term_id, max_query_term_id) + 1
 
         doc_matrix = sparse.csr_matrix(
             (data_values, (row_indices, col_indices)),
@@ -1146,8 +1196,9 @@ class SPLADESearcher:
                 if not hasattr(q_vec, 'items'):
                     raise TypeError(f"SPLADE 查询向量类型错误: {type(q_vec)}")
                 for term_id, q_weight in q_vec.items():
+                    term_id = int(term_id)
                     q_rows.append(local_q_idx)
-                    q_cols.append(int(term_id))
+                    q_cols.append(term_id)
                     q_data.append(float(q_weight))
 
             query_matrix = sparse.csr_matrix(
@@ -1246,7 +1297,7 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_gr
     log(f"  批量搜索所有查询...")
     if all_query_data:
         all_embeddings = [q[1] for q in all_query_data]
-        results = searcher.search_batch(all_embeddings, top_k=max(k_values))
+        results = searcher.search_batch(all_embeddings, top_k=max(k_values), batch_size=DENSE_SEARCH_BATCH_SIZE)
 
     # 第三步：遍历搜索结果，进行分组统计
     log(f"  处理结果并分组统计...")

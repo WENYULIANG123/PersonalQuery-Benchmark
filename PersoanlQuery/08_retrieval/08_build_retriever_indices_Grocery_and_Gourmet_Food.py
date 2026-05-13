@@ -9,6 +9,7 @@ import os
 import sys
 import pickle
 import hashlib
+import shutil
 import threading
 import numpy as np
 import torch
@@ -43,6 +44,24 @@ from config import get_category_config
 
 CATEGORY_NAME = "Grocery_and_Gourmet_Food"
 CAT_CONFIG = get_category_config(CATEGORY_NAME)
+COLBERTV2_TORCH_EXTENSIONS_BASE_DIR = "/home/wlia0047/ar57_scratch/wenyu/tmp"
+
+
+def prepare_colbert_torch_extensions_dir() -> str:
+    ext_dir = os.path.join(
+        COLBERTV2_TORCH_EXTENSIONS_BASE_DIR,
+        f"torch_extensions_08_{CATEGORY_NAME}_{os.getpid()}"
+    )
+    if os.path.exists(ext_dir):
+        shutil.rmtree(ext_dir)
+    os.makedirs(ext_dir, exist_ok=True)
+    os.environ["TORCH_EXTENSIONS_DIR"] = ext_dir
+    os.environ["COLBERT_LOAD_TORCH_EXTENSION_VERBOSE"] = "True"
+    log_with_timestamp(f"[BOOT] ColBERT TORCH_EXTENSIONS_DIR = {ext_dir}")
+    return ext_dir
+
+
+COLBERTV2_TORCH_EXTENSIONS_DIR = prepare_colbert_torch_extensions_dir()
 
 def load_fullscale_metadata(metadata_file: str) -> Dict:
     """Load full metadata"""
@@ -464,6 +483,7 @@ def build_retriever(retriever_name: str, documents: List[Dict], doc_hash: str, c
         if retriever_name == 'colbertv2':
             if all_metadata is None:
                 raise ValueError("ColBERTv2 build requires all_metadata")
+            retrievers.preflight_colbert_cuda_extension_build()
             output_root = retrievers.build_colbertv2_retriever_index(
                 documents,
                 doc_hash,

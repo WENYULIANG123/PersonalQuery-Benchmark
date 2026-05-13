@@ -58,6 +58,7 @@ sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery/12_retrieval')
 
 # ============ 配置加载 ============
 from config import get_category_config, get_retriever_config
+from revised_query_utils import load_revised_query_map
 
 CATEGORY_NAME = "Pet_Supplies"
 CAT_CONFIG = get_category_config(CATEGORY_NAME)
@@ -278,7 +279,7 @@ def _find_same_level_pairs(data: list) -> set:
     return valid_pairs
 
 
-def load_paired_queries(query_category: str = 'acl', filter_same_level: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def load_paired_queries(query_category: str = 'acl', filter_same_level: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """加载 ACL 和 CCOMP 查询数据用于配对分析，返回 (acl_df, ccomp_df)
 
     每条记录包含: user_id, asin, level, retriever, P@10, query, word_count, mean_idf
@@ -740,13 +741,13 @@ def _find_same_level_pairs(data: list) -> set:
     return valid_pairs
 
 
-def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', filter_same_level: bool = True) -> Tuple[Dict[str, List[Dict]], Dict[str, int], List[Tuple[int, float, float]]]:
+def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', filter_same_level: bool = False) -> Tuple[Dict[str, List[Dict]], Dict[str, int], List[Tuple[int, float, float]]]:
     """加载用户查询，每个查询项包含word_count和group_ratio（POS ratio代理）
 
     Args:
         query_type: 查询类型 ('correct' 使用 filled_query, 'noisy' 使用 noisy_query)
         query_category: 查询类别 ('acl' 或 'ccomp')
-        filter_same_level: 是否只保留 ACL 和 CCOMP level 一致的用户（默认 True）
+        filter_same_level: 是否只保留 ACL 和 CCOMP level 一致的用户（默认 False）
     """
     global GROUP_FIELD, UNIQUE_LEVELS
 
@@ -785,6 +786,10 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', 
         # 只加载一次数据来找出有效对
         valid_pairs = _find_same_level_pairs(data)
 
+    revised_query_map = {}
+    if query_type != 'noisy':
+        revised_query_map = load_revised_query_map(CATEGORY_NAME)
+
     # 根据 query_type 确定查询文本字段
     # correct: correct_query (ground truth) / filled_query / generated_query / query
     # noisy: noisy_query
@@ -816,6 +821,10 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', 
                 query_text = get_query_text(q)
                 gv = q.get(GROUP_FIELD, 0)
                 word_count = q.get('word_count', 0)
+                if query_type != 'noisy':
+                    revised_query = revised_query_map.get((user_id, asin, query_category))
+                    if revised_query:
+                        query_text = revised_query
                 if user_id not in user_queries:
                     user_queries[user_id] = []
                     user_to_group[user_id] = gv
@@ -840,6 +849,10 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', 
             query_text = query_obj.get('query', '')
             gv = query_obj.get('level', 0)
             word_count = query_obj.get('word_count', 0)
+            if query_type != 'noisy':
+                revised_query = revised_query_map.get((user_id, asin, query_category))
+                if revised_query:
+                    query_text = revised_query
             if user_id not in user_queries:
                 user_queries[user_id] = []
                 user_to_group[user_id] = gv
@@ -863,6 +876,10 @@ def load_user_queries(query_type: str = 'correct', query_category: str = 'acl', 
             if filter_same_level and (user_id, asin) not in valid_pairs:
                 continue
             query_text = get_query_text(item)
+            if query_type != 'noisy':
+                revised_query = revised_query_map.get((user_id, asin, query_category))
+                if revised_query:
+                    query_text = revised_query
             asin = item.get('asin', '')
             gv = item.get(f'target_{GROUP_FIELD}', item.get(GROUP_FIELD, 0))
             word_count = item.get('word_count') or 0
@@ -1765,7 +1782,9 @@ def evaluate_splade_retriever(user_queries: Dict, user_to_group: Dict, k_values:
     col_indices = []
     data_values = []
     invalid_count = 0
+    max_doc_term_id = -1
     for term_id, doc_list in inverted_index.items():
+        term_id = int(term_id)
         for doc_idx, d_weight in doc_list:
             if doc_idx >= n_docs:
                 invalid_count += 1
@@ -1773,12 +1792,22 @@ def evaluate_splade_retriever(user_queries: Dict, user_to_group: Dict, k_values:
             row_indices.append(term_id)
             col_indices.append(doc_idx)
             data_values.append(d_weight)
+            if term_id > max_doc_term_id:
+                max_doc_term_id = term_id
     if invalid_count > 0:
         log(f"  [警告] 跳过 {invalid_count} 个超出范围的 doc_idx")
 
-    # 获取最大term_id确定矩阵维度
-    max_term_id = max(inverted_index.keys()) if inverted_index else 0
-    n_terms = max_term_id + 1
+    if max_doc_term_id < 0:
+        raise ValueError("SPLADE 文档向量为空，无法构建稀疏矩阵")
+
+    max_query_term_id = -1
+    for q_data_item in all_q_data:
+        for term_id in q_data_item['q_vec'].keys():
+            term_id = int(term_id)
+            if term_id > max_query_term_id:
+                max_query_term_id = term_id
+
+    n_terms = max(max_doc_term_id, max_query_term_id) + 1
 
     # 构建稀疏矩阵 (term × doc)
     doc_matrix = sparse.csr_matrix(
@@ -1799,6 +1828,7 @@ def evaluate_splade_retriever(user_queries: Dict, user_to_group: Dict, k_values:
 
         for local_q_idx, q_data_item in enumerate(all_q_data[batch_start:batch_end]):
             for term_id, q_weight in q_data_item['q_vec'].items():
+                term_id = int(term_id)
                 q_rows.append(local_q_idx)
                 q_cols.append(term_id)
                 q_data.append(q_weight)

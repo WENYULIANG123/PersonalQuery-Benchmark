@@ -15,6 +15,7 @@ import time
 import re
 import math
 import os
+from decimal import Decimal, InvalidOperation
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -47,6 +48,7 @@ NUM_USERS_TO_TEST = _CONFIG['num_users_to_test']
 MAX_WORKERS = _CONFIG['max_workers']
 USE_MINIMAXIO = _CONFIG.get('use_minimaxio', False)
 REQUIRED_ATTR_COUNT = 5
+VALID_ATTR_KEYS = {f'A{i}' for i in range(1, 19)}
 
 with open(CCOMP_PROMPTS_FILE, 'r', encoding='utf-8') as f:
     _PROMPTS = json.load(f)
@@ -62,6 +64,16 @@ def log(msg):
 # ========================================
 # 特征提取
 # ========================================
+PLACEHOLDER_ATTR_VALUES = {
+    'none',
+    'n/a',
+    'na',
+    'null',
+    'unknown',
+    'see description',
+}
+
+
 def count_words(text: str) -> int:
     """简单分词统计词数"""
     return len(text.split())
@@ -70,6 +82,20 @@ def count_words(text: str) -> int:
 def _format_dict_key(key: str) -> str:
     """Convert metadata dict keys into readable attribute labels."""
     return re.sub(r'\s+', ' ', key.replace('_', ' ')).strip()
+
+
+def _is_placeholder_attr_text(raw_value: str) -> bool:
+    normalized = re.sub(r'\s+', ' ', raw_value).strip().casefold()
+    return normalized in PLACEHOLDER_ATTR_VALUES
+
+
+def _canonicalize_attr_text(raw_value: str) -> str:
+    raw_value = re.sub(r'\s+', ' ', raw_value).strip()
+    if '(' in raw_value:
+        prefix = raw_value.split('(', 1)[0].strip()
+        if prefix:
+            raw_value = prefix
+    return raw_value.strip()
 
 
 def _normalize_scalar_attr(value) -> str | None:
@@ -87,6 +113,9 @@ def _normalize_scalar_attr(value) -> str | None:
         raw_value = raw_value.split(';')[0].strip()
     elif ',' in raw_value:
         raw_value = raw_value.split(',')[0].strip()
+    raw_value = _canonicalize_attr_text(raw_value)
+    if not raw_value or _is_placeholder_attr_text(raw_value):
+        return None
     return raw_value if raw_value else None
 
 
@@ -105,6 +134,31 @@ def _normalize_attr_value(value) -> str | None:
                 return item_text
         return None
     return _normalize_scalar_attr(value)
+
+
+def _normalize_attr_identity(raw_value: str) -> str:
+    normalized = _canonicalize_attr_text(raw_value).casefold()
+    try:
+        numeric_value = Decimal(normalized)
+    except InvalidOperation:
+        numeric_value = None
+    if numeric_value is not None:
+        return f"NUM::{format(numeric_value.normalize(), 'f')}"
+    return f"TEXT::{normalized}"
+
+
+def _iter_attr_value_candidates(value):
+    if isinstance(value, dict):
+        for child_value in value.values():
+            yield from _iter_attr_value_candidates(child_value)
+        return
+    if isinstance(value, list):
+        for item in value:
+            yield from _iter_attr_value_candidates(item)
+        return
+    normalized = _normalize_scalar_attr(value)
+    if normalized:
+        yield normalized
 
 
 def _extract_attrs_from_product(prod: dict) -> dict:
@@ -126,6 +180,7 @@ def _extract_attrs_from_product(prod: dict) -> dict:
     }
     attr_keys = [f'A{i}' for i in range(1, 19)]  # A1-A18
     attrs = {}
+    used_value_identities = set()
     for key in attr_keys:
         if len(attrs) >= REQUIRED_ATTR_COUNT:
             break
@@ -139,9 +194,17 @@ def _extract_attrs_from_product(prod: dict) -> dict:
             'A13': 'reusability', 'A14': 'size', 'A15': 'weight', 'A16': 'compatibility',
             'A17': 'flavor', 'A18': 'quality',
         }.get(key, '')
-        raw_value = _normalize_attr_value(prod.get(prod_key))
-        if raw_value:
-            attrs[key] = {'value': raw_value, 'type': ATTR_TYPES.get(key, 'unknown')}
+        raw_prod_value = prod.get(prod_key)
+        selected_value = None
+        for candidate in _iter_attr_value_candidates(raw_prod_value):
+            identity = _normalize_attr_identity(candidate)
+            if identity in used_value_identities:
+                continue
+            selected_value = candidate
+            used_value_identities.add(identity)
+            break
+        if selected_value:
+            attrs[key] = {'value': selected_value, 'type': ATTR_TYPES.get(key, 'unknown')}
             if len(attrs) >= REQUIRED_ATTR_COUNT:
                 break
     return attrs
@@ -201,12 +264,12 @@ def _format_attrs_for_prompt(attrs: dict) -> str:
         info = attrs.get(key)
         # 处理字符串值（预热时用）或字典值（实际运行时用）
         if isinstance(info, str):
-            value = info if info and info != 'None' else ''
+            value = info if info and not _is_placeholder_attr_text(info) else ''
             attr_type = 'unknown'
         else:
-            value = (info.get('value', 'None') or 'None') if info else 'None'
+            value = (info.get('value', '') or '') if info else ''
             attr_type = info.get('type', 'unknown') if info else 'unknown'
-        if value and value != 'None':
+        if value and not _is_placeholder_attr_text(value):
             lines.append(f"- {key} ({attr_type}): {value}")
     return '\n'.join(lines)
 
@@ -516,6 +579,124 @@ def count_that_in_query(query: str) -> int:
     return len(re.findall(r'\bthat\b', query, re.IGNORECASE))
 
 
+def count_attr_value_occurrences(query: str, attr_value: str) -> int:
+    """计算属性值在查询中出现的次数（大小写不敏感）"""
+    counts = count_attr_value_occurrences_map(query, {"attr": attr_value})
+    return counts["attr"]
+
+
+def _normalize_variant_token(token: str) -> str:
+    token = token.casefold()
+    if len(token) > 4 and token.endswith('ies'):
+        token = token[:-3] + 'y'
+    elif len(token) > 3 and token.endswith('es') and not token.endswith(('aes', 'ees', 'oes')):
+        token = token[:-2]
+    elif len(token) > 3 and token.endswith('s') and not token.endswith('ss'):
+        token = token[:-1]
+
+    for suffix in ('ingly', 'edly', 'ing', 'ed', 'en', 'ly', 'ness', 'ment', 'er', 'est', 'al', 'ic', 'ish'):
+        if len(token) - len(suffix) >= 3 and token.endswith(suffix):
+            token = token[:-len(suffix)]
+            break
+    return token
+
+
+def _build_attr_value_pattern(attr_value: str) -> str | None:
+    if not isinstance(attr_value, str) or not attr_value.strip():
+        return None
+    attr_value = _canonicalize_attr_text(attr_value)
+    if not attr_value:
+        return None
+    try:
+        numeric_value = Decimal(attr_value)
+    except InvalidOperation:
+        numeric_value = None
+    if numeric_value is not None:
+        normalized = format(numeric_value.normalize(), 'f')
+        if '.' in normalized:
+            integer_part, fractional_part = normalized.split('.', 1)
+            return rf"(?<![A-Za-z0-9])\$?{re.escape(integer_part)}\.{re.escape(fractional_part)}(?:0+)?(?![A-Za-z0-9])"
+        else:
+            return rf"(?<![A-Za-z0-9])\$?{re.escape(normalized)}(?:\.0+)?(?![A-Za-z0-9])"
+    if re.fullmatch(r"[A-Za-z0-9' ]+", attr_value):
+        return rf"\b{re.escape(attr_value)}\b"
+    else:
+        return re.escape(attr_value)
+
+
+def _find_variant_token_spans(query: str, attr_value: str) -> list[tuple[int, int]]:
+    attr_value = _canonicalize_attr_text(attr_value)
+    attr_tokens = [match.group(0) for match in re.finditer(r"[A-Za-z0-9']+", attr_value)]
+    if not attr_tokens:
+        return []
+    query_tokens = list(re.finditer(r"[A-Za-z0-9']+", query))
+    if len(query_tokens) < len(attr_tokens):
+        return []
+
+    normalized_attr_tokens = [_normalize_variant_token(token) for token in attr_tokens]
+    spans = []
+    window = len(attr_tokens)
+    for start_index in range(len(query_tokens) - window + 1):
+        token_window = query_tokens[start_index:start_index + window]
+        normalized_query_tokens = [_normalize_variant_token(token.group(0)) for token in token_window]
+        if normalized_query_tokens == normalized_attr_tokens:
+            spans.append((token_window[0].start(), token_window[-1].end()))
+    return spans
+
+
+def count_attr_value_occurrences_map(query: str, attrs_used: dict) -> dict[str, int]:
+    """统计每个属性值在查询中的非重叠出现次数，长属性优先占位。"""
+    matches_by_key = {}
+    counts = {}
+    for key, value in attrs_used.items():
+        pattern = _build_attr_value_pattern(value)
+        if pattern is None:
+            matches = []
+        else:
+            matches = [match.span() for match in re.finditer(pattern, query, re.IGNORECASE)]
+        if isinstance(value, str):
+            matches.extend(_find_variant_token_spans(query, value))
+        if not matches:
+            matches_by_key[key] = []
+            counts[key] = 0
+            continue
+        matches_by_key[key] = sorted(set(matches))
+        counts[key] = 0
+
+    occupied_spans: list[tuple[int, int]] = []
+    ordered_keys = sorted(
+        attrs_used,
+        key=lambda key: (-len(str(attrs_used[key]).strip()), key),
+    )
+    for key in ordered_keys:
+        for span in matches_by_key[key]:
+            if any(not (span[1] <= used[0] or span[0] >= used[1]) for used in occupied_spans):
+                continue
+            occupied_spans.append(span)
+            counts[key] += 1
+    return counts
+
+
+def validate_query_uses_exactly_five_attrs(query: str, attrs_used: dict) -> tuple[bool, str]:
+    """校验查询是否恰好使用5个属性值，且每个属性值恰好出现1次"""
+    invalid_keys = sorted(key for key in attrs_used if key not in VALID_ATTR_KEYS)
+    if invalid_keys:
+        return False, f"attrs_used 包含非法属性键: {', '.join(invalid_keys)}"
+    if len(attrs_used) != REQUIRED_ATTR_COUNT:
+        return False, f"attrs_used 数量不等于 {REQUIRED_ATTR_COUNT}，实际 {len(attrs_used)}"
+
+    occurrence_counts = count_attr_value_occurrences_map(query, attrs_used)
+    bad_attrs = []
+    for key, value in attrs_used.items():
+        count = occurrence_counts[key]
+        if count != 1:
+            bad_attrs.append(f"{key}={value!r} 出现 {count} 次")
+
+    if bad_attrs:
+        return False, "; ".join(bad_attrs)
+    return True, ""
+
+
 # ========================================
 # 主函数
 # ========================================
@@ -769,6 +950,11 @@ def main():
                 log(f"    [DEBUG] ACL level {target_acl_level} which数量不匹配(期望{target_acl_level},实际{actual_which})")
                 log(f"    [ERROR] ACL level {target_acl_level} 验证失败，user={uid} 标记为失败")
                 return None
+            attr_ok, attr_error = validate_query_uses_exactly_five_attrs(query, source_attrs_used)
+            if not attr_ok:
+                log(f"    [DEBUG] ACL level {target_acl_level} 属性值校验失败: {attr_error}")
+                log(f"    [ERROR] ACL level {target_acl_level} 属性值验证失败，user={uid} 标记为失败")
+                return None
 
             acl_query_result = {
                 'level': target_acl_level,
@@ -791,6 +977,11 @@ def main():
             if actual_which != 0:
                 log(f"    [DEBUG] ACL Level 0 which数量不匹配(期望0,实际{actual_which})")
                 log(f"    [ERROR] ACL Level 0 验证失败，user={uid} 标记为失败")
+                return None
+            attr_ok, attr_error = validate_query_uses_exactly_five_attrs(query, source_attrs_used)
+            if not attr_ok:
+                log(f"    [DEBUG] ACL Level 0 属性值校验失败: {attr_error}")
+                log(f"    [ERROR] ACL Level 0 属性值验证失败，user={uid} 标记为失败")
                 return None
 
             acl_query_result = {
@@ -817,6 +1008,11 @@ def main():
                 log(f"    [DEBUG] CCOMP level {target_ccomp_level} that数量不匹配(期望{target_ccomp_level},实际{actual_that})")
                 log(f"    [ERROR] CCOMP level {target_ccomp_level} 验证失败，user={uid} 标记为失败")
                 return None
+            attr_ok, attr_error = validate_query_uses_exactly_five_attrs(query, source_attrs_used)
+            if not attr_ok:
+                log(f"    [DEBUG] CCOMP level {target_ccomp_level} 属性值校验失败: {attr_error}")
+                log(f"    [ERROR] CCOMP level {target_ccomp_level} 属性值验证失败，user={uid} 标记为失败")
+                return None
 
             ccomp_query_result = {
                 'level': target_ccomp_level,
@@ -839,6 +1035,11 @@ def main():
             if actual_that != 0:
                 log(f"    [DEBUG] CCOMP Level 0 that数量不匹配(期望0,实际{actual_that})")
                 log(f"    [ERROR] CCOMP Level 0 验证失败，user={uid} 标记为失败")
+                return None
+            attr_ok, attr_error = validate_query_uses_exactly_five_attrs(query, source_attrs_used)
+            if not attr_ok:
+                log(f"    [DEBUG] CCOMP Level 0 属性值校验失败: {attr_error}")
+                log(f"    [ERROR] CCOMP Level 0 属性值验证失败，user={uid} 标记为失败")
                 return None
 
             ccomp_query_result = {
