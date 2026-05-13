@@ -644,8 +644,24 @@ def _find_variant_token_spans(query: str, attr_value: str) -> list[tuple[int, in
     return spans
 
 
+def _attr_value_variant_signature(attr_value: str) -> tuple[str, ...]:
+    attr_value = _canonicalize_attr_text(attr_value)
+    return tuple(
+        _normalize_variant_token(match.group(0))
+        for match in re.finditer(r"[A-Za-z0-9']+", attr_value)
+    )
+
+
 def count_attr_value_occurrences_map(query: str, attrs_used: dict) -> dict[str, int]:
     """统计每个属性值在查询中的非重叠出现次数，长属性优先占位。"""
+    signature_counts: dict[tuple[str, ...], int] = {}
+    for value in attrs_used.values():
+        if not isinstance(value, str):
+            continue
+        signature = _attr_value_variant_signature(value)
+        if signature:
+            signature_counts[signature] = signature_counts.get(signature, 0) + 1
+
     matches_by_key = {}
     counts = {}
     for key, value in attrs_used.items():
@@ -654,7 +670,7 @@ def count_attr_value_occurrences_map(query: str, attrs_used: dict) -> dict[str, 
             matches = []
         else:
             matches = [match.span() for match in re.finditer(pattern, query, re.IGNORECASE)]
-        if isinstance(value, str):
+        if isinstance(value, str) and signature_counts.get(_attr_value_variant_signature(value), 0) == 1:
             matches.extend(_find_variant_token_spans(query, value))
         if not matches:
             matches_by_key[key] = []

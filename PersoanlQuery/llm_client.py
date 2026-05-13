@@ -295,6 +295,8 @@ class MiniMaxAnthropicClient:
         max_tokens: int = 4096,
         temperature: Optional[float] = None,
         max_retries: int = 100,
+        retry_on_empty_response: bool = True,
+        stream: bool = False,
     ) -> tuple:
         """Call MiniMax API with prompt caching.
 
@@ -320,6 +322,17 @@ class MiniMaxAnthropicClient:
 
         safe_max_tokens = max(128, int(max_tokens))
         safe_temp = temperature if temperature is not None else 0.7
+
+        if stream:
+            return self._call_with_cache_streaming(
+                safe_system=safe_system,
+                safe_user=safe_user,
+                safe_max_tokens=safe_max_tokens,
+                safe_temp=safe_temp,
+                max_retries=max_retries,
+                retry_on_empty_response=retry_on_empty_response,
+                log_prefix="[MiniMax-Cache]",
+            )
 
         retry_count = 0
         for attempt in range(max_retries):
@@ -359,7 +372,7 @@ class MiniMaxAnthropicClient:
 
                 text_content = text_content.strip()
                 if not text_content:
-                    if attempt < max_retries - 1:
+                    if retry_on_empty_response and attempt < max_retries - 1:
                         wait_time = min(60, (2 ** attempt) * 3)
                         _log(f"[MiniMax-Cache] Empty response. Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
                         time.sleep(wait_time)
@@ -382,6 +395,79 @@ class MiniMaxAnthropicClient:
                     retry_count += 1
                     continue
                 _log(f"[MiniMax-Cache] Error calling API: {e}")
+                return "", {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}
+
+        return "", {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}
+
+    def _call_with_cache_streaming(
+        self,
+        safe_system: str,
+        safe_user: str,
+        safe_max_tokens: int,
+        safe_temp: float,
+        max_retries: int,
+        retry_on_empty_response: bool,
+        log_prefix: str,
+    ) -> tuple:
+        messages = [{"role": "user", "content": safe_user}]
+        retry_count = 0
+
+        for attempt in range(max_retries):
+            text_parts = []
+            cache_read_input_tokens = 0
+            cache_creation_input_tokens = 0
+            input_tokens = 0
+            output_tokens = 0
+            try:
+                with self.client.messages.stream(
+                    model=self.model,
+                    max_tokens=safe_max_tokens,
+                    temperature=safe_temp,
+                    system=[
+                        {"type": "text", "text": safe_system, "cache_control": {"type": "ephemeral"}}
+                    ],
+                    messages=messages,
+                ) as stream_manager:
+                    for text in stream_manager.text_stream:
+                        text_parts.append(text)
+                    message = stream_manager.get_final_message()
+
+                if hasattr(message, 'usage') and message.usage:
+                    cache_read_input_tokens = getattr(message.usage, 'cache_read_input_tokens', 0)
+                    cache_creation_input_tokens = getattr(message.usage, 'cache_creation_input_tokens', 0)
+                    input_tokens = getattr(message.usage, 'input_tokens', 0)
+                    output_tokens = getattr(message.usage, 'output_tokens', 0)
+
+                text_content = "".join(text_parts).strip()
+                if not text_content and hasattr(message, "content"):
+                    for block in message.content:
+                        if getattr(block, "type", None) == "text":
+                            text_content += getattr(block, "text", "")
+                    text_content = text_content.strip()
+
+                if not text_content:
+                    if retry_on_empty_response and attempt < max_retries - 1:
+                        wait_time = min(60, (2 ** attempt) * 3)
+                        _log(f"{log_prefix} Empty streaming response. Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
+                        time.sleep(wait_time)
+                        retry_count += 1
+                        continue
+                    return "", {"cache_creation_input_tokens": cache_creation_input_tokens, "cache_read_input_tokens": cache_read_input_tokens, "input_tokens": input_tokens, "output_tokens": output_tokens}
+
+                if retry_count > 0:
+                    _log(f"{log_prefix} Empty streaming response retry succeeded after {retry_count} retries.")
+                return text_content, {"cache_creation_input_tokens": cache_creation_input_tokens, "cache_read_input_tokens": cache_read_input_tokens, "input_tokens": input_tokens, "output_tokens": output_tokens}
+
+            except Exception as e:
+                error_str = str(e)
+                retryable = any(code in error_str for code in ["429", "529", "500", "502", "503", "504", "520", "522", "530"])
+                if retryable:
+                    wait_time = min(60, (2 ** attempt) * 3)
+                    _log(f"{log_prefix} Rate limited ({e}). Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                    retry_count += 1
+                    continue
+                _log(f"{log_prefix} Error calling streaming API: {e}")
                 return "", {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}
 
         return "", {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}
@@ -496,6 +582,8 @@ class MiniMaxIOAnthropicClient:
         max_tokens: int = 4096,
         temperature: Optional[float] = None,
         max_retries: int = 100,
+        retry_on_empty_response: bool = True,
+        stream: bool = False,
     ) -> tuple:
         """Call MiniMax IO API with prompt caching."""
         import anthropic
@@ -507,6 +595,17 @@ class MiniMaxIOAnthropicClient:
 
         safe_max_tokens = max(128, int(max_tokens))
         safe_temp = temperature if temperature is not None else 0.7
+
+        if stream:
+            return self._call_with_cache_streaming(
+                safe_system=safe_system,
+                safe_user=safe_user,
+                safe_max_tokens=safe_max_tokens,
+                safe_temp=safe_temp,
+                max_retries=max_retries,
+                retry_on_empty_response=retry_on_empty_response,
+                log_prefix="[MiniMaxIO-Cache]",
+            )
 
         retry_count = 0
         for attempt in range(max_retries):
@@ -543,7 +642,7 @@ class MiniMaxIOAnthropicClient:
 
                 text_content = text_content.strip()
                 if not text_content:
-                    if attempt < max_retries - 1:
+                    if retry_on_empty_response and attempt < max_retries - 1:
                         wait_time = min(60, (2 ** attempt) * 3)
                         _log(f"[MiniMaxIO-Cache] Empty response. Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
                         time.sleep(wait_time)
