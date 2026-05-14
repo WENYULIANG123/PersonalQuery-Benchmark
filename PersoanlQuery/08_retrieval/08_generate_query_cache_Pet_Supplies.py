@@ -11,7 +11,7 @@
     python3 generate_query_cache.py
     python3 generate_query_cache.py --retrievers ANCE Dense E5
     python3 generate_query_cache.py --users USER1 USER2 --modes clean
-    
+
 特点：
     - 默认为所有检索器生成clean和noisy两种模式的缓存
     - 预期收益: 查询评估时间 14.6s → 11-12s (20-30% improvement)
@@ -62,6 +62,8 @@ STAGE6_DIR = GLOBAL_PATHS['stage6_query']
 QUERY_FILE = CAT_CONFIG['query_file']
 ACL_QUERY_FILE = QUERY_FILE
 CCOMP_QUERY_FILE = QUERY_FILE
+SYNTAX_DEPTH_QUERY_FILE = os.path.join(STAGE6_DIR, CATEGORY_NAME, "query_by_syntax_depth.json")
+SYNTAX_DEPTH_MODE = "syntax_depth_correct"
 CACHE_DIR = CAT_CONFIG['query_cache_dir']
 BM25_RETRIEVER_CACHE_DIR = CAT_CONFIG['retriever_cache_dir']
 
@@ -83,24 +85,19 @@ SPARSE_RETRIEVERS = {'SPLADE'}
 def log_with_timestamp(msg: str):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
+
 def load_colbertv2_build_module():
-    module_path = current_dir / f"08_build_retriever_indices_{CATEGORY_NAME}.py"
+    module_path = current_dir / "08_build_retriever_indices_Pet_Supplies.py"
     if not module_path.exists():
         raise FileNotFoundError(f"Required ColBERTv2 build module not found: {module_path}")
 
-    spec = importlib.util.spec_from_file_location(
-        f"build_retriever_indices_{CATEGORY_NAME.lower()}",
-        module_path,
-    )
+    spec = importlib.util.spec_from_file_location("build_retriever_indices_baby_products", module_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Unable to load ColBERTv2 build module: {module_path}")
 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-
-    if not hasattr(module, "get_colbertv2_template_module"):
-        raise AttributeError(f"ColBERTv2 build module missing get_colbertv2_template_module: {module_path}")
-    return module.get_colbertv2_template_module()
+    return module
 
 def find_all_users() -> Set[str]:
     """查找所有用户"""
@@ -195,6 +192,7 @@ def save_bm25_query_cache(cache: Dict, mode: str):
     log_with_timestamp(f"  ✓ BM25 查询缓存已保存: {cache_file}")
     log_with_timestamp(f"    - 查询数: {len(cache)}")
     log_with_timestamp(f"    - 文件大小: {file_size_mb:.2f} MB")
+
 
 def resolve_colbertv2_output_root() -> str:
     helper = load_colbertv2_build_module()
@@ -514,7 +512,7 @@ def generate_colbertv2_cache_from_query_types(query_types: List[Tuple[str, List[
 
 
 def generate_bm25_cache_from_persona_source():
-    """为 BM25 生成 correct 查询缓存 (ACL + CCOMP - correct)
+    """为 BM25 生成所有查询缓存 (ACL + CCOMP - correct)
 
     noisy 查询缓存由 09_noisy_retrieval 脚本单独生成
     """
@@ -535,7 +533,7 @@ def generate_bm25_cache_from_persona_source():
     acl_correct_count = len(acl_correct)
     ccomp_correct_count = len(ccomp_correct)
 
-    log_with_timestamp(f"")
+    log_with_timestamp("")
     log_with_timestamp(f"📋 任务配置:")
     log_with_timestamp(f"  • ACL correct 查询: {acl_correct_count} 条")
     log_with_timestamp(f"  • CCOMP correct 查询: {ccomp_correct_count} 条")
@@ -545,7 +543,7 @@ def generate_bm25_cache_from_persona_source():
     start_time = time.time()
     total_cached = 0
 
-    # 定义查询类型和模式（仅 correct）
+    # 定义所有查询类型和模式
     query_modes = [
         (acl_correct, 'acl_correct'),
         (ccomp_correct, 'ccomp_correct'),
@@ -706,6 +704,66 @@ def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
         f"其中 revised: {revised_used}"
     )
     return correct_queries, []
+
+
+def load_syntax_depth_queries() -> List[Dict]:
+    """从 query_by_syntax_depth.json 加载每个用户的 syntax-depth 查询。"""
+    if not os.path.exists(SYNTAX_DEPTH_QUERY_FILE):
+        raise FileNotFoundError(f"syntax-depth query file not found: {SYNTAX_DEPTH_QUERY_FILE}")
+
+    with open(SYNTAX_DEPTH_QUERY_FILE, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    if not isinstance(data, list):
+        raise TypeError(f"syntax-depth query file must contain a list, got {type(data).__name__}")
+
+    queries = []
+    seen_user_ids = set()
+    for index, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise TypeError(f"syntax-depth row must be dict at index {index}, got {type(item).__name__}")
+
+        for field in ('user_id', 'asin', 'syntax_depth_query'):
+            if field not in item:
+                raise ValueError(f"syntax-depth row missing required field '{field}' at index {index}")
+
+        user_id = item['user_id']
+        asin = item['asin']
+        syntax_depth_query = item['syntax_depth_query']
+        if not user_id:
+            raise ValueError(f"syntax-depth row missing user_id at index {index}")
+        if not asin:
+            raise ValueError(f"syntax-depth row missing asin for user={user_id}, index={index}")
+        if not isinstance(syntax_depth_query, dict):
+            raise TypeError(
+                f"syntax_depth_query must be dict for user={user_id}, index={index}, "
+                f"got {type(syntax_depth_query).__name__}"
+            )
+
+        if 'query' not in syntax_depth_query:
+            raise ValueError(f"syntax_depth_query missing required field 'query' for user={user_id}, index={index}")
+
+        query_text = syntax_depth_query['query']
+        if not isinstance(query_text, str):
+            raise TypeError(f"query must be a string for user={user_id}, index={index}")
+        query_text = query_text.strip()
+        if not query_text:
+            raise ValueError(f"query is empty for user={user_id}, index={index}")
+
+        if user_id in seen_user_ids:
+            log_with_timestamp(f"⚠️  用户 {user_id} 在 syntax-depth 查询文件中出现多次，缓存会保留所有查询")
+        seen_user_ids.add(user_id)
+
+        queries.append({
+            'user_id': user_id,
+            'asin': asin,
+            'query': query_text,
+            'source_query': query_text,
+            'source': 'syntax_depth',
+        })
+
+    log_with_timestamp(f"✓ 从 {SYNTAX_DEPTH_QUERY_FILE} 加载了 {len(queries)} 条 syntax-depth 查询")
+    return queries
 
 
 def get_users_from_persona_generated() -> Set[str]:
@@ -888,7 +946,7 @@ def load_user_queries(user_id: str, modes: Optional[List[str]] = None) -> Dict[s
 
     return result
 
-def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str = "", user_id: str = "", mode: str = "") -> Dict[str, any]:
+def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str = "", user_id: str = "", mode: str = "") -> Dict[str, np.ndarray]:
     """Encode queries and return cache dict with query embeddings
 
     Args:
@@ -899,13 +957,13 @@ def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str 
         mode: Query mode - clean or noisy (for logging)
 
     Returns:
-        Dict mapping query_text -> embedding (numpy array for dense, dict for sparse)
+        Dict mapping query_text -> embedding (numpy array)
     """
     cache = {}
     failed_count = 0
     is_sparse = retriever_name in SPARSE_RETRIEVERS
 
-    # 使用批处理加速（所有支持 encode_queries 的检索器）
+    # 对于 SPLADE，使用批处理加速
     if hasattr(retriever_instance, 'encode_queries'):
         try:
             query_texts = [q.get('query', '') for q in queries]
@@ -929,15 +987,7 @@ def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str 
                     batch_results = retriever_instance.encode_queries(batch_texts, batch_size=batch_size)
 
                     for query_text, encoding in zip(batch_texts, batch_results):
-                        if is_sparse:
-                            cache[query_text] = encoding
-                        else:
-                            if not isinstance(encoding, np.ndarray):
-                                if isinstance(encoding, torch.Tensor):
-                                    encoding = np.asarray(encoding.detach().tolist(), dtype=np.float32)
-                                else:
-                                    encoding = np.array(encoding)
-                            cache[query_text] = encoding
+                        cache[query_text] = encoding
 
                     progress = batch_end
                     progress_pct = (progress / len(queries)) * 100
@@ -946,7 +996,6 @@ def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str 
 
                 except Exception as e:
                     log_with_timestamp(f"      ❌ 批处理编码失败: {e}")
-                    # Fall back to individual encoding
                     for query_text in batch_texts:
                         try:
                             encoding = retriever_instance.encode_query(query_text)
@@ -961,7 +1010,7 @@ def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str 
         except Exception as e:
             log_with_timestamp(f"      ⚠️  批处理不可用，回退到逐条编码: {e}")
 
-    # 默认逐条编码（非 SPLADE 或批处理不可用）
+    # 默认逐条编码
     for i, q in enumerate(queries):
         query_text = q.get('query', '')
         if not query_text:
@@ -971,19 +1020,15 @@ def encode_queries(retriever_instance, queries: List[Dict], retriever_name: str 
             continue
 
         try:
-            encoding = retriever_instance.encode_query(query_text)
+            embedding = retriever_instance.encode_query(query_text)
 
-            # Sparse 检索器（SPLADE）返回 dict，保持原格式
-            if is_sparse:
-                cache[query_text] = encoding
-            else:
-                # Dense 检索器返回 numpy array 或 tensor
-                if not isinstance(encoding, np.ndarray):
-                    if isinstance(encoding, torch.Tensor):
-                        encoding = np.asarray(encoding.detach().tolist(), dtype=np.float32)
-                    else:
-                        encoding = np.array(encoding)
-                cache[query_text] = encoding
+            if not isinstance(embedding, np.ndarray):
+                if isinstance(embedding, torch.Tensor):
+                    embedding = np.asarray(embedding.detach().tolist(), dtype=np.float32)
+                else:
+                    embedding = np.array(embedding)
+
+            cache[query_text] = embedding
 
             progress = i + 1
             progress_pct = (progress / len(queries)) * 100
@@ -1034,8 +1079,31 @@ def clear_cache() -> int:
         log_with_timestamp(f"✓ 已清理旧缓存: {deleted_count} 个文件（保留 noisy 查询缓存）")
     return deleted_count
 
+
+def clear_syntax_depth_cache() -> int:
+    """只清理 syntax-depth 查询缓存，避免影响既有 acl/ccomp 缓存。"""
+    syntax_cache_dir = get_cache_subdir(SYNTAX_DEPTH_MODE)
+    if not os.path.exists(syntax_cache_dir):
+        return 0
+
+    deleted_count = 0
+    for name in os.listdir(syntax_cache_dir):
+        if name.endswith('.pkl') or name.endswith('.json'):
+            filepath = os.path.join(syntax_cache_dir, name)
+            try:
+                os.remove(filepath)
+                deleted_count += 1
+            except Exception as e:
+                log_with_timestamp(f"  ⚠️  删除失败: {filepath} - {e}")
+
+    if deleted_count > 0:
+        log_with_timestamp(f"✓ 已清理 syntax-depth 旧缓存: {deleted_count} 个文件")
+    return deleted_count
+
+
 def initialize_cache_dir():
     os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs(os.path.join(CACHE_DIR, "syntax_depth_correct_query"), exist_ok=True)
     os.makedirs(os.path.join(CACHE_DIR, "stage6_query"), exist_ok=True)
     os.makedirs(os.path.join(CACHE_DIR, "stage6_clean_query"), exist_ok=True)
     os.makedirs(os.path.join(CACHE_DIR, "stage6_noisy_query"), exist_ok=True)
@@ -1054,6 +1122,8 @@ def initialize_cache_dir():
 
 
 def get_cache_subdir(mode: str) -> str:
+    if mode == SYNTAX_DEPTH_MODE:
+        return os.path.join(CACHE_DIR, "syntax_depth_correct_query")
     if mode == 'stage6':
         return os.path.join(CACHE_DIR, "stage6_query")
     if mode == 'clean':
@@ -1082,6 +1152,8 @@ def get_cache_subdir(mode: str) -> str:
 
 
 def get_mode_suffix(mode: str) -> str:
+    if mode == SYNTAX_DEPTH_MODE:
+        return SYNTAX_DEPTH_MODE
     if mode == 'stage6':
         return 'stage6'
     if mode in {'clean', 'stage7_clean'}:
@@ -1137,19 +1209,29 @@ def _build_queries_by_user(queries: List[Dict]) -> Dict[str, List[Dict]]:
     """将查询列表按 user_id 分组"""
     queries_by_user: Dict[str, List[Dict]] = {}
     for item in queries:
-        user_id = item.get('user_id', '')
-        query_text = item.get('query', '')
-        asin = item.get('asin', '')
-        if not user_id or not query_text:
-            continue
+        for field in ('user_id', 'query', 'asin'):
+            if field not in item:
+                raise ValueError(f"query item missing required field '{field}': {item}")
+
+        user_id = item['user_id']
+        query_text = item['query']
+        asin = item['asin']
+        if not user_id:
+            raise ValueError(f"query item has empty user_id: {item}")
+        if not query_text:
+            raise ValueError(f"query item has empty query for user={user_id}: {item}")
+        if not asin:
+            raise ValueError(f"query item has empty asin for user={user_id}: {item}")
         if user_id not in queries_by_user:
             queries_by_user[user_id] = []
-        queries_by_user[user_id].append({
+        user_query = {
             'query': query_text,
             'asin': asin,
             'user_id': user_id,
-            'source': 'persona',
-        })
+        }
+        if 'source' in item:
+            user_query['source'] = item['source']
+        queries_by_user[user_id].append(user_query)
     return queries_by_user
 
 
@@ -1172,13 +1254,12 @@ def _encode_and_save_cache(
         log_with_timestamp(f"  ⚠️  未生成任何缓存 ({mode})")
         return 0
 
-    # 按 user_id 重新组织缓存
+    # 按 user_id 重新组织缓存；同一 query 文本可能属于多个用户，需要全部写入。
     result_cache: Dict[str, Dict[str, np.ndarray]] = {uid: {} for uid in queries_by_user.keys()}
     for query_text, embedding in full_cache.items():
         for uid, queries in queries_by_user.items():
             if any(q['query'] == query_text for q in queries):
                 result_cache[uid][query_text] = embedding
-                break
 
     cache_file = get_cache_file_path(retriever_name, '', mode)
     log_with_timestamp(f"  保存缓存到: {cache_file}")
@@ -1243,7 +1324,7 @@ def generate_cache_from_persona_source(retriever_names: Optional[List[str]] = No
         'retrievers_processed': 0,
     }
 
-    # 定义查询类型和模式（仅 correct）
+    # 定义所有查询类型和模式
     query_types = [
         ('ACL', acl_correct, acl_correct_by_user, 'acl_correct'),
         ('CCOMP', ccomp_correct, ccomp_correct_by_user, 'ccomp_correct'),
@@ -1317,10 +1398,114 @@ def generate_cache_from_persona_source(retriever_names: Optional[List[str]] = No
     log_with_timestamp(f"  • CCOMP correct 查询数: {ccomp_correct_count}")
     log_with_timestamp(f"  • 检索器数量: {stats['retrievers_processed']}")
     log_with_timestamp(f"  • 编码查询总数: {stats['total_cached']} (= 查询数 × 检索器数)")
+    log_with_timestamp(f"  • 缓存命中率: 0% (此函数每次都重新编码)")
     log_with_timestamp(f"")
     log_with_timestamp(f"💾 缓存存储:")
     log_with_timestamp(f"  • ACL correct 缓存目录: {os.path.join(CACHE_DIR, 'acl_correct_query')}")
     log_with_timestamp(f"  • CCOMP correct 缓存目录: {os.path.join(CACHE_DIR, 'ccomp_correct_query')}")
+    log_with_timestamp(f"  • 缓存文件数: {cache_files}")
+    log_with_timestamp(f"  • 总大小: {cache_dir_size:.2f} MB")
+    log_with_timestamp(f"")
+
+    return stats
+
+
+def generate_cache_from_syntax_depth_source(
+    retriever_names: List[str],
+    clear_cache_before: bool = False,
+) -> Dict[str, int]:
+    """从 query_by_syntax_depth.json 为每个用户的 query 生成缓存。"""
+    if not retriever_names:
+        raise ValueError("retriever_names must be a non-empty list")
+
+    queries = load_syntax_depth_queries()
+    if not queries:
+        log_with_timestamp(f"⚠️  没有从 {SYNTAX_DEPTH_QUERY_FILE} 加载到任何查询")
+        return {'total_queries': 0, 'total_cached': 0, 'retrievers_processed': 0}
+
+    queries_by_user = _build_queries_by_user(queries)
+    query_count = sum(len(v) for v in queries_by_user.values())
+
+    log_with_timestamp("=" * 80)
+    log_with_timestamp("🚀 开始生成查询缓存 (syntax-depth correct)")
+    log_with_timestamp("=" * 80)
+    log_with_timestamp(f"")
+    log_with_timestamp(f"📋 任务配置:")
+    log_with_timestamp(f"  • 数据源: {SYNTAX_DEPTH_QUERY_FILE}")
+    log_with_timestamp(f"  • 检索器: {len(retriever_names)} 个 - {', '.join(retriever_names)}")
+    log_with_timestamp(f"  • 用户: {len(queries_by_user)} 个, 查询: {query_count} 条")
+    log_with_timestamp(f"  • 缓存目录: {get_cache_subdir(SYNTAX_DEPTH_MODE)}")
+    log_with_timestamp(f"")
+
+    initialize_cache_dir()
+    if clear_cache_before:
+        clear_syntax_depth_cache()
+
+    start_time = time.time()
+    stats = {
+        'total_queries': query_count,
+        'total_cached': 0,
+        'retrievers_processed': 0,
+    }
+    query_types = [('SYNTAX_DEPTH', queries, queries_by_user, SYNTAX_DEPTH_MODE)]
+
+    for retriever_name in retriever_names:
+        if retriever_name not in AVAILABLE_RETRIEVERS:
+            log_with_timestamp(f"⚠️  检索器不存在: {retriever_name}")
+            continue
+
+        log_with_timestamp(f"\n{'='*80}")
+        log_with_timestamp(f"【{stats['retrievers_processed'] + 1}/{len(retriever_names)}】正在处理检索器: {retriever_name}")
+        log_with_timestamp(f"{'='*80}")
+
+        if retriever_name == 'BM25':
+            cache = generate_bm25_query_cache_for_mode(queries, SYNTAX_DEPTH_MODE, top_k=100)
+            save_bm25_query_cache(cache, SYNTAX_DEPTH_MODE)
+            stats['total_cached'] += len(cache)
+            log_with_timestamp(f"  ✓ syntax-depth BM25 缓存: {len(cache)} 条")
+        elif retriever_name == 'ColBERTv2':
+            colbert_stats = generate_colbertv2_cache_from_query_types(query_types)
+            stats['total_cached'] += colbert_stats['total_cached']
+        else:
+            total = _encode_and_save_cache(
+                retriever_name,
+                queries,
+                queries_by_user,
+                SYNTAX_DEPTH_MODE,
+            )
+            stats['total_cached'] += total
+            log_with_timestamp(f"  ✓ syntax-depth {retriever_name} 缓存: {total} 条")
+
+        log_with_timestamp(f"✓ 检索器 {retriever_name} 处理完成\n")
+        stats['retrievers_processed'] += 1
+
+    elapsed = time.time() - start_time
+
+    cache_files = 0
+    cache_dir_size = 0.0
+    syntax_cache_dir = get_cache_subdir(SYNTAX_DEPTH_MODE)
+    if os.path.exists(syntax_cache_dir):
+        for name in os.listdir(syntax_cache_dir):
+            if name.endswith('.pkl'):
+                cache_files += 1
+                cache_dir_size += os.path.getsize(os.path.join(syntax_cache_dir, name))
+    cache_dir_size /= (1024 * 1024)
+
+    log_with_timestamp("\n" + "=" * 80)
+    log_with_timestamp("✅ syntax-depth 查询缓存生成完成!")
+    log_with_timestamp("=" * 80)
+    log_with_timestamp(f"")
+    log_with_timestamp(f"⏱️  执行统计:")
+    log_with_timestamp(f"  • 总耗时: {elapsed:.1f} 秒 ({elapsed/60:.1f} 分钟)")
+    log_with_timestamp(f"  • 检索器处理数: {stats['retrievers_processed']}/{len(retriever_names)}")
+    log_with_timestamp(f"")
+    log_with_timestamp(f"📊 数据统计:")
+    log_with_timestamp(f"  • syntax-depth 查询数: {query_count}")
+    log_with_timestamp(f"  • 检索器数量: {stats['retrievers_processed']}")
+    log_with_timestamp(f"  • 缓存条目总数: {stats['total_cached']}")
+    log_with_timestamp(f"")
+    log_with_timestamp(f"💾 缓存存储:")
+    log_with_timestamp(f"  • syntax-depth 缓存目录: {syntax_cache_dir}")
     log_with_timestamp(f"  • 缓存文件数: {cache_files}")
     log_with_timestamp(f"  • 总大小: {cache_dir_size:.2f} MB")
     log_with_timestamp(f"")
@@ -1334,14 +1519,14 @@ def generate_cache_for_all_retrievers(
     modes: Optional[List[str]] = None
 ):
     """为所有检索器生成缓存 (默认: 所有检索器 + 所有用户 + clean和noisy两种模式)"""
-    
+
     if retriever_names is None:
         retriever_names = list(AVAILABLE_RETRIEVERS.keys())
     if user_ids is None:
         user_ids = list(find_all_users())
     if modes is None:
         modes = ['stage6']
-    
+
     log_with_timestamp("=" * 80)
     log_with_timestamp("🚀 开始生成查询缓存系统")
     log_with_timestamp("=" * 80)
@@ -1353,12 +1538,12 @@ def generate_cache_for_all_retrievers(
     log_with_timestamp(f"  • 预期缓存数: {len(retriever_names) * len(user_ids) * len(modes)} 个")
     log_with_timestamp(f"  • 缓存目录: {CACHE_DIR}")
     log_with_timestamp(f"")
-    
+
     clear_cache()
     initialize_cache_dir()
-    
+
     start_time = time.time()
-    
+
     stats = {
         'total_queries': 0,
         'total_cached': 0,
@@ -1366,7 +1551,7 @@ def generate_cache_for_all_retrievers(
         'retrievers_processed': 0,
         'users_processed': 0,
     }
-    
+
     for retriever_name in retriever_names:
         if retriever_name not in AVAILABLE_RETRIEVERS:
             log_with_timestamp(f"⚠️  检索器不存在: {retriever_name}")
@@ -1428,9 +1613,9 @@ def generate_cache_for_all_retrievers(
 
         log_with_timestamp(f"✓ 检索器 {retriever_name} 全部用户处理完成\n")
         stats['retrievers_processed'] += 1
-    
+
     stats['users_processed'] = len(user_ids)
-    
+
     elapsed = time.time() - start_time
     cache_files = 0
     cache_dir_size = 0.0
@@ -1441,7 +1626,7 @@ def generate_cache_for_all_retrievers(
                     cache_files += 1
                     cache_dir_size += os.path.getsize(os.path.join(root, name))
         cache_dir_size /= (1024 * 1024)
-    
+
     log_with_timestamp("\n" + "=" * 80)
     log_with_timestamp("✅ 缓存生成完成!")
     log_with_timestamp("=" * 80)
@@ -1462,7 +1647,7 @@ def generate_cache_for_all_retrievers(
     log_with_timestamp(f"  • 缓存文件数: {cache_files}")
     log_with_timestamp(f"  • 总大小: {cache_dir_size:.2f} MB")
     log_with_timestamp(f"")
-    
+
     return stats
 
 def main():
@@ -1474,35 +1659,16 @@ def main():
     ]
     # 是否清理旧缓存
     CLEAR_CACHE_BEFORE = True
-    # 数据源：persona_generated_queries.json
-    PERSONA_SOURCE = True
     # =================================================
 
     # 打印环境变量
     log_with_timestamp(f"HF_HOME: {os.environ.get('HF_HOME', 'not set')}")
     log_with_timestamp(f"TRANSFORMERS_CACHE: {os.environ.get('TRANSFORMERS_CACHE', 'not set')}")
 
-    if PERSONA_SOURCE:
-        log_with_timestamp("📋 使用 persona_generated_queries.json 作为数据源")
-
-        # 先初始化缓存目录
-        if CLEAR_CACHE_BEFORE:
-            clear_cache()
-        initialize_cache_dir()
-
-        # 生成密集检索器查询缓存（包括 BM25）
-        stats = generate_cache_from_persona_source(
-            retriever_names=RETRIEVER_NAMES,
-            clear_cache_before=False,  # 目录已初始化
-        )
-
-        return
-
-    # 默认旧逻辑（保留但不使用）
-    stats = generate_cache_for_all_retrievers(
+    log_with_timestamp("📋 使用 query_by_syntax_depth.json 作为数据源")
+    generate_cache_from_syntax_depth_source(
         retriever_names=RETRIEVER_NAMES,
-        user_ids=None,
-        modes=['stage6']
+        clear_cache_before=CLEAR_CACHE_BEFORE,
     )
 
 if __name__ == '__main__':
