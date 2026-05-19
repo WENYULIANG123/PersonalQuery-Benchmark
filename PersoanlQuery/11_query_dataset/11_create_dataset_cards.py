@@ -12,7 +12,7 @@ from typing import Any
 from huggingface_hub import HfApi
 
 
-DATASET_ROOT = Path("/home/wlia0047/ar57/wenyu/dataset")
+DATASET_ROOT = Path("/home/wlia0047/ar57/wenyu/result/personal_query/11_query_dataset")
 
 
 @dataclass(frozen=True)
@@ -52,9 +52,10 @@ def load_summary(category: str) -> dict[str, Any]:
         "num_dataset_rows",
         "num_paired_rows",
         "num_unpaired_rows",
-        "rows_by_query_category",
-        "paired_rows_by_query_category",
-        "rows_by_complexity",
+        "rows_by_source_stage",
+        "paired_rows_by_source_stage",
+        "rows_by_complexity_group",
+        "rows_by_depth",
     ]
     for key in required_keys:
         if key not in summary:
@@ -72,9 +73,10 @@ def format_dict_table(values: dict[str, Any], key_title: str, value_title: str) 
 
 
 def build_card(target: DatasetCardTarget, summary: dict[str, Any], namespace: str) -> str:
-    rows_by_query_category = summary["rows_by_query_category"]
-    paired_rows_by_query_category = summary["paired_rows_by_query_category"]
-    rows_by_complexity = summary["rows_by_complexity"]
+    rows_by_source_stage = summary["rows_by_source_stage"]
+    paired_rows_by_source_stage = summary["paired_rows_by_source_stage"]
+    rows_by_complexity_group = summary["rows_by_complexity_group"]
+    rows_by_depth = summary["rows_by_depth"]
 
     return f"""---
 language:
@@ -107,14 +109,14 @@ This dataset contains personalized product search queries for the `{target.categ
 
 Each record is built from the Personal Query pipeline:
 
-- Stage 6 generated the base personalized queries, and Stage 7 may revise a correct query when an anchor must be inserted before noisy injection.
-- Stage 7 injected user-specific error query variants when a matching error pattern was available.
-- Stage 5 provided the user profile complexity level.
+- Stage 08 provides the correct syntax-depth retrieval query set.
+- Stage 09 provides paired correct/writing-typo syntax-depth query records when writing typo injection is available.
+- Stage 07 `original_query` is used for Stage 08 rows when the same user/product pair appears in noisy injection input, matching the retrieval cache construction logic.
 
 ## Files
 
-- `data.jsonl`: all final correct queries. Rows without a Stage 7 noisy pair keep `error_query` as `null`.
-- `paired_data.jsonl`: only rows where a correct query has a paired error query.
+- `data.jsonl`: Stage 08 correct rows plus Stage 09 paired correct/writing-typo rows.
+- `paired_data.jsonl`: only Stage 09 rows where a correct query has a paired writing-typo query.
 - `summary.json`: generation statistics for this category.
 
 ## Dataset Size
@@ -123,19 +125,23 @@ Each record is built from the Personal Query pipeline:
 |---|---:|
 | Total rows in `data.jsonl` | {summary["num_dataset_rows"]} |
 | Rows in `paired_data.jsonl` | {summary["num_paired_rows"]} |
-| Rows without noisy query | {summary["num_unpaired_rows"]} |
+| Rows without writing-typo query | {summary["num_unpaired_rows"]} |
 
-## Rows By Query Category
+## Rows By Source Stage
 
-{format_dict_table(rows_by_query_category, "query_category", "rows")}
+{format_dict_table(rows_by_source_stage, "source_stage", "rows")}
 
-## Paired Rows By Query Category
+## Paired Rows By Source Stage
 
-{format_dict_table(paired_rows_by_query_category, "query_category", "rows")}
+{format_dict_table(paired_rows_by_source_stage, "source_stage", "rows")}
 
-## Rows By Complexity
+## Rows By Complexity Group
 
-{format_dict_table(rows_by_complexity, "query_category:level", "rows")}
+{format_dict_table(rows_by_complexity_group, "source_stage:complexity_group", "rows")}
+
+## Rows By Depth
+
+{format_dict_table(rows_by_depth, "source_stage:depth", "rows")}
 
 ## Schema
 
@@ -144,14 +150,13 @@ Each record is built from the Personal Query pipeline:
 | `category` | string | Product category. |
 | `uuid` | string | User identifier. |
 | `asin` | string | Amazon product identifier. |
-| `query_category` | string | Query type: `wide` or `deep`. |
-| `complexity_level` | integer | Complexity level of the underlying generated query. |
-| `correct_query` | string | Final correct query used for evaluation; this may be the original Stage 6 query or a Stage 7 revised query. |
-| `correct_word_count` | integer | Word count of `correct_query`. |
+| `complexity_group` | string | Syntax-depth group: `low`, `medium`, or `high`. |
+| `depth` | integer | Target syntax depth used during query construction. |
+| `correct_query` | string | Correct query text used for evaluation. |
 | `attrs_used` | object | Product attributes used to generate the query. |
-| `has_error_query` | boolean | Whether a Stage 7 error query is available. |
-| `error_query` | string or null | Error query generated in Stage 7. |
-| `injected_errors` | list | Injected error metadata for error query generation. |
+| `has_error_query` | boolean | Whether a Stage 09 writing-typo query is available. |
+| `error_query` | string or null | Writing-typo query from Stage 09. |
+| `injected_errors` | list | Injected error metadata with fixed field `target_token_depth`. |
 
 ## Loading
 
@@ -168,7 +173,7 @@ This dataset is intended for research on personalized product search, query gene
 
 ## Data Notes
 
-The queries are synthetic outputs generated from user/product signals in the local Personal Query pipeline. The error queries are generated by injecting user-specific writing error patterns. Review license and redistribution requirements for any upstream source data before external reuse.
+The queries are synthetic outputs generated from user/product signals in the local Personal Query pipeline. The writing-typo queries are generated by injecting syntax-depth-targeted perturbations. Review license and redistribution requirements for any upstream source data before external reuse.
 """
 
 

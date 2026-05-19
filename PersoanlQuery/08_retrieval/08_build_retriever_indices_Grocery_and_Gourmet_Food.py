@@ -9,7 +9,6 @@ import os
 import sys
 import pickle
 import hashlib
-import shutil
 import threading
 import numpy as np
 import torch
@@ -44,16 +43,21 @@ from config import get_category_config
 
 CATEGORY_NAME = "Grocery_and_Gourmet_Food"
 CAT_CONFIG = get_category_config(CATEGORY_NAME)
-COLBERTV2_TORCH_EXTENSIONS_BASE_DIR = "/home/wlia0047/ar57_scratch/wenyu/tmp"
+COLBERTV2_TORCH_EXTENSIONS_BASE_DIR = "/home/wlia0047/ar57_scratch/wenyu/torch_extensions"
+
+
+def get_colbert_torch_extension_arch_tag() -> str:
+    if not torch.cuda.is_available():
+        raise RuntimeError("ColBERTv2 index building requires a CUDA GPU for torch extension arch detection")
+    major, minor = torch.cuda.get_device_capability()
+    return f"sm{major}{minor}"
 
 
 def prepare_colbert_torch_extensions_dir() -> str:
     ext_dir = os.path.join(
         COLBERTV2_TORCH_EXTENSIONS_BASE_DIR,
-        f"torch_extensions_08_{CATEGORY_NAME}_{os.getpid()}"
+        f"colbertv2_cuda125_{get_colbert_torch_extension_arch_tag()}"
     )
-    if os.path.exists(ext_dir):
-        shutil.rmtree(ext_dir)
     os.makedirs(ext_dir, exist_ok=True)
     os.environ["TORCH_EXTENSIONS_DIR"] = ext_dir
     os.environ["COLBERT_LOAD_TORCH_EXTENSION_VERBOSE"] = "True"

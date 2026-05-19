@@ -10,7 +10,7 @@ from pathlib import Path
 from huggingface_hub import HfApi
 
 
-DATASET_ROOT = Path("/home/wlia0047/ar57/wenyu/dataset")
+DATASET_ROOT = Path("/home/wlia0047/ar57/wenyu/result/personal_query/11_query_dataset")
 REQUIRED_FILES = ("data.jsonl", "paired_data.jsonl", "summary.json")
 
 

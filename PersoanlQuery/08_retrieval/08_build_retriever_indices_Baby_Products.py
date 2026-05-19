@@ -56,7 +56,7 @@ def get_colbert_torch_extension_arch_tag() -> str:
 def prepare_colbert_torch_extensions_dir() -> str:
     ext_dir = os.path.join(
         COLBERTV2_TORCH_EXTENSIONS_BASE_DIR,
-        f"colbertv2_cuda125_{CATEGORY_NAME}_{get_colbert_torch_extension_arch_tag()}"
+        f"colbertv2_cuda125_{get_colbert_torch_extension_arch_tag()}"
     )
     os.makedirs(ext_dir, exist_ok=True)
     os.environ["TORCH_EXTENSIONS_DIR"] = ext_dir

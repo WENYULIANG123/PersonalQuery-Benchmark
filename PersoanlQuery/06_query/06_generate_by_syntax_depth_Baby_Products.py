@@ -416,6 +416,17 @@ def process_one_user(task: dict) -> dict | None:
     return None
 
 
+def write_json_atomic(path: Path, payload) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+
+
 def main() -> None:
     existing_results, tasks = build_user_tasks()
     if not tasks:
@@ -439,8 +450,7 @@ def main() -> None:
             if result:
                 results.append(result)
                 run_success_count += 1
-                with OUTPUT_FILE.open("w", encoding="utf-8") as f:
-                    json.dump(results, f, indent=2, ensure_ascii=False)
+                write_json_atomic(OUTPUT_FILE, results)
                 log(
                     f"  [run_success={run_success_count}/{len(tasks)}] "
                     f"total_records={len(results)} user={result['user_id'][:20]}"

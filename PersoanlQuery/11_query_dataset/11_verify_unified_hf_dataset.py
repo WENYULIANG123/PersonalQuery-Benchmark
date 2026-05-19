@@ -62,9 +62,10 @@ def main() -> None:
             first_row = dataset[0]
             required_fields = {
                 "uuid",
-                "query_category",
+                "complexity_group",
+                "depth",
                 "correct_query",
-                "idf",
+                "attrs_used",
                 "has_error_query",
                 "error_query",
                 "injected_errors",
@@ -72,8 +73,10 @@ def main() -> None:
             missing_fields = sorted(required_fields - set(first_row))
             if missing_fields:
                 raise RuntimeError(f"{config}/{split} first row missing fields: {missing_fields}")
-            if not isinstance(first_row["idf"], float):
-                raise TypeError(f"{config}/{split} first row idf must be float: {type(first_row['idf']).__name__}")
+            forbidden_fields = {"source_stage", "query_category", "complexity_level"}
+            present_forbidden_fields = sorted(forbidden_fields.intersection(first_row))
+            if present_forbidden_fields:
+                raise RuntimeError(f"{config}/{split} first row contains forbidden fields: {present_forbidden_fields}")
             print(f"[OK] config={config} split={split} rows={len(dataset)} first_uuid={first_row['uuid']}", flush=True)
 
     print(f"[SUMMARY] verified repo_id={args.repo_id}", flush=True)

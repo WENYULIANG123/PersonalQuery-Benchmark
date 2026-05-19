@@ -159,7 +159,21 @@ def _log_exception_details(prefix: str, exc: Exception):
         for attr in ("status_code", "reason_phrase"):
             if hasattr(response, attr):
                 _log(f"{prefix} response.{attr}: {getattr(response, attr)}")
-        response_text = getattr(response, "text", None)
+        response_text = None
+        response_type = type(response)
+        if response_type.__module__.startswith("httpx") and response_type.__name__ == "Response":
+            if hasattr(response, "is_stream_consumed") and not getattr(response, "is_stream_consumed"):
+                _log(f"{prefix} response.text skipped: streaming response not read")
+            else:
+                try:
+                    response_text = response.text
+                except Exception as response_exc:
+                    _log(f"{prefix} response.text unavailable: {type(response_exc).__name__}: {response_exc}")
+        else:
+            try:
+                response_text = getattr(response, "text", None)
+            except Exception as response_exc:
+                _log(f"{prefix} response.text unavailable: {type(response_exc).__name__}: {response_exc}")
         if response_text:
             _log(f"{prefix} response.text(first_2000): {response_text[:2000]}")
 
@@ -179,6 +193,41 @@ def _log_exception_details(prefix: str, exc: Exception):
 
     tb = "".join(traceback.format_exception(exc_type, exc, exc.__traceback__))
     _log(f"{prefix} traceback:\n{tb}")
+
+
+def _usage_value(usage, key: str) -> int:
+    if usage is None:
+        return 0
+    if isinstance(usage, dict):
+        value = usage.get(key, 0)
+    else:
+        value = getattr(usage, key, 0)
+    if value is None:
+        return 0
+    return int(value)
+
+
+def _message_usage(message):
+    if message is None:
+        return None
+    if isinstance(message, dict):
+        return message.get("usage")
+    return getattr(message, "usage", None)
+
+
+def _append_message_text_content(message, text_parts: list[str]) -> None:
+    if message is None:
+        return
+    content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+    if not content:
+        return
+    for block in content:
+        if isinstance(block, dict):
+            if block.get("type") == "text":
+                text_parts.append(block.get("text", ""))
+            continue
+        if getattr(block, "type", None) == "text":
+            text_parts.append(getattr(block, "text", ""))
 
 
 class MiniMaxAnthropicClient:
@@ -430,19 +479,26 @@ class MiniMaxAnthropicClient:
                 ) as stream_manager:
                     for text in stream_manager.text_stream:
                         text_parts.append(text)
-                    message = stream_manager.get_final_message()
+                    message = None
+                    try:
+                        message = stream_manager.get_final_message()
+                    except AttributeError as exc:
+                        if "model_dump" not in str(exc):
+                            raise
+                        _log(f"{log_prefix} get_final_message failed after text stream; using streamed text without final message: {exc}")
 
-                if hasattr(message, 'usage') and message.usage:
-                    cache_read_input_tokens = getattr(message.usage, 'cache_read_input_tokens', 0)
-                    cache_creation_input_tokens = getattr(message.usage, 'cache_creation_input_tokens', 0)
-                    input_tokens = getattr(message.usage, 'input_tokens', 0)
-                    output_tokens = getattr(message.usage, 'output_tokens', 0)
+                usage = _message_usage(message)
+                if usage:
+                    cache_read_input_tokens = _usage_value(usage, 'cache_read_input_tokens')
+                    cache_creation_input_tokens = _usage_value(usage, 'cache_creation_input_tokens')
+                    input_tokens = _usage_value(usage, 'input_tokens')
+                    output_tokens = _usage_value(usage, 'output_tokens')
 
                 text_content = "".join(text_parts).strip()
-                if not text_content and hasattr(message, "content"):
-                    for block in message.content:
-                        if getattr(block, "type", None) == "text":
-                            text_content += getattr(block, "text", "")
+                if not text_content:
+                    fallback_parts = []
+                    _append_message_text_content(message, fallback_parts)
+                    text_content = "".join(fallback_parts)
                     text_content = text_content.strip()
 
                 if not text_content:
@@ -468,6 +524,7 @@ class MiniMaxAnthropicClient:
                     retry_count += 1
                     continue
                 _log(f"{log_prefix} Error calling streaming API: {e}")
+                _log_exception_details(log_prefix, e)
                 return "", {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}
 
         return "", {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}
@@ -701,19 +758,26 @@ class MiniMaxIOAnthropicClient:
                 ) as stream_manager:
                     for text in stream_manager.text_stream:
                         text_parts.append(text)
-                    message = stream_manager.get_final_message()
+                    message = None
+                    try:
+                        message = stream_manager.get_final_message()
+                    except AttributeError as exc:
+                        if "model_dump" not in str(exc):
+                            raise
+                        _log(f"{log_prefix} get_final_message failed after text stream; using streamed text without final message: {exc}")
 
-                if hasattr(message, 'usage') and message.usage:
-                    cache_read_input_tokens = getattr(message.usage, 'cache_read_input_tokens', 0)
-                    cache_creation_input_tokens = getattr(message.usage, 'cache_creation_input_tokens', 0)
-                    input_tokens = getattr(message.usage, 'input_tokens', 0)
-                    output_tokens = getattr(message.usage, 'output_tokens', 0)
+                usage = _message_usage(message)
+                if usage:
+                    cache_read_input_tokens = _usage_value(usage, 'cache_read_input_tokens')
+                    cache_creation_input_tokens = _usage_value(usage, 'cache_creation_input_tokens')
+                    input_tokens = _usage_value(usage, 'input_tokens')
+                    output_tokens = _usage_value(usage, 'output_tokens')
 
                 text_content = "".join(text_parts).strip()
-                if not text_content and hasattr(message, "content"):
-                    for block in message.content:
-                        if getattr(block, "type", None) == "text":
-                            text_content += getattr(block, "text", "")
+                if not text_content:
+                    fallback_parts = []
+                    _append_message_text_content(message, fallback_parts)
+                    text_content = "".join(fallback_parts)
                     text_content = text_content.strip()
 
                 if not text_content:

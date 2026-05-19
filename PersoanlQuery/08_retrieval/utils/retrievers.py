@@ -49,6 +49,20 @@ def _resolve_local_hf_snapshot(repo_id: str) -> str:
         raise FileNotFoundError(f"Hugging Face snapshot not found for {repo_id}: {snapshot_dir}")
     return snapshot_dir
 
+
+def _load_local_sentence_transformer(repo_id: str, device: torch.device, label: str):
+    model_path = _resolve_local_hf_snapshot(repo_id)
+    log_with_timestamp(f"  Loading {label} model from local snapshot: {model_path}")
+    from sentence_transformers import SentenceTransformer
+    model = SentenceTransformer(model_path, device=device)
+    log_with_timestamp(f"  Using device: {device}")
+    tokenizer = getattr(model, "tokenizer", None)
+    tokenizer_path = getattr(tokenizer, "name_or_path", model_path)
+    log_with_timestamp(f"  Model path: {tokenizer_path}")
+    log_with_timestamp(f"  HF_HOME: {os.environ.get('HF_HOME', 'not set')}")
+    return model
+
+
 def _require_cuda_device() -> torch.device:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for retrieval models in this codepath")
@@ -258,13 +272,7 @@ class DenseRetriever:
 
     def _get_model(self):
         if self.model is None:
-            log_with_timestamp(f"  Loading model: {self.model_name}")
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(self.model_name, device=self.device)
-            log_with_timestamp(f"  Using device: {self.device}")
-            model_path = self.model.tokenizer.name_or_path
-            log_with_timestamp(f"  Model path: {model_path}")
-            log_with_timestamp(f"  HF_HOME: {os.environ.get('HF_HOME', 'not set')}")
+            self.model = _load_local_sentence_transformer(self.model_name, self.device, "dense")
         return self.model
 
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
@@ -390,12 +398,7 @@ class E5Retriever:
 
     def _get_model(self):
         if self.model is None:
-            log_with_timestamp(f"  Loading E5 model: {self.model_name}")
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(self.model_name, device=self.device)
-            model_path = self.model.tokenizer.name_or_path
-            log_with_timestamp(f"  Model path: {model_path}")
-            log_with_timestamp(f"  HF_HOME: {os.environ.get('HF_HOME', 'not set')}")
+            self.model = _load_local_sentence_transformer(self.model_name, self.device, "E5")
         return self.model
 
     def _add_instruction(self, text: str, is_query: bool = False) -> str:
@@ -633,12 +636,7 @@ class BGERetriever:
 
     def _get_model(self):
         if self.model is None:
-            log_with_timestamp(f"  Loading BGE model: {self.model_name}")
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(self.model_name, device=self.device)
-            model_path = self.model.tokenizer.name_or_path
-            log_with_timestamp(f"  Model path: {model_path}")
-            log_with_timestamp(f"  HF_HOME: {os.environ.get('HF_HOME', 'not set')}")
+            self.model = _load_local_sentence_transformer(self.model_name, self.device, "BGE")
         return self.model
 
     def _add_instruction(self, text: str, is_query: bool = False) -> str:
@@ -2057,10 +2055,7 @@ class ANCERetriever:
 
     def _get_model(self):
         if self.model is None:
-            log_with_timestamp(f"  Loading ANCE-compatible model: {self.model_name}")
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(self.model_name, device=self.device)
-            log_with_timestamp(f"  Using device: {self.device}")
+            self.model = _load_local_sentence_transformer(self.model_name, self.device, "ANCE-compatible")
         return self.model
 
     def _add_instruction(self, text: str, is_query: bool = False) -> str:
@@ -2301,10 +2296,7 @@ class STARRetriever:
 
     def _get_model(self):
         if self.model is None:
-            log_with_timestamp(f"  Loading STAR-compatible model: {self.model_name}")
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(self.model_name, device=self.device)
-            log_with_timestamp(f"  Using device: {self.device}")
+            self.model = _load_local_sentence_transformer(self.model_name, self.device, "STAR-compatible")
         return self.model
 
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
@@ -2418,10 +2410,7 @@ class MiniLMRetriever:
 
     def _get_model(self):
         if self.model is None:
-            log_with_timestamp(f"  Loading MiniLM model: {self.model_name}")
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(self.model_name, device=self.device)
-            log_with_timestamp(f"  Using device: {self.device}")
+            self.model = _load_local_sentence_transformer(self.model_name, self.device, "MiniLM")
         return self.model
 
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
@@ -2530,10 +2519,7 @@ class MultiQAMiniLMRetriever:
 
     def _get_model(self):
         if self.model is None:
-            log_with_timestamp(f"  Loading MultiQA-MiniLM model: {self.model_name}")
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(self.model_name, device=self.device)
-            log_with_timestamp(f"  Using device: {self.device}")
+            self.model = _load_local_sentence_transformer(self.model_name, self.device, "MultiQA-MiniLM")
         return self.model
 
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
@@ -2609,10 +2595,7 @@ class MPNetRetriever:
 
     def _get_model(self):
         if self.model is None:
-            log_with_timestamp(f"  Loading MPNet model: {self.model_name}")
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(self.model_name, device=self.device)
-            log_with_timestamp(f"  Using device: {self.device}")
+            self.model = _load_local_sentence_transformer(self.model_name, self.device, "MPNet")
         return self.model
 
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):
@@ -2689,13 +2672,7 @@ class FAISSRetriever:
 
     def _get_model(self):
         if self.model is None:
-            log_with_timestamp(f"  Loading model: {self.model_name}")
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(self.model_name, device=self.device)
-            log_with_timestamp(f"  Using device: {self.device}")
-            model_path = self.model.tokenizer.name_or_path
-            log_with_timestamp(f"  Model path: {model_path}")
-            log_with_timestamp(f"  HF_HOME: {os.environ.get('HF_HOME', 'not set')}")
+            self.model = _load_local_sentence_transformer(self.model_name, self.device, "dense")
         return self.model
 
     def fit(self, documents: List[Dict[str, str]], all_metadata: Dict[str, Dict] = None):

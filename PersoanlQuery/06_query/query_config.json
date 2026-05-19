@@ -1,5 +1,5 @@
 {
-  "num_users_to_test":8000,
+  "num_users_to_test":10000,
   "max_workers": 50,
-  "use_minimaxio": true
+  "use_minimaxio": false
 }

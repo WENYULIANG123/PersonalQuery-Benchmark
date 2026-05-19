@@ -3,9 +3,10 @@
 生成并预存储检索器的 noisy 查询缓存
 
 这个脚本将：
-1. 从 07_inject_noisy 的 combined noisy_query.json 加载 ACL 和 CCOMP noisy queries
-2. 为每个检索器编码每个 noisy 查询
-3. 保存缓存到磁盘以加速后续评估
+1. 从 07_inject_noisy 的 noisy_query.json 加载 syntax-depth 查询对
+2. 将 original_query 作为 clean query，将 noisy_query 作为 noisy query
+3. 为每个检索器编码 clean/noisy 两套查询
+4. 保存缓存到磁盘以加速后续评估
 
 使用方法：
     python3 09_generate_noisy_query_cache_Baby_Products.py > /workspace/logs/09_generate_noisy_query_cache_Baby_Products.log 2> /workspace/logs/09_generate_noisy_query_cache_Baby_Products.err
@@ -17,6 +18,17 @@ os.environ["HF_HUB_CACHE"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_DATASETS_OFFLINE"] = "1"
+os.environ.pop("TRANSFORMERS_CACHE", None)
+os.environ["SENTENCE_TRANSFORMERS_HOME"] = "/home/wlia0047/ar57_scratch/wenyu/hf_models"
+os.environ["XDG_CACHE_HOME"] = "/home/wlia0047/ar57_scratch/wenyu/cache"
+os.environ["TORCH_HOME"] = "/home/wlia0047/ar57_scratch/wenyu/torch_cache"
+os.environ["TRITON_CACHE_DIR"] = "/home/wlia0047/ar57_scratch/wenyu/triton_cache"
+for cache_dir in (
+    os.environ["XDG_CACHE_HOME"],
+    os.environ["TORCH_HOME"],
+    os.environ["TRITON_CACHE_DIR"],
+):
+    os.makedirs(cache_dir, exist_ok=True)
 
 import sys
 import importlib.util
@@ -47,7 +59,6 @@ from utils.retrievers import (
     configure_host_compiler_for_colbert_extension_build,
     validate_cuda_toolkit_for_colbert,
     configure_cuda_env_for_colbert_extension_build,
-    preflight_colbert_cuda_extension_build,
 )
 from config import get_category_config, get_global_paths
 
@@ -56,8 +67,11 @@ CATEGORY_NAME = "Baby_Products"
 CAT_CONFIG = get_category_config(CATEGORY_NAME)
 GLOBAL_PATHS = get_global_paths()
 
-# Noisy query 文件（07 生成的 combined 文件）
+# syntax-depth 查询文件（07 生成的统一文件）
 NOISY_QUERY_FILE = f"{GLOBAL_PATHS['inject_noisy']}/{CATEGORY_NAME}/noisy_query.json"
+CLEAN_MODE = "syntax_depth_correct"
+NOISY_MODE = "syntax_depth_noisy"
+SYNTAX_DEPTH_INJECTION_SOURCE = "syntax_depth_preserve_depth"
 
 # 缓存目录 - 使用与 08 相同的目录结构
 CACHE_DIR = CAT_CONFIG['query_cache_dir']
@@ -101,13 +115,19 @@ def load_colbertv2_build_module():
 
 
 def configure_colbertv2_runtime() -> None:
-    # 为每个域的 09 作业隔离 torch extension build 目录，避免并发作业争抢同一个 lock 文件。
-    os.environ["TORCH_EXTENSIONS_DIR"] = f"/home/wlia0047/ar57_scratch/wenyu/tmp/torch_extensions_09_{CATEGORY_NAME}"
+    major, minor = torch.cuda.get_device_capability()
+    ext_dir = os.path.join(
+        "/home/wlia0047/ar57_scratch/wenyu/torch_extensions",
+        f"colbertv2_cuda125_sm{major}{minor}",
+    )
+    os.makedirs(ext_dir, exist_ok=True)
+    os.environ["TORCH_EXTENSIONS_DIR"] = ext_dir
+    os.environ["COLBERT_LOAD_TORCH_EXTENSION_VERBOSE"] = "True"
+    log_with_timestamp(f"[BOOT] ColBERT query shared TORCH_EXTENSIONS_DIR = {ext_dir}")
     select_cuda_toolkit_for_colbert_extension_build()
     configure_host_compiler_for_colbert_extension_build()
     validate_cuda_toolkit_for_colbert()
     configure_cuda_env_for_colbert_extension_build()
-    preflight_colbert_cuda_extension_build()
 
 
 def collect_unique_query_texts(queries: List[Dict], mode: str) -> List[str]:
@@ -172,7 +192,7 @@ def encode_colbertv2_query_texts(checkpoint, query_texts: List[str]) -> Dict[str
 
 
 def save_colbertv2_query_embedding_cache(cache: Dict[str, Dict[str, np.ndarray]], mode: str) -> str:
-    subdir = os.path.join(CACHE_DIR, f"{mode}_query")
+    subdir = get_cache_subdir(mode)
     os.makedirs(subdir, exist_ok=True)
     cache_path = os.path.join(subdir, f"colbertv2__{mode}_cache.pkl")
     tmp_path = f"{cache_path}.tmp"
@@ -263,83 +283,119 @@ def generate_colbertv2_cache_from_query_types(query_types: List[Tuple[str, List[
     }
 
 
-def load_noisy_queries() -> Tuple[List[Dict], List[Dict]]:
-    """从 combined noisy_query.json 加载 ACL 和 CCOMP noisy queries
+def load_appended_json_objects(file_path: str) -> List[Dict]:
+    """读取 pretty-printed 追加 JSON 对象或 JSON array。"""
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"noisy query 文件不存在: {file_path}")
 
-    Returns:
-        (acl_noisy_queries, ccomp_noisy_queries)
-    """
-    acl_noisy = []
-    ccomp_noisy = []
+    with open(file_path, 'r', encoding='utf-8') as f:
+        content = f.read().strip()
+    if not content:
+        raise ValueError(f"noisy query 文件为空: {file_path}")
 
-    if not os.path.exists(NOISY_QUERY_FILE):
-        log_with_timestamp(f"⚠️  noisy query 文件不存在: {NOISY_QUERY_FILE}")
-        return [], []
+    decoder = json.JSONDecoder()
+    objects: List[Dict] = []
+    index = 0
+    while index < len(content):
+        while index < len(content) and content[index].isspace():
+            index += 1
+        if index >= len(content):
+            break
+        decoded, end = decoder.raw_decode(content, index)
+        if isinstance(decoded, list):
+            if objects:
+                raise ValueError(f"{file_path} 中 JSON array 前存在其他 JSON 对象")
+            tail = content[end:].strip()
+            if tail:
+                raise ValueError(f"{file_path} 中 JSON array 后存在额外内容")
+            return decoded
+        if not isinstance(decoded, dict):
+            raise TypeError(f"{file_path} 中追加 JSON 记录必须是对象")
+        objects.append(decoded)
+        index = end
 
-    try:
-        with open(NOISY_QUERY_FILE, 'r', encoding='utf-8') as f:
-            content = f.read().strip()
+    return objects
 
-        if not content:
-            log_with_timestamp(f"⚠️  noisy query 文件为空: {NOISY_QUERY_FILE}")
-            return [], []
 
-        # 解析 JSON（支持 JSON Lines、pretty-printed 或 JSON array）
-        if content.startswith('['):
-            data = json.loads(content)
-        else:
-            data = []
-            depth = 0
-            start = -1
-            for i, c in enumerate(content):
-                if c == '{':
-                    if depth == 0:
-                        start = i
-                    depth += 1
-                elif c == '}':
-                    depth -= 1
-                    if depth == 0 and start >= 0:
-                        try:
-                            data.append(json.loads(content[start:i+1]))
-                        except:
-                            pass
-                        start = -1
+def _build_query_entry(item: Dict, query_field: str, query_type: str) -> Dict:
+    user_id = item['user_id']
+    asin = item['asin']
+    original_query = item['original_query']
+    noisy_query = item['noisy_query']
+    query_text = item[query_field]
 
-        for item in data:
-            query_cat = item.get('query_category', '')
-            noisy_text = item.get('noisy_query', '')
-            if not noisy_text:
-                continue
+    if not isinstance(user_id, str) or not user_id:
+        raise ValueError(f"query item has invalid user_id: {item}")
+    if not isinstance(asin, str) or not asin:
+        raise ValueError(f"query item has invalid asin for user={user_id}: {item}")
+    if not isinstance(original_query, str) or not original_query:
+        raise ValueError(f"query item has invalid original_query for user={user_id}, asin={asin}: {item}")
+    if not isinstance(noisy_query, str) or not noisy_query:
+        raise ValueError(f"query item has invalid noisy_query for user={user_id}, asin={asin}: {item}")
+    if not isinstance(query_text, str) or not query_text:
+        raise ValueError(f"query item has invalid {query_field} for user={user_id}, asin={asin}: {item}")
 
-            entry = {
-                'user_id': item.get('user_id', ''),
-                'asin': item.get('asin', ''),
-                'is_ground_truth': True,
-                'query': noisy_text,
-            }
+    return {
+        'user_id': user_id,
+        'asin': asin,
+        'query': query_text,
+        'original_query': original_query,
+        'noisy_query': noisy_query,
+        'source': 'syntax_depth',
+        'query_type': query_type,
+        'source_query_field': query_field,
+        'injection_source': item['injection_source'],
+    }
 
-            if query_cat == 'acl':
-                entry['acl'] = item.get('level', 0)
-                acl_noisy.append(entry)
-            elif query_cat == 'ccomp':
-                entry['ccomp'] = item.get('level', 0)
-                ccomp_noisy.append(entry)
 
-        log_with_timestamp(f"✓ 从 {NOISY_QUERY_FILE} 加载了 {len(acl_noisy)} 条 ACL noisy, {len(ccomp_noisy)} 条 CCOMP noisy")
-    except Exception as e:
-        log_with_timestamp(f"⚠️  读取 noisy query 文件失败: {e}")
-        return [], []
+def load_syntax_depth_query_pairs() -> Dict[str, List[Dict]]:
+    """从 noisy_query.json 加载 syntax-depth clean/noisy 查询对。"""
+    data = load_appended_json_objects(NOISY_QUERY_FILE)
+    clean_queries = []
+    noisy_queries = []
+    skipped_non_syntax_depth = 0
 
-    return acl_noisy, ccomp_noisy
+    for index, item in enumerate(data):
+        injection_source = item.get('injection_source')
+        if injection_source != SYNTAX_DEPTH_INJECTION_SOURCE:
+            skipped_non_syntax_depth += 1
+            continue
+
+        for field in ('user_id', 'asin', 'original_query', 'noisy_query'):
+            if field not in item:
+                raise ValueError(f"query item missing required field '{field}' at index {index}: {item}")
+
+        clean_queries.append(_build_query_entry(item, 'original_query', 'clean'))
+        noisy_queries.append(_build_query_entry(item, 'noisy_query', 'noisy'))
+
+    log_with_timestamp(
+        f"✓ 从 {NOISY_QUERY_FILE} 加载了 {len(clean_queries)} 条 syntax-depth clean 查询和 "
+        f"{len(noisy_queries)} 条 noisy 查询，"
+        f"跳过非 syntax-depth 记录 {skipped_non_syntax_depth} 条"
+    )
+    return {
+        'clean_queries': clean_queries,
+        'noisy_queries': noisy_queries,
+    }
 
 
 def _build_queries_by_user(queries: List[Dict]) -> Dict[str, List[Dict]]:
-    """将查询列表按用户ID分组"""
+    """将查询列表按 user_id 分组。"""
     by_user = defaultdict(list)
-    for q in queries:
-        uid = q.get('user_id', '')
-        if uid:
-            by_user[uid].append(q)
+    for item in queries:
+        for field in ('user_id', 'query', 'asin'):
+            if field not in item:
+                raise ValueError(f"query item missing required field '{field}': {item}")
+        user_id = item['user_id']
+        query_text = item['query']
+        asin = item['asin']
+        if not user_id:
+            raise ValueError(f"query item has empty user_id: {item}")
+        if not query_text:
+            raise ValueError(f"query item has empty query for user={user_id}: {item}")
+        if not asin:
+            raise ValueError(f"query item has empty asin for user={user_id}: {item}")
+        by_user[user_id].append(item)
     return dict(by_user)
 
 
@@ -366,20 +422,65 @@ class _StdoutToStderr:
 def initialize_cache_dir():
     """初始化缓存目录"""
     os.makedirs(CACHE_DIR, exist_ok=True)
-    os.makedirs(os.path.join(CACHE_DIR, "acl_noisy_query"), exist_ok=True)
-    os.makedirs(os.path.join(CACHE_DIR, "ccomp_noisy_query"), exist_ok=True)
+    os.makedirs(get_cache_subdir(CLEAN_MODE), exist_ok=True)
+    os.makedirs(get_cache_subdir(NOISY_MODE), exist_ok=True)
     log_with_timestamp(f"✓ 缓存目录: {CACHE_DIR}")
+
+
+def get_cache_subdir(mode: str) -> str:
+    if mode == CLEAN_MODE:
+        return os.path.join(CACHE_DIR, "syntax_depth_correct_query")
+    if mode == NOISY_MODE:
+        return os.path.join(CACHE_DIR, "syntax_depth_noisy_query")
+    raise ValueError(f"Unsupported noisy cache mode: {mode}")
+
+
+def get_mode_suffix(mode: str) -> str:
+    if mode == CLEAN_MODE:
+        return CLEAN_MODE
+    if mode == NOISY_MODE:
+        return NOISY_MODE
+    raise ValueError(f"Unsupported noisy cache mode: {mode}")
+
+
+def load_retriever_for_query_encoding(retriever_name: str):
+    if retriever_name == 'BM25':
+        log_with_timestamp("  初始化检索器 BM25...")
+        bm25_path = None
+        for f in os.listdir(BM25_RETRIEVER_CACHE_DIR):
+            if f.startswith('bm25_') and f.endswith('.pkl'):
+                bm25_path = os.path.join(BM25_RETRIEVER_CACHE_DIR, f)
+                break
+        if bm25_path is None:
+            raise FileNotFoundError(f"BM25 retriever cache not found in {BM25_RETRIEVER_CACHE_DIR}")
+
+        with open(bm25_path, 'rb') as f:
+            bm25 = pickle.load(f)
+        log_with_timestamp(f"  ✓ BM25 加载完成")
+        return bm25
+
+    retriever_class = AVAILABLE_RETRIEVERS.get(retriever_name)
+    if retriever_class is None:
+        raise ValueError(f"Unknown retriever: {retriever_name}")
+
+    log_with_timestamp(f"  初始化检索器 {retriever_name}...")
+    with _StdoutToStderr():
+        retriever = retriever_class()
+    log_with_timestamp(f"  ✓ 检索器初始化完成，模型已加载")
+    return retriever
 
 
 def get_cache_file_path(retriever_name: str, user_id: str, mode: str) -> str:
     """获取缓存文件路径"""
-    subdir = os.path.join(CACHE_DIR, f"{mode}_query")
-    filename = f"{retriever_name}_{user_id}.pkl"
+    subdir = get_cache_subdir(mode)
+    suffix = get_mode_suffix(mode)
+    filename = f"{retriever_name.lower()}_{user_id}_{suffix}_cache.pkl"
     return os.path.join(subdir, filename)
 
 
 def _encode_and_save_cache(
     retriever_name: str,
+    retriever,
     queries: List[Dict],
     by_user: Dict[str, List[Dict]],
     mode: str,
@@ -387,28 +488,23 @@ def _encode_and_save_cache(
     """为检索器编码并保存查询缓存"""
     if retriever_name == 'BM25':
         # BM25 使用不同的处理方式
-        return _encode_and_save_bm25_cache(queries, by_user, mode)
+        return _encode_and_save_bm25_cache(retriever, queries, by_user, mode)
 
     # SPLADE 使用不同的缓存格式
     if retriever_name == 'SPLADE':
-        return _encode_and_save_splade_cache(queries, by_user, mode)
-
-    retriever_class = AVAILABLE_RETRIEVERS[retriever_name]
-    log_with_timestamp(f"  初始化检索器 {retriever_name}...")
-    with _StdoutToStderr():
-        retriever = retriever_class()
-    log_with_timestamp(f"  ✓ 检索器初始化完成，模型已加载")
+        return _encode_and_save_splade_cache(retriever, queries, by_user, mode)
 
     cache = {}
-    failed_count = 0
+    total_items = sum(len(user_queries) for user_queries in by_user.values())
+    processed_items = 0
 
     for user_id, user_queries in by_user.items():
-        user_cache = []
+        user_cache = {}
         for q in user_queries:
             try:
                 text = q.get('query', '')
                 if not text:
-                    continue
+                    raise ValueError(f"{mode} query is empty for user={user_id}, asin={q.get('asin', '')}")
                 embedding = retriever.encode_query(text)
 
                 if not isinstance(embedding, np.ndarray):
@@ -417,18 +513,15 @@ def _encode_and_save_cache(
                     else:
                         embedding = np.array(embedding)
 
-                user_cache.append({
-                    'query': text,
-                    'vector': embedding,
-                    'user_id': user_id,
-                    'asin': q.get('asin', ''),
-                    'level': q.get('acl') or q.get('ccomp', 0),
-                    'is_ground_truth': q.get('is_ground_truth', True),
-                })
+                user_cache[text] = embedding
+                processed_items += 1
+                if processed_items % 100 == 0 or processed_items == total_items:
+                    log_with_timestamp(
+                        f"    进度 [{retriever_name}] {mode}: {processed_items}/{total_items}"
+                    )
             except Exception as e:
                 log_with_timestamp(f"      ❌ 编码失败 [{retriever_name}] 查询: {text[:40]}... 错误: {str(e)[:100]}")
-                failed_count += 1
-                continue  # 不退出，继续处理其他查询
+                raise
 
         if user_cache:
             cache[user_id] = user_cache
@@ -440,28 +533,21 @@ def _encode_and_save_cache(
             pickle.dump(cache, f)
         log_with_timestamp(f"  ✓ 缓存已保存: {cache_file}")
 
-    if failed_count > 0:
-        log_with_timestamp(f"      ⚠️  共有 {failed_count} 个查询编码失败")
-
-    return len(cache)
+    total_cached = sum(len(user_cache) for user_cache in cache.values())
+    return total_cached
 
 
 def _encode_and_save_splade_cache(
+    retriever,
     queries: List[Dict],
     by_user: Dict[str, List[Dict]],
     mode: str,
 ) -> int:
     """为 SPLADE 编码并保存查询缓存（稀疏向量格式）"""
-    from utils.retrievers import SPLADERetriever
-
-    log_with_timestamp(f"  初始化检索器 SPLADE...")
-    with _StdoutToStderr():
-        retriever = SPLADERetriever()
-    log_with_timestamp(f"  ✓ SPLADE 检索器初始化完成，模型已加载")
-
     # SPLADE 缓存格式：{user_id: {query_text: sparse_vec_dict}}
     cache = {}
-    failed_count = 0
+    total_items = sum(len(user_queries) for user_queries in by_user.values())
+    processed_items = 0
 
     for user_id, user_queries in by_user.items():
         user_cache = {}
@@ -469,56 +555,42 @@ def _encode_and_save_splade_cache(
             try:
                 text = q.get('query', '')
                 if not text:
-                    continue
+                    raise ValueError(f"{mode} query is empty for user={user_id}, asin={q.get('asin', '')}")
                 # SPLADE 返回 Dict[str, float] (sparse vector)
                 sparse_vec = retriever.encode_query(text)
                 user_cache[text] = sparse_vec
+                processed_items += 1
+                if processed_items % 100 == 0 or processed_items == total_items:
+                    log_with_timestamp(f"    进度 [SPLADE] {mode}: {processed_items}/{total_items}")
             except Exception as e:
                 log_with_timestamp(f"      ❌ SPLADE 编码失败: {text[:40]}... 错误: {str(e)[:100]}")
-                failed_count += 1
-                continue
+                raise
 
         if user_cache:
             cache[user_id] = user_cache
 
     if cache:
         # SPLADE 使用特殊路径格式，与评估代码兼容
-        cache_file = os.path.join(CACHE_DIR, f"{mode}_query", f"splade__{mode}_cache.pkl")
+        cache_file = os.path.join(get_cache_subdir(mode), f"splade__{mode}_cache.pkl")
         os.makedirs(os.path.dirname(cache_file), exist_ok=True)
         with open(cache_file, 'wb') as f:
             pickle.dump(cache, f)
         log_with_timestamp(f"  ✓ SPLADE 缓存已保存: {cache_file}")
 
-    if failed_count > 0:
-        log_with_timestamp(f"      ⚠️  SPLADE 共有 {failed_count} 个查询编码失败")
-
-    return len(cache)
+    total_cached = sum(len(user_cache) for user_cache in cache.values())
+    return total_cached
 
 
 def _encode_and_save_bm25_cache(
+    bm25,
     queries: List[Dict],
     by_user: Dict[str, List[Dict]],
     mode: str,
 ) -> int:
     """为 BM25 编码并保存查询缓存"""
-    log_with_timestamp(f"  初始化 BM25...")
-
-    # 加载 BM25 检索器
-    bm25_path = None
-    for f in os.listdir(BM25_RETRIEVER_CACHE_DIR):
-        if f.startswith('bm25_') and f.endswith('.pkl'):
-            bm25_path = os.path.join(BM25_RETRIEVER_CACHE_DIR, f)
-            break
-    if bm25_path is None:
-        log_with_timestamp(f"  ⚠️  BM25 retriever cache not found in {BM25_RETRIEVER_CACHE_DIR}")
-        return 0
-
-    with open(bm25_path, 'rb') as f:
-        bm25 = pickle.load(f)
-    log_with_timestamp(f"  ✓ BM25 加载完成")
-
     cache = {}
     failed_count = 0
+    total_items = len(queries)
 
     for index, q in enumerate(queries):
         try:
@@ -528,6 +600,8 @@ def _encode_and_save_bm25_cache(
             if text in cache:
                 continue
             cache[text] = bm25.search(text, top_k=100)
+            if (index + 1) % 100 == 0 or (index + 1) == total_items:
+                log_with_timestamp(f"    进度 [BM25] {mode}: {index + 1}/{total_items}")
         except Exception as e:
             log_with_timestamp(f"      ❌ BM25 搜索失败: {text[:40]}... 错误: {str(e)[:100]}")
             failed_count += 1
@@ -535,7 +609,7 @@ def _encode_and_save_bm25_cache(
             sys.exit(1)
 
     if cache:
-        cache_file = os.path.join(CACHE_DIR, f"{mode}_query", f"bm25__{mode}_cache.pkl")
+        cache_file = os.path.join(get_cache_subdir(mode), f"bm25__{mode}_cache.pkl")
         os.makedirs(os.path.dirname(cache_file), exist_ok=True)
         with open(cache_file, 'wb') as f:
             pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -548,13 +622,13 @@ def _encode_and_save_bm25_cache(
 
 
 def clear_noisy_cache() -> int:
-    """删除旧的 noisy 查询缓存文件"""
+    """删除旧的 syntax-depth clean/noisy 查询缓存文件"""
     if not os.path.exists(CACHE_DIR):
         return 0
 
     deleted_count = 0
-    for subdir in ["acl_noisy_query", "ccomp_noisy_query"]:
-        subdir_path = os.path.join(CACHE_DIR, subdir)
+    for mode in (CLEAN_MODE, NOISY_MODE):
+        subdir_path = get_cache_subdir(mode)
         if os.path.exists(subdir_path):
             for root, _, files in os.walk(subdir_path):
                 for name in files:
@@ -585,7 +659,7 @@ def main():
     clear_cache_before = args.clear
 
     log_with_timestamp("=" * 80)
-    log_with_timestamp("🚀 生成 Noisy 查询缓存")
+    log_with_timestamp("🚀 生成 syntax-depth clean/noisy 查询缓存")
     log_with_timestamp("=" * 80)
     log_with_timestamp(f"类别: {CATEGORY_NAME}")
     log_with_timestamp(f"Noisy 文件: {NOISY_QUERY_FILE}")
@@ -596,25 +670,35 @@ def main():
         f"HF_HOME={os.environ.get('HF_HOME')}, "
         f"HF_HUB_CACHE={os.environ.get('HF_HUB_CACHE')}, "
         f"HF_HUB_OFFLINE={os.environ.get('HF_HUB_OFFLINE')}, "
-        f"TRANSFORMERS_OFFLINE={os.environ.get('TRANSFORMERS_OFFLINE')}"
+        f"TRANSFORMERS_OFFLINE={os.environ.get('TRANSFORMERS_OFFLINE')}, "
+        f"TRITON_CACHE_DIR={os.environ.get('TRITON_CACHE_DIR')}"
     )
     log_with_timestamp("")
 
-    # 加载 noisy queries
-    acl_noisy, ccomp_noisy = load_noisy_queries()
+    # 加载 syntax-depth clean/noisy queries
+    query_sets = load_syntax_depth_query_pairs()
+    clean_queries = query_sets['clean_queries']
+    noisy_queries = query_sets['noisy_queries']
 
-    if not acl_noisy and not ccomp_noisy:
-        log_with_timestamp("⚠️  没有加载到任何 noisy 查询")
+    if not clean_queries or not noisy_queries:
+        log_with_timestamp("⚠️  没有加载到任何 syntax-depth clean/noisy 查询")
         return
 
     # 按用户分组
-    acl_noisy_by_user = _build_queries_by_user(acl_noisy)
-    ccomp_noisy_by_user = _build_queries_by_user(ccomp_noisy)
+    clean_queries_by_user = _build_queries_by_user(clean_queries)
+    noisy_queries_by_user = _build_queries_by_user(noisy_queries)
+    clean_query_count = sum(len(v) for v in clean_queries_by_user.values())
+    noisy_query_count = sum(len(v) for v in noisy_queries_by_user.values())
 
     log_with_timestamp("")
     log_with_timestamp(f"📋 任务配置:")
-    log_with_timestamp(f"  • ACL noisy 用户: {len(acl_noisy_by_user)} 个, 查询: {sum(len(v) for v in acl_noisy_by_user.values())} 条")
-    log_with_timestamp(f"  • CCOMP noisy 用户: {len(ccomp_noisy_by_user)} 个, 查询: {sum(len(v) for v in ccomp_noisy_by_user.values())} 条")
+    log_with_timestamp(f"  • 数据源: {NOISY_QUERY_FILE}")
+    log_with_timestamp(f"  • clean 模式: {CLEAN_MODE}")
+    log_with_timestamp(f"  • noisy 模式: {NOISY_MODE}")
+    log_with_timestamp(f"  • clean 用户: {len(clean_queries_by_user)} 个, 查询: {clean_query_count} 条")
+    log_with_timestamp(f"  • noisy 用户: {len(noisy_queries_by_user)} 个, 查询: {noisy_query_count} 条")
+    log_with_timestamp(f"  • clean 缓存目录: {get_cache_subdir(CLEAN_MODE)}")
+    log_with_timestamp(f"  • noisy 缓存目录: {get_cache_subdir(NOISY_MODE)}")
     log_with_timestamp("")
 
     if clear_cache_before:
@@ -626,8 +710,8 @@ def main():
 
     # 定义查询类型
     query_types = [
-        ('ACL', acl_noisy, acl_noisy_by_user, 'acl_noisy'),
-        ('CCOMP', ccomp_noisy, ccomp_noisy_by_user, 'ccomp_noisy'),
+        ('SYNTAX_DEPTH_CLEAN', clean_queries, clean_queries_by_user, CLEAN_MODE),
+        ('SYNTAX_DEPTH_NOISY', noisy_queries, noisy_queries_by_user, NOISY_MODE),
     ]
 
     for retriever_name in retriever_names:
@@ -645,18 +729,25 @@ def main():
             log_with_timestamp(f"✓ 检索器 {retriever_name} 处理完成: {summary['total_cached']} 条")
             continue
 
-        for query_type, queries, by_user, mode in query_types:
-            if queries:
-                total = _encode_and_save_cache(
-                    retriever_name,
-                    queries,
-                    by_user,
-                    mode,
-                )
-                total_cached += total
-                log_with_timestamp(f"  ✓ {query_type} {mode} 缓存: {total} 用户")
-            else:
-                log_with_timestamp(f"  (无 {query_type} {mode} 查询，跳过)")
+        retriever = load_retriever_for_query_encoding(retriever_name)
+        try:
+            for query_type, queries, by_user, mode in query_types:
+                if queries:
+                    total = _encode_and_save_cache(
+                        retriever_name,
+                        retriever,
+                        queries,
+                        by_user,
+                        mode,
+                    )
+                    total_cached += total
+                    log_with_timestamp(f"  ✓ {query_type} {mode} 缓存: {total} 条")
+                else:
+                    log_with_timestamp(f"  (无 {query_type} {mode} 查询，跳过)")
+        finally:
+            del retriever
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         log_with_timestamp(f"✓ 检索器 {retriever_name} 处理完成")
 
@@ -665,10 +756,10 @@ def main():
     # 统计缓存
     cache_files = 0
     cache_dir_size = 0.0
-    for subdir in ["acl_noisy_query", "ccomp_noisy_query"]:
-        subdir_path = os.path.join(CACHE_DIR, subdir)
-        if os.path.exists(subdir_path):
-            for root, _, files in os.walk(subdir_path):
+    for mode in (CLEAN_MODE, NOISY_MODE):
+        cache_dir = get_cache_subdir(mode)
+        if os.path.exists(cache_dir):
+            for root, _, files in os.walk(cache_dir):
                 for name in files:
                     if name.endswith('.pkl'):
                         cache_files += 1
@@ -678,8 +769,8 @@ def main():
     log_with_timestamp("=" * 80)
     log_with_timestamp("✨ 完成!")
     log_with_timestamp(f"  • 处理检索器: {len(retriever_names)} 个")
-    log_with_timestamp(f"  • ACL noisy 缓存: {sum(len(v) for v in acl_noisy_by_user.values())} 条")
-    log_with_timestamp(f"  • CCOMP noisy 缓存: {sum(len(v) for v in ccomp_noisy_by_user.values())} 条")
+    log_with_timestamp(f"  • syntax-depth clean 查询: {clean_query_count} 条")
+    log_with_timestamp(f"  • syntax-depth noisy 查询: {noisy_query_count} 条")
     log_with_timestamp(f"  • 缓存文件: {cache_files} 个")
     log_with_timestamp(f"  • 缓存大小: {cache_dir_size:.1f} MB")
     log_with_timestamp(f"  • 总耗时: {elapsed:.1f} 秒 ({elapsed/60:.1f} 分钟)")

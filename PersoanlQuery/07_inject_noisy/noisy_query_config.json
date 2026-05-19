@@ -1,6 +1,6 @@
 {
-  "num_users_to_test": 5000,
-  "max_workers": 10,
+  "num_users_to_test": 10000,
+  "max_workers": 50,
   "use_minimaxio": false,
   "inject_error_count": 3,
   "error_injection_rate": 0.8,

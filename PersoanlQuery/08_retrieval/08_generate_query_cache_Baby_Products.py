@@ -59,6 +59,7 @@ GLOBAL_PATHS = get_global_paths()
 STAGE9_DIR = GLOBAL_PATHS['stage9_targeted_noisy_query']
 STAGE7_DIR = GLOBAL_PATHS['stage7_iterative_refinement']
 STAGE6_DIR = GLOBAL_PATHS['stage6_query']
+NOISY_QUERY_FILE = os.path.join(GLOBAL_PATHS['inject_noisy'], CATEGORY_NAME, "noisy_query.json")
 QUERY_FILE = CAT_CONFIG['query_file']
 ACL_QUERY_FILE = QUERY_FILE
 CCOMP_QUERY_FILE = QUERY_FILE
@@ -138,6 +139,78 @@ def load_bm25_retriever():
     with open(bm25_path, 'rb') as f:
         bm25 = pickle.load(f)
     return bm25
+
+
+def load_appended_json_objects(file_path: str) -> List[Dict]:
+    """读取追加式 JSON 对象流，或标准 JSON 数组。"""
+    with open(file_path, 'r', encoding='utf-8') as f:
+        content = f.read().strip()
+
+    if not content:
+        raise ValueError(f"JSON records file is empty: {file_path}")
+
+    decoder = json.JSONDecoder()
+    records: List[Dict] = []
+    index = 0
+
+    while index < len(content):
+        while index < len(content) and content[index].isspace():
+            index += 1
+        if index >= len(content):
+            break
+
+        decoded, end = decoder.raw_decode(content, index)
+        if isinstance(decoded, list):
+            if records:
+                raise ValueError(f"{file_path} contains JSON records before a JSON array")
+            if content[end:].strip():
+                raise ValueError(f"{file_path} contains extra content after a JSON array")
+            for row_index, row in enumerate(decoded):
+                if not isinstance(row, dict):
+                    raise TypeError(
+                        f"{file_path} JSON array row {row_index} must be dict, got {type(row).__name__}"
+                    )
+            return decoded
+        if not isinstance(decoded, dict):
+            raise TypeError(f"{file_path} appended JSON record must be dict, got {type(decoded).__name__}")
+
+        records.append(decoded)
+        index = end
+
+    if not records:
+        raise ValueError(f"No JSON records parsed from {file_path}")
+
+    return records
+
+
+def load_noisy_original_query_map() -> Dict[Tuple[str, str], str]:
+    """从 noisy_query.json 构建 (user_id, asin) -> original_query 映射。"""
+    if not os.path.exists(NOISY_QUERY_FILE):
+        return {}
+
+    records = load_appended_json_objects(NOISY_QUERY_FILE)
+    original_query_map: Dict[Tuple[str, str], str] = {}
+
+    for index, item in enumerate(records):
+        if not isinstance(item, dict):
+            raise TypeError(
+                f"noisy query record must be dict at index {index}, got {type(item).__name__}"
+            )
+
+        user_id = item.get('user_id')
+        asin = item.get('asin')
+        original_query = item.get('original_query')
+
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError(f"noisy query record missing valid user_id at index {index}")
+        if not isinstance(asin, str) or not asin.strip():
+            raise ValueError(f"noisy query record missing valid asin at index {index}")
+        if not isinstance(original_query, str) or not original_query.strip():
+            raise ValueError(f"noisy query record missing valid original_query at index {index}")
+
+        original_query_map[(user_id, asin)] = original_query.strip()
+
+    return original_query_map
 
 
 def generate_bm25_query_cache_for_mode(queries: List[Dict], mode: str, top_k: int = 100) -> Dict[str, List]:
@@ -707,7 +780,10 @@ def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
 
 
 def load_syntax_depth_queries() -> List[Dict]:
-    """从 query_by_syntax_depth.json 加载每个用户的 syntax-depth 查询。"""
+    """从 query_by_syntax_depth.json 加载每个用户的 syntax-depth 查询。
+
+    如果 noisy_query.json 中存在同一 (user_id, asin) 的记录，则使用其 original_query 覆盖。
+    """
     if not os.path.exists(SYNTAX_DEPTH_QUERY_FILE):
         raise FileNotFoundError(f"syntax-depth query file not found: {SYNTAX_DEPTH_QUERY_FILE}")
 
@@ -719,6 +795,8 @@ def load_syntax_depth_queries() -> List[Dict]:
 
     queries = []
     seen_user_ids = set()
+    noisy_original_query_map = load_noisy_original_query_map()
+    overridden_count = 0
     for index, item in enumerate(data):
         if not isinstance(item, dict):
             raise TypeError(f"syntax-depth row must be dict at index {index}, got {type(item).__name__}")
@@ -743,12 +821,19 @@ def load_syntax_depth_queries() -> List[Dict]:
         if 'query' not in syntax_depth_query:
             raise ValueError(f"syntax_depth_query missing required field 'query' for user={user_id}, index={index}")
 
-        query_text = syntax_depth_query['query']
-        if not isinstance(query_text, str):
+        syntax_depth_query_text = syntax_depth_query['query']
+        if not isinstance(syntax_depth_query_text, str):
             raise TypeError(f"query must be a string for user={user_id}, index={index}")
-        query_text = query_text.strip()
-        if not query_text:
+        syntax_depth_query_text = syntax_depth_query_text.strip()
+        if not syntax_depth_query_text:
             raise ValueError(f"query is empty for user={user_id}, index={index}")
+
+        override_query = noisy_original_query_map.get((user_id, asin))
+        if override_query is not None:
+            query_text = override_query
+            overridden_count += 1
+        else:
+            query_text = syntax_depth_query_text
 
         if user_id in seen_user_ids:
             log_with_timestamp(f"⚠️  用户 {user_id} 在 syntax-depth 查询文件中出现多次，缓存会保留所有查询")
@@ -759,10 +844,14 @@ def load_syntax_depth_queries() -> List[Dict]:
             'asin': asin,
             'query': query_text,
             'source_query': query_text,
+            'syntax_depth_source_query': syntax_depth_query_text,
             'source': 'syntax_depth',
         })
 
-    log_with_timestamp(f"✓ 从 {SYNTAX_DEPTH_QUERY_FILE} 加载了 {len(queries)} 条 syntax-depth 查询")
+    log_with_timestamp(
+        f"✓ 从 {SYNTAX_DEPTH_QUERY_FILE} 加载了 {len(queries)} 条 syntax-depth 查询，"
+        f"其中 {overridden_count} 条使用 noisy original_query 覆盖"
+    )
     return queries
 
 
@@ -1665,7 +1754,7 @@ def main():
     log_with_timestamp(f"HF_HOME: {os.environ.get('HF_HOME', 'not set')}")
     log_with_timestamp(f"TRANSFORMERS_CACHE: {os.environ.get('TRANSFORMERS_CACHE', 'not set')}")
 
-    log_with_timestamp("📋 使用 query_by_syntax_depth.json 作为数据源")
+    log_with_timestamp("📋 使用 query_by_syntax_depth.json 作为数据源，命中 noisy_query.json 时使用 original_query")
     generate_cache_from_syntax_depth_source(
         retriever_names=RETRIEVER_NAMES,
         clear_cache_before=CLEAR_CACHE_BEFORE,
