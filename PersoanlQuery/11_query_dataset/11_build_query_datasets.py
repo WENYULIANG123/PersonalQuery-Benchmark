@@ -417,9 +417,9 @@ def stage9_payload_from_records(correct_record: dict[str, Any], noisy_record: di
     if len(correct_query.split()) != word_count:
         raise ValueError(f"{label} correct_query word count does not match word_count")
 
-    attrs_used = require_dict(correct_record.get("attrs_used"), f"{label}.correct.attrs_used")
-    noisy_attrs_used = require_dict(noisy_record.get("attrs_used"), f"{label}.noisy.attrs_used")
-    if attrs_used != noisy_attrs_used:
+    error_attrs = require_dict(correct_record.get("attrs_used"), f"{label}.correct.attrs_used")
+    noisy_error_attrs = require_dict(noisy_record.get("attrs_used"), f"{label}.noisy.attrs_used")
+    if error_attrs != noisy_error_attrs:
         raise ValueError(f"{label} correct/noisy attrs_used mismatch")
 
     correct_errors = normalize_injected_errors(correct_record.get("injected_errors"), f"{label}.correct.injected_errors")
@@ -434,7 +434,7 @@ def stage9_payload_from_records(correct_record: dict[str, Any], noisy_record: di
         "complexity_level": complexity_level,
         "depth": depth,
         "correct_query": correct_query,
-        "attrs_used": attrs_used,
+        "error_attrs": error_attrs,
         "error_query": noisy_query,
         "injected_errors": correct_errors,
     }
@@ -455,7 +455,7 @@ def merge_stage9_payload(
         "complexity_level",
         "depth",
         "correct_query",
-        "attrs_used",
+        "error_attrs",
         "error_query",
         "injected_errors",
     ]
@@ -563,7 +563,16 @@ def build_stage8_row(
     }
 
 
-def build_stage9_row(category: str, payload: dict[str, Any]) -> dict[str, Any]:
+def build_stage9_row(
+    category: str,
+    payload: dict[str, Any],
+    stage6_index: dict[tuple[str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    key = (payload["user_id"], payload["asin"])
+    if key not in stage6_index:
+        raise KeyError(f"Stage 9 key is missing from Stage 6 syntax-depth queries: {key}")
+    stage6_query = stage6_index[key]
+
     return {
         "category": category,
         "uuid": payload["user_id"],
@@ -574,7 +583,7 @@ def build_stage9_row(category: str, payload: dict[str, Any]) -> dict[str, Any]:
         "complexity_level": payload["complexity_level"],
         "depth": payload["depth"],
         "correct_query": payload["correct_query"],
-        "attrs_used": payload["attrs_used"],
+        "attrs_used": stage6_query["attrs_used"],
         "has_error_query": True,
         "error_query": payload["error_query"],
         "injected_errors": payload["injected_errors"],
@@ -600,7 +609,7 @@ def build_dataset_rows(
         rows.append(row)
 
     for key in sorted(stage9_pair_index):
-        row = build_stage9_row(category, stage9_pair_index[key])
+        row = build_stage9_row(category, stage9_pair_index[key], stage6_index)
         dataset_key = (row["category"], row["uuid"], row["asin"], row["source_stage"])
         if dataset_key in seen_keys:
             raise ValueError(f"Duplicate dataset row key: {dataset_key}")
