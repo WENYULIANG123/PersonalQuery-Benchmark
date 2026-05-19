@@ -27,6 +27,7 @@ COMPLEXITY_GROUP_MAP = {
 }
 OUTPUT_COMPLEXITY_GROUPS = {"low", "medium", "high"}
 INJECTED_ERROR_FIELDS = ["target_token_depth"]
+ERROR_ATTR_FIELDS = ["noise_type", "correct_text", "noisy_text", "anchor_replaced_text"]
 OUTPUT_FIELDS = [
     "category",
     "uuid",
@@ -165,6 +166,37 @@ def normalize_injected_errors(errors: Any, label: str) -> list[dict[str, Any]]:
         target_token_depth = require_int(error, "target_token_depth", error_label)
         normalized.append({"target_token_depth": target_token_depth})
     return normalized
+
+
+def require_error_attr_value(attrs: dict[str, Any], key: str, label: str) -> str | list[str]:
+    if key not in attrs:
+        raise KeyError(f"{label} is missing required error attr: {key}")
+    value = attrs[key]
+    if isinstance(value, str) and value:
+        return value
+    if not isinstance(value, list):
+        raise TypeError(f"{label}.{key} must be a non-empty string or list[str], got {type(value).__name__}")
+    if not value:
+        raise ValueError(f"{label}.{key} must not be an empty list")
+    normalized = []
+    for item_idx, item in enumerate(value):
+        if not isinstance(item, str) or not item:
+            raise ValueError(f"{label}.{key}[{item_idx}] must be a non-empty string")
+        normalized.append(item)
+    return normalized
+
+
+def merge_error_attrs_into_injected_errors(
+    injected_errors: list[dict[str, Any]],
+    error_attrs: dict[str, Any],
+    label: str,
+) -> list[dict[str, Any]]:
+    if len(injected_errors) != 1:
+        raise ValueError(f"{label} must contain exactly one injected error, got {len(injected_errors)}")
+    merged_error = dict(injected_errors[0])
+    for field in ERROR_ATTR_FIELDS:
+        merged_error[field] = require_error_attr_value(error_attrs, field, label)
+    return [merged_error]
 
 
 def write_json(path: Path, data: dict[str, Any]) -> None:
@@ -426,6 +458,7 @@ def stage9_payload_from_records(correct_record: dict[str, Any], noisy_record: di
     noisy_errors = normalize_injected_errors(noisy_record.get("injected_errors"), f"{label}.noisy.injected_errors")
     if correct_errors != noisy_errors:
         raise ValueError(f"{label} correct/noisy injected_errors mismatch")
+    merged_errors = merge_error_attrs_into_injected_errors(correct_errors, error_attrs, label)
 
     return {
         "user_id": user_id,
@@ -436,7 +469,7 @@ def stage9_payload_from_records(correct_record: dict[str, Any], noisy_record: di
         "correct_query": correct_query,
         "error_attrs": error_attrs,
         "error_query": noisy_query,
-        "injected_errors": correct_errors,
+        "injected_errors": merged_errors,
     }
 
 
