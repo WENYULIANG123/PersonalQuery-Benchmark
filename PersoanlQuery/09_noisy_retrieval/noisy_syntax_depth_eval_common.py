@@ -657,7 +657,7 @@ def filter_retriever_pair_results(
 
         correct_value = correct_record["metrics"][exclude_metric_name]
         noisy_value = noisy_record["metrics"][exclude_metric_name]
-        if noisy_value > correct_value:
+        if noisy_value >= correct_value:
             excluded_records.append(
                 {
                     "pair_id": correct_record["pair_id"],
@@ -679,7 +679,7 @@ def filter_retriever_pair_results(
 
     if not filtered_correct_records:
         raise ValueError(
-            f"{correct_result['retriever']} has no query records left after excluding noisy-better cases"
+            f"{correct_result['retriever']} has no query records left after excluding noisy-better-or-equal cases"
         )
 
     filtered_correct_result = build_retriever_result_from_query_records(
@@ -1524,8 +1524,9 @@ def print_hit10_group_trend_table(results: List[Dict], title: str) -> None:
             if transition_delta is not None:
                 transition_delta_values[index].append(transition_delta)
                 valid_pct_values.append(transition_delta)
-        two_step_mean = mean_required(valid_pct_values, f"{result['retriever']} adjacent H@10 differences")
-        mean_values.append(two_step_mean)
+        two_step_mean = mean_optional(valid_pct_values)
+        if two_step_mean is not None:
+            mean_values.append(two_step_mean)
 
         for transition_delta in transition_deltas:
             row += f" {format_signed_metric(transition_delta):>{col_w}}"
@@ -1824,7 +1825,7 @@ def run_category_eval(category_name: str) -> None:
         filtered_differences.append(metric_diff(filtered_correct_result, filtered_noisy_result))
         final_statistics_filters.append(filter_summary)
         log(
-            f"{correct_result['retriever']} 最终统计剔除 noisy 优于 clean 的样本 "
+            f"{correct_result['retriever']} 最终统计剔除 noisy 不差于 clean 的样本 "
             f"{filter_summary['excluded_count']} 条，保留 {filter_summary['kept_count']} 条"
         )
 

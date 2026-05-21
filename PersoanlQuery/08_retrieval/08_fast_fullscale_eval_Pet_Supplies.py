@@ -46,10 +46,7 @@ import torch
 import pandas as pd
 from datetime import datetime
 from collections import defaultdict, Counter
-from typing import List, Dict, Tuple
-from scipy import stats
-import statsmodels.formula.api as smf
-
+from typing import List, Dict, Tuple, Optional
 # 设置路径
 sys.path.insert(0, '/workspace/PersonalQuery/PersoanlQuery/12_retrieval')
 
@@ -82,9 +79,8 @@ SPLADE_QUERY_BATCH_SIZE = 128
 
 DEPTH_GROUP_FIELD = 'syntax_depth_group'
 DEPTH_GROUPS = [
-    ('low_complexity', 6, 7, '低复杂度(6-7)'),
-    ('medium_complexity', 8, 9, '中复杂度(8-9)'),
-    ('high_complexity', 10, 11, '高复杂度(10-11)'),
+    ('low_complexity', 1, 7, '低复杂度(7及以下)'),
+    ('high_complexity', 8, 14, '高复杂度(8及以上)'),
 ]
 DEPTH_GROUP_ORDER = [name for name, _, _, _ in DEPTH_GROUPS]
 DEPTH_GROUP_DISPLAY = {name: label for name, _, _, label in DEPTH_GROUPS}
@@ -915,12 +911,9 @@ def load_user_queries(query_type: str = SYNTAX_DEPTH_QUERY_TYPE, query_category:
         idx += 1
 
     if excluded_depth_counts:
-        log(
-            "  已按实验定义排除 6-11 以外的树深度: "
-            f"{dict(sorted(excluded_depth_counts.items()))}"
-        )
+        log(f"  已按实验定义排除分组范围外的树深度: {dict(sorted(excluded_depth_counts.items()))}")
     if not user_queries:
-        raise ValueError("No syntax-depth queries remained after applying depth groups 6-7, 8-9, 10-11")
+        raise ValueError("No syntax-depth queries remained after applying depth groups 7及以下, 8及以上")
 
     return user_queries, user_to_group, all_query_metadata
 
@@ -1164,7 +1157,7 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_gr
             if query_text not in cached_queries:
                 skipped_missing_queries += 1
                 continue
-            q_idf = compute_query_idf(query_text, word_idf) if word_idf else 0.0
+            q_idf = 0.0
             all_query_data.append((user_id, cached_queries[query_text], relevant_asin, word_count, group_ratio, q_group, q_idf, q))
 
     log(
@@ -1334,7 +1327,7 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: L
             all_query_word_counts.append(q['word_count'])
             all_query_group_ratios.append(q[f'{GROUP_FIELD}_ratio'])
             all_query_groups.append(q[GROUP_FIELD])
-            all_query_idf_values.append(compute_query_idf(q['query'], word_idf) if word_idf else 0.0)
+            all_query_idf_values.append(0.0)
             all_query_depths.append(q['syntax_depth'])
             all_query_target_depths.append(q['target_depth'])
             all_query_user_avg_depths.append(q['user_avg_depth'])
@@ -1510,8 +1503,6 @@ def evaluate_cached_result_retriever(retriever_name: str, user_queries: Dict, us
     required_k_values = {1, 3, 5, 10}
     if not required_k_values.issubset(set(k_values)):
         raise ValueError(f"{retriever_name} evaluation requires k_values to contain {sorted(required_k_values)}")
-    if word_idf is None:
-        raise ValueError(f"{retriever_name} evaluation requires word_idf")
 
     log(f"\n{'='*60}")
     if retriever_name != "colbertv2":
@@ -1566,7 +1557,7 @@ def evaluate_cached_result_retriever(retriever_name: str, user_queries: Dict, us
             all_query_word_counts.append(q['word_count'])
             all_query_group_ratios.append(q[f'{GROUP_FIELD}_ratio'])
             all_query_groups.append(q[GROUP_FIELD])
-            all_query_idf_values.append(compute_query_idf(query_text, word_idf))
+            all_query_idf_values.append(0.0)
             all_query_depths.append(q['syntax_depth'])
             all_query_target_depths.append(q['target_depth'])
             all_query_user_avg_depths.append(q['user_avg_depth'])
@@ -1974,7 +1965,7 @@ def evaluate_splade_retriever(user_queries: Dict, user_to_group: Dict, k_values:
         group_groups[q_group].append(metrics)
 
         # 计算 IDF
-        q_idf = compute_query_idf(query_text, word_idf) if word_idf else 0.0
+        q_idf = 0.0
 
         # 记录原始数据
         all_query_records.append({
@@ -2178,12 +2169,30 @@ def print_hit10_complexity_table(all_results: List[Dict]):
     log("-" * sep_width)
 
 
-def print_hit10_exact_depth_table(all_results: List[Dict], depths: Tuple[int, ...] = (6, 8, 10)):
-    """按精确树深度展示 H@10 对比表。"""
+def print_hit10_exact_depth_table(all_results: List[Dict], depths: Optional[Tuple[int, ...]] = None):
+    """按精确树深度展示 H@10 对比表。
+
+    若未显式传入 depths，则自动使用评估结果中实际出现的全部 syntax_depth。
+    """
     sep_width = 100
     log(f"\n{'='*sep_width}")
     log("H@10 精确深度对比表")
     log(f"{'='*sep_width}")
+
+    if depths is None:
+        depth_set = set()
+        for result in all_results:
+            for record in result.get('all_query_records', []):
+                depth = record.get('syntax_depth')
+                if not isinstance(depth, int):
+                    raise TypeError(
+                        f"{result.get('retriever', 'unknown')} has invalid syntax_depth record: {depth!r}"
+                    )
+                depth_set.add(depth)
+
+        if not depth_set:
+            raise ValueError("No exact syntax_depth records found for H@10 table")
+        depths = tuple(sorted(depth_set))
 
     COL_W = 18
     header = f"{'检索器':<12}"
@@ -2224,400 +2233,6 @@ def print_hit10_exact_depth_table(all_results: List[Dict], depths: Tuple[int, ..
         log(row)
 
     log("-" * sep_width)
-
-
-# ============ 实验 1: Paired t-test on ACL_k − CCOMP_k ============
-def run_paired_ttest_analysis(all_results_by_category_and_type: Dict, word_idf: Dict[str, float]):
-    """实验 1: Paired t-test on ACL_k − CCOMP_k
-
-    对每个 (retriever, level, domain) 跑配对 t-test
-    输出格式: Retriever | Level | Domain | Mean Diff | 95% CI | p-value
-    """
-    log("\n" + "=" * 100)
-    log("实验 1: Paired t-test on ACL_k − CCOMP_k (P@10)")
-    log("=" * 100)
-    log("按 (user_id, asin, level) 配对，计算 diff = P@10(ACL_k) - P@10(CCOMP_k)")
-    log("")
-
-    results_table = []
-
-    for (category, qt), results in all_results_by_category_and_type.items():
-        if qt != 'correct':  # 只用 correct 查询
-            continue
-
-        domain = category  # 'acl' 或 'ccomp'
-
-        for r in results:
-            retriever = r['retriever']
-            query_records = r.get('all_query_records', [])
-
-            if not query_records:
-                continue
-
-            # 按 level 分组
-            level_groups = defaultdict(list)
-            for rec in query_records:
-                level = rec.get('acl', rec.get('ccomp', 0))
-                level_groups[level].append(rec)
-
-            for level, records in level_groups.items():
-                # 同一 retriever 下，按 (user_id, asin) 配对
-                # 由于我们是在同一个结果文件里，需要找对应的 ACL 和 CCOMP 记录
-                # 这里我们比较同一 level 下 ACL vs CCOMP 的 P@10
-                pass  # 需要 ACL 和 CCOMP 分别的结果来配对
-
-    # 重新组织数据：分别收集 ACL 和 CCOMP 的结果
-    acl_results_by_retriever = {}  # {retriever: {level: {key: p10}}}
-    ccomp_results_by_retriever = {}
-
-    for (category, qt), results in all_results_by_category_and_type.items():
-        if qt != 'correct':
-            continue
-
-        is_acl = (category == 'acl')
-
-        for r in results:
-            retriever = r['retriever']
-
-            if is_acl:
-                if retriever not in acl_results_by_retriever:
-                    acl_results_by_retriever[retriever] = defaultdict(dict)
-                target_dict = acl_results_by_retriever[retriever]
-            else:
-                if retriever not in ccomp_results_by_retriever:
-                    ccomp_results_by_retriever[retriever] = defaultdict(dict)
-                target_dict = ccomp_results_by_retriever[retriever]
-
-            for rec in r.get('all_query_records', []):
-                # ACL 查询的 level 字段是 'acl'，CCOMP 是 'ccomp'
-                if is_acl:
-                    level = rec.get('acl', 0)
-                else:
-                    level = rec.get('ccomp', 0)
-                key = (rec.get('user_id', ''), rec.get('asin', ''))
-                target_dict[level][key] = rec.get('p_at10', 0.0)
-
-    # 对每个 (retriever, level) 跑配对 t-test
-    log(f"\n{'Retriever':<12} {'Level':<8} {'N_pairs':<10} {'Mean_Diff':<12} {'95% CI':<18} {'p-value':<12} {'Sig':<6}")
-    log("-" * 100)
-
-    all_results = []
-
-    for retriever in sorted(set(list(acl_results_by_retriever.keys()) + list(ccomp_results_by_retriever.keys()))):
-        acl_levels = acl_results_by_retriever.get(retriever, {})
-        ccomp_levels = ccomp_results_by_retriever.get(retriever, {})
-
-        all_levels = sorted(set(list(acl_levels.keys()) + list(ccomp_levels.keys())))
-
-        for level in all_levels:
-            acl_dict = acl_levels.get(level, {})
-            ccomp_dict = ccomp_levels.get(level, {})
-
-            # 找共同 key
-            common_keys = set(acl_dict.keys()) & set(ccomp_dict.keys())
-
-            if len(common_keys) < 3:
-                continue
-
-            diffs = [acl_dict[k] - ccomp_dict[k] for k in common_keys]
-            mean_diff = np.mean(diffs)
-            std_diff = np.std(diffs, ddof=1)
-
-            # Bootstrap 95% CI
-            np.random.seed(42)
-            n_bootstrap = 1000
-            boot_means = []
-            for _ in range(n_bootstrap):
-                sample = np.random.choice(diffs, size=len(diffs), replace=True)
-                boot_means.append(np.mean(sample))
-            ci_lower = np.percentile(boot_means, 2.5)
-            ci_upper = np.percentile(boot_means, 97.5)
-
-            # Paired t-test against 0
-            t_stat, p_value = stats.ttest_1samp(diffs, 0)
-
-            sig = "***" if p_value < 0.001 else "**" if p_value < 0.01 else "*" if p_value < 0.05 else ""
-
-            mean_str = f"{mean_diff:+.4f}"
-            ci_str = f"[{ci_lower:+.2f}, {ci_upper:+.2f}]"
-            p_str = f"{p_value:.3e}" if p_value < 0.001 else f"{p_value:.4f}"
-
-            log(f"{retriever:<12} {level:<8} {len(common_keys):<10} {mean_str:<12} {ci_str:<18} {p_str:<12} {sig:<6}")
-
-            all_results.append({
-                'retriever': retriever,
-                'level': level,
-                'n_pairs': len(common_keys),
-                'mean_diff': mean_diff,
-                'ci_lower': ci_lower,
-                'ci_upper': ci_upper,
-                'p_value': p_value,
-                't_stat': t_stat,
-                'sig': sig
-            })
-
-    # 汇总行
-    if all_results:
-        log("-" * 100)
-        pooled_diffs = [r['mean_diff'] * r['n_pairs'] for r in all_results]
-        total_n = sum(r['n_pairs'] for r in all_results)
-        pooled_mean = sum(pooled_diffs) / total_n if total_n > 0 else 0
-
-        # 简单的汇总结论
-        sig_count = sum(1 for r in all_results if r['sig'])
-        log(f"\n  汇总: {len(all_results)} 个 (retriever, level) 组合中，{sig_count} 个显著 (p<0.05)")
-
-    return all_results
-
-
-# ============ 实验 2: Query 长度和 IDF 的统计分布 ============
-def run_symmetry_check(acl_df: pd.DataFrame, ccomp_df: pd.DataFrame, word_idf: Dict[str, float]):
-    """实验 2: 统计 ACL 和 CCOMP 各 level 的查询长度和 IDF 分布
-
-    直接计算 ACL0/1/2/3 和 CCOMP0/1/2/3 各组的平均长度和平均 IDF
-    """
-    log("\n" + "=" * 100)
-    log("实验 2: Query 长度和 IDF 统计分布")
-    log("=" * 100)
-    log("目的: 统计 ACL 和 CCOMP 各 level 的查询长度和 IDF 分布")
-    log("")
-
-    # 计算 IDF
-    log("  计算查询 IDF...")
-    acl_df['mean_idf'] = acl_df['query'].apply(lambda q: compute_query_idf_simple(q, word_idf))
-    ccomp_df['mean_idf'] = ccomp_df['query'].apply(lambda q: compute_query_idf_simple(q, word_idf))
-
-    symmetry_results = []
-
-    # ========== ACL Family ==========
-    log("\n--- ACL Family ---")
-    log(f"\n{'Level':<10} {'N':<10} {'Mean_len':<12} {'Std_len':<10} {'Mean_IDF':<12} {'Std_IDF':<10}")
-    log("-" * 70)
-
-    for level in sorted(acl_df['level'].unique()):
-        level_data = acl_df[acl_df['level'] == level]
-        n = len(level_data)
-        mean_len = level_data['word_count'].mean()
-        std_len = level_data['word_count'].std()
-        mean_idf = level_data['mean_idf'].mean()
-        std_idf = level_data['mean_idf'].std()
-
-        log(f"ACL{level:<7} {n:<10} {mean_len:<12.2f} {std_len:<10.2f} {mean_idf:<12.4f} {std_idf:<10.4f}")
-
-        symmetry_results.append({
-            'family': 'ACL',
-            'level': level,
-            'n': n,
-            'mean_len': mean_len,
-            'std_len': std_len,
-            'mean_idf': mean_idf,
-            'std_idf': std_idf
-        })
-
-    # ========== CCOMP Family ==========
-    log("\n--- CCOMP Family ---")
-    log(f"\n{'Level':<10} {'N':<10} {'Mean_len':<12} {'Std_len':<10} {'Mean_IDF':<12} {'Std_IDF':<10}")
-    log("-" * 70)
-
-    for level in sorted(ccomp_df['level'].unique()):
-        level_data = ccomp_df[ccomp_df['level'] == level]
-        n = len(level_data)
-        mean_len = level_data['word_count'].mean()
-        std_len = level_data['word_count'].std()
-        mean_idf = level_data['mean_idf'].mean()
-        std_idf = level_data['mean_idf'].std()
-
-        log(f"CCOMP{level:<5} {n:<10} {mean_len:<12.2f} {std_len:<10.2f} {mean_idf:<12.4f} {std_idf:<10.4f}")
-
-        symmetry_results.append({
-            'family': 'CCOMP',
-            'level': level,
-            'n': n,
-            'mean_len': mean_len,
-            'std_len': std_len,
-            'mean_idf': mean_idf,
-            'std_idf': std_idf
-        })
-
-    log("")
-    log("  解读:")
-    log("  • 查看各 level 的 Mean_len 是否有显著差异")
-    log("  • 查看各 level 的 Mean_IDF 是否有显著差异")
-    log("  • 如果某 level 与其他 level 差异过大，可能存在 confound")
-
-    return symmetry_results
-
-
-# ============ 实验 3: OLS 控制 len_diff + idf_diff ============
-# 所有需要进行 OLS 分析的指标
-OLS_METRICS = ['p_at1', 'p_at3', 'p_at5', 'p_at10', 'n_at10', 'mrr_at10', 'hit_at10']
-METRIC_DISPLAY_NAMES = {
-    'p_at1': 'P@1', 'p_at3': 'P@3', 'p_at5': 'P@5', 'p_at10': 'P@10',
-    'n_at10': 'N@10', 'mrr_at10': 'MR@10', 'hit_at10': 'H@10'
-}
-
-def run_controlled_ols_analysis(all_results_by_category_and_type: Dict, word_idf: Dict[str, float]):
-    """实验 3: OLS 控制 len_diff + idf_diff 后的纯方向偏好效应
-
-    对多个指标运行 OLS: diff_metric ~ len_diff + idf_diff
-    截距 = 控制长度和 IDF 后的"纯方向偏好"
-    """
-    log("\n" + "=" * 100)
-    log("实验 3: OLS 控制 len_diff + idf_diff 后的纯方向偏好")
-    log("=" * 100)
-    log(f"分析指标: {', '.join(METRIC_DISPLAY_NAMES.values())}")
-    log("模型: diff_metric ~ len_diff + idf_diff")
-    log("  • 截距 = 控制 len_diff 和 idf_diff 后的纯 ACL-CCOMP 方向偏好")
-    log("  • len_diff 系数 = 长度每多 1 词，diff_metric 变化多少")
-    log("  • idf_diff 系数 = IDF 每多 1，diff_metric 变化多少")
-    log("")
-
-    # 重新组织数据：分别收集 ACL 和 CCOMP 的结果
-    acl_results_by_retriever = {}
-    ccomp_results_by_retriever = {}
-
-    for (category, qt), results in all_results_by_category_and_type.items():
-        if qt != 'correct':
-            continue
-
-        is_acl = (category == 'acl')
-
-        for r in results:
-            retriever = r['retriever']
-
-            if is_acl:
-                if retriever not in acl_results_by_retriever:
-                    acl_results_by_retriever[retriever] = defaultdict(dict)
-                target_dict = acl_results_by_retriever[retriever]
-            else:
-                if retriever not in ccomp_results_by_retriever:
-                    ccomp_results_by_retriever[retriever] = defaultdict(dict)
-                target_dict = ccomp_results_by_retriever[retriever]
-
-            for rec in r.get('all_query_records', []):
-                if is_acl:
-                    level = rec.get('acl', 0)
-                else:
-                    level = rec.get('ccomp', 0)
-                key = (rec.get('user_id', ''), rec.get('asin', ''))
-                record = {
-                    'query_length': rec.get('query_length', 0.0),
-                    'mean_idf': rec.get('mean_idf', 0.0),
-                }
-                # 收集所有 OLS 指标
-                for metric in OLS_METRICS:
-                    record[metric] = rec.get(metric, 0.0)
-                target_dict[level][key] = record
-
-    # 配对并构建 OLS 数据
-    ols_records = []
-
-    for retriever in sorted(set(list(acl_results_by_retriever.keys()) + list(ccomp_results_by_retriever.keys()))):
-        acl_levels = acl_results_by_retriever.get(retriever, {})
-        ccomp_levels = ccomp_results_by_retriever.get(retriever, {})
-
-        all_levels = sorted(set(list(acl_levels.keys()) + list(ccomp_levels.keys())))
-
-        for level in all_levels:
-            acl_dict = acl_levels.get(level, {})
-            ccomp_dict = ccomp_levels.get(level, {})
-
-            common_keys = set(acl_dict.keys()) & set(ccomp_dict.keys())
-
-            if len(common_keys) < 3:
-                continue
-
-            for key in common_keys:
-                acl_rec = acl_dict[key]
-                ccomp_rec = ccomp_dict[key]
-
-                record = {
-                    'retriever': retriever,
-                    'level': level,
-                    'len_acl': acl_rec['query_length'],
-                    'len_ccomp': ccomp_rec['query_length'],
-                    'idf_acl': acl_rec['mean_idf'],
-                    'idf_ccomp': ccomp_rec['mean_idf'],
-                    'len_diff': acl_rec['query_length'] - ccomp_rec['query_length'],
-                    'idf_diff': acl_rec['mean_idf'] - ccomp_rec['mean_idf'],
-                }
-                # 添加所有指标的 diff
-                for metric in OLS_METRICS:
-                    record[f'diff_{metric}'] = acl_rec[metric] - ccomp_rec[metric]
-                ols_records.append(record)
-
-    if not ols_records:
-        log("  警告: 没有足够的配对数据，跳过 OLS 分析")
-        return None
-
-    df = pd.DataFrame(ols_records)
-    log(f"  总配对数: {len(df)}")
-
-    # 对每个指标分别跑 OLS
-    ols_results = []
-
-    for metric in OLS_METRICS:
-        metric_name = METRIC_DISPLAY_NAMES.get(metric, metric)
-        log(f"\n--- {metric_name} ---")
-        log(f"{'Retriever':<12} {'Level':<8} {'N':<8} {'R2':<8} {'Intercept':<12} {'P>|t|':<10} {'Coef_len':<10} {'P>|t|':<10} {'Coef_idf':<10} {'P>|t|':<10}")
-        log("-" * 100)
-
-        for retriever in sorted(df['retriever'].unique()):
-            for level in sorted(df['level'].unique()):
-                subset = df[(df['retriever'] == retriever) & (df['level'] == level)].copy()
-
-                if len(subset) < 10:
-                    continue
-
-                diff_col = f'diff_{metric}'
-                formula = f'{diff_col} ~ len_diff + idf_diff'
-                try:
-                    model = smf.ols(formula, data=subset).fit()
-
-                    intercept = model.params.get('Intercept', float('nan'))
-                    intercept_p = model.pvalues.get('Intercept', float('nan'))
-                    coef_len = model.params.get('len_diff', float('nan'))
-                    coef_len_p = model.pvalues.get('len_diff', float('nan'))
-                    coef_idf = model.params.get('idf_diff', float('nan'))
-                    coef_idf_p = model.pvalues.get('idf_diff', float('nan'))
-
-                    sig_int = "***" if intercept_p < 0.001 else "**" if intercept_p < 0.01 else "*" if intercept_p < 0.05 else ""
-
-                    int_str = f"{intercept:+.5f}" if not np.isnan(intercept) else "NaN"
-                    int_p_str = f"{intercept_p:.3e}" if intercept_p < 0.001 else f"{intercept_p:.4f}" if not np.isnan(intercept_p) else "NaN"
-                    len_str = f"{coef_len:+.5f}" if not np.isnan(coef_len) else "NaN"
-                    len_p_str = f"{coef_len_p:.4f}" if not np.isnan(coef_len_p) else "NaN"
-                    idf_str = f"{coef_idf:+.5f}" if not np.isnan(coef_idf) else "NaN"
-                    idf_p_str = f"{coef_idf_p:.4f}" if not np.isnan(coef_idf_p) else "NaN"
-
-                    log(f"{retriever:<12} {level:<8} {len(subset):<8} {model.rsquared:<8.4f} {int_str:<12} {int_p_str:<10} {len_str:<10} {len_p_str:<10} {idf_str:<10} {idf_p_str:<10}")
-
-                    ols_results.append({
-                        'metric': metric_name,
-                        'retriever': retriever,
-                        'level': level,
-                        'n': len(subset),
-                        'r2': model.rsquared,
-                        'intercept': intercept,
-                        'intercept_p': intercept_p,
-                        'coef_len': coef_len,
-                        'coef_len_p': coef_len_p,
-                        'coef_idf': coef_idf,
-                        'coef_idf_p': coef_idf_p,
-                        'sig_int': sig_int
-                    })
-                except Exception as e:
-                    log(f"{retriever:<12} {level:<8} {len(subset):<8} ERR: {e}")
-
-    # 汇总
-    if ols_results:
-        log("\n" + "=" * 100)
-        log("  解读:")
-        log("  • Intercept = 控制 len_diff 和 idf_diff 后，ACL - CCOMP 的纯方向偏好")
-        log("  • 如果 Intercept 显著为正 → 用户对 ACL 风格有明显偏好")
-        log("  • 如果 Intercept 接近 0 → ACL/CCOMP 偏好差异来自长度/IDF confounds")
-
-    return ols_results
 
 
 # ============ 主流程 ============
@@ -2721,14 +2336,7 @@ def main():
         log(f"GPU: {torch.cuda.get_device_name(0)}")
 
     k_values = [1, 3, 5, 10]
-
-    # 构建词IDF字典（用于分层分析）- 只需构建一次
-    log("\n构建词IDF字典（用于分层分析）...")
-    idf_sample_size = None
-    word_idf = build_word_idf_dict(META_FILE, sample_size=idf_sample_size)
-    idf_pickle_path, idf_summary_path = save_word_idf_dict(word_idf, idf_sample_size, OUTPUT_DIR)
-    log(f"  词级IDF已保存到: {idf_pickle_path}")
-    log(f"  IDF概要已保存到: {idf_summary_path}")
+    word_idf = None
 
     query_category = SYNTAX_DEPTH_QUERY_CATEGORY
     query_type = SYNTAX_DEPTH_QUERY_TYPE
@@ -2760,11 +2368,6 @@ def main():
         raise ValueError("No syntax-depth queries loaded for evaluation")
     q25, q50, q75 = np.percentile(all_word_counts, [25, 50, 75])
     log(f"  Query长度分布: min={min(all_word_counts)}, Q25={q25:.0f}, Q50={q50:.0f}, Q75={q75:.0f}, max={max(all_word_counts)}")
-
-    sample_idfs = [compute_query_idf(q['query'], word_idf) for user_qs in user_queries.values() for q in user_qs]
-    if not sample_idfs:
-        raise ValueError("No syntax-depth query IDF values computed")
-    log(f"  Query IDF分布: min={min(sample_idfs):.2f}, mean={np.mean(sample_idfs):.2f}, max={max(sample_idfs):.2f}")
 
     log("\n" + "#" * 80)
     log("# SYNTAX_DEPTH 查询类型: CORRECT")
@@ -2861,8 +2464,6 @@ def main():
                 {'group': name, 'low': low, 'high': high, 'label': label}
                 for name, low, high, label in DEPTH_GROUPS
             ],
-            'word_idf_pickle_file': idf_pickle_path,
-            'word_idf_summary_file': idf_summary_path,
             'results_by_category_and_type': sanitize_for_json(all_results_by_category_and_type),
             'all_results_combined': sanitize_for_json(all_results_combined),
         }, f, indent=2, default=str)
@@ -2871,270 +2472,6 @@ def main():
     log("\n" + "=" * 60)
     log("评估完成!")
     log("=" * 60)
-
-# ============================================================
-# Within-Family OLS: ACL 和 CCOMP 分别的 OLS 分析（中心化版本）
-# ============================================================
-def fit_within_family_ols_centered(
-    subdf: pd.DataFrame,
-    metric_col: str = "p10",
-    len_col: str = "qlen",
-    idf_col: str = "qidf",
-):
-    """
-    对单个 domain × retriever × family 子集拟合：
-        p10 ~ C(level) + len_c + idf_c
-
-    len 和 idf 会先做中心化：
-        len_c = len - mean(len)
-        idf_c = idf - mean(idf)
-
-    这样：
-    - Intercept(L0) = 平均长度、平均IDF下，L0 的预测 P@10
-    - 其余 level 系数表示相对 L0 的净变化
-    """
-    subdf = subdf.copy()
-    subdf = subdf[subdf["level"].isin([0, 1, 2, 3])].dropna(
-        subset=[metric_col, "level", len_col, idf_col]
-    )
-
-    if len(subdf) < 20:
-        return None, None
-
-    # level 设为分类变量，L0 做 reference
-    subdf["level"] = pd.Categorical(subdf["level"], categories=[0, 1, 2, 3], ordered=True)
-
-    # 中心化
-    subdf["len_c"] = subdf[len_col] - subdf[len_col].mean()
-    subdf["idf_c"] = subdf[idf_col] - subdf[idf_col].mean()
-
-    model = smf.ols(
-        f"{metric_col} ~ C(level, Treatment(reference=0)) + len_c + idf_c",
-        data=subdf
-    ).fit()
-
-    params = model.params
-    pvals = model.pvalues
-    conf = model.conf_int()
-
-    key_l1 = "C(level, Treatment(reference=0))[T.1]"
-    key_l2 = "C(level, Treatment(reference=0))[T.2]"
-    key_l3 = "C(level, Treatment(reference=0))[T.3]"
-
-    beta_l1 = params.get(key_l1, float("nan"))
-    beta_l2 = params.get(key_l2, float("nan"))
-    beta_l3 = params.get(key_l3, float("nan"))
-    p_l1 = pvals.get(key_l1, float("nan"))
-    p_l2 = pvals.get(key_l2, float("nan"))
-    p_l3 = pvals.get(key_l3, float("nan"))
-
-    ci_l1 = conf.loc[key_l1].tolist() if key_l1 in conf.index else [float("nan"), float("nan")]
-    ci_l2 = conf.loc[key_l2].tolist() if key_l2 in conf.index else [float("nan"), float("nan")]
-    ci_l3 = conf.loc[key_l3].tolist() if key_l3 in conf.index else [float("nan"), float("nan")]
-
-    # L3 vs L1
-    l3_minus_l1 = beta_l3 - beta_l1
-    try:
-        test = model.t_test(f"{key_l3} - {key_l1} = 0")
-        p_l3_vs_l1 = float(test.pvalue)
-    except Exception:
-        p_l3_vs_l1 = float("nan")
-
-    # L3 vs L2
-    l3_minus_l2 = beta_l3 - beta_l2
-    try:
-        test = model.t_test(f"{key_l3} - {key_l2} = 0")
-        p_l3_vs_l2 = float(test.pvalue)
-    except Exception:
-        p_l3_vs_l2 = float("nan")
-
-    # L2 vs L1
-    l2_minus_l1 = beta_l2 - beta_l1
-    try:
-        test = model.t_test(f"{key_l2} - {key_l1} = 0")
-        p_l2_vs_l1 = float(test.pvalue)
-    except Exception:
-        p_l2_vs_l1 = float("nan")
-
-    result = {
-        "n": len(subdf),
-        "r2": model.rsquared,
-        "intercept_l0_at_mean_covariates": params.get("Intercept", float("nan")),
-        "p_intercept_l0": pvals.get("Intercept", float("nan")),
-        "delta_l1_vs_l0": beta_l1,
-        "p_l1_vs_l0": p_l1,
-        "ci_l1_vs_l0_low": ci_l1[0],
-        "ci_l1_vs_l0_high": ci_l1[1],
-        "delta_l2_vs_l0": beta_l2,
-        "p_l2_vs_l0": p_l2,
-        "ci_l2_vs_l0_low": ci_l2[0],
-        "ci_l2_vs_l0_high": ci_l2[1],
-        "delta_l3_vs_l0": beta_l3,
-        "p_l3_vs_l0": p_l3,
-        "ci_l3_vs_l0_low": ci_l3[0],
-        "ci_l3_vs_l0_high": ci_l3[1],
-        "delta_l2_vs_l1": l2_minus_l1,
-        "p_l2_vs_l1": p_l2_vs_l1,
-        "delta_l3_vs_l1": l3_minus_l1,
-        "p_l3_vs_l1": p_l3_vs_l1,
-        "delta_l3_vs_l2": l3_minus_l2,
-        "p_l3_vs_l2": p_l3_vs_l2,
-        "coef_len_c": params.get("len_c", float("nan")),
-        "p_len_c": pvals.get("len_c", float("nan")),
-        "coef_idf_c": params.get("idf_c", float("nan")),
-        "p_idf_c": pvals.get("idf_c", float("nan")),
-        "mean_len": subdf[len_col].mean(),
-        "mean_idf": subdf[idf_col].mean(),
-    }
-    return result, model
-
-
-def run_all_within_family_ols_centered(
-    df: pd.DataFrame,
-    metric_col: str = "p10",
-    len_col: str = "qlen",
-    idf_col: str = "qidf",
-):
-    results = []
-    models = {}
-
-    for (domain, retriever, family), subdf in df.groupby(["domain", "retriever", "family"]):
-        result, model = fit_within_family_ols_centered(
-            subdf,
-            metric_col=metric_col,
-            len_col=len_col,
-            idf_col=idf_col,
-        )
-        if result is None:
-            continue
-        row = {"domain": domain, "retriever": retriever, "family": family, **result}
-        results.append(row)
-        models[(domain, retriever, family)] = model
-
-    results_df = pd.DataFrame(results)
-    return results_df, models
-
-
-def sign_with_threshold(x: float, threshold: float = 0.01) -> str:
-    if pd.isna(x):
-        return "NA"
-    if x >= threshold:
-        return "+"
-    if x <= -threshold:
-        return "-"
-    return "0"
-
-
-def add_direction_columns(results_df: pd.DataFrame, threshold: float = 0.01):
-    out = results_df.copy()
-    out["dir_l1_vs_l0"] = out["delta_l1_vs_l0"].apply(lambda x: "+" if x > 0 else "-" if x < 0 else "0" if x == 0 else "NA")
-    out["dir_l2_vs_l0"] = out["delta_l2_vs_l0"].apply(lambda x: "+" if x > 0 else "-" if x < 0 else "0" if x == 0 else "NA")
-    out["dir_l3_vs_l0"] = out["delta_l3_vs_l0"].apply(lambda x: "+" if x > 0 else "-" if x < 0 else "0" if x == 0 else "NA")
-    out["dir_l2_vs_l1"] = out["delta_l2_vs_l1"].apply(lambda x: "+" if x > 0 else "-" if x < 0 else "0" if x == 0 else "NA")
-    out["dir_l3_vs_l1"] = out["delta_l3_vs_l1"].apply(lambda x: "+" if x > 0 else "-" if x < 0 else "0" if x == 0 else "NA")
-    out["dir_l3_vs_l2"] = out["delta_l3_vs_l2"].apply(lambda x: "+" if x > 0 else "-" if x < 0 else "0" if x == 0 else "NA")
-    return out
-
-
-def run_within_family_ols_analysis(all_results_by_category_and_type: Dict):
-    """构建 within-family OLS 分析数据并执行分析（中心化版本）"""
-    log("\n" + "=" * 100)
-    log("实验 4: Within-Family OLS (ACL/CCOMP 分别分析)")
-    log("=" * 100)
-    log("模型: p10 ~ C(level) + len_c + idf_c (level=0 作为 reference, covariates 中心化)")
-    log("")
-
-    # 重新组织 all_results_by_category_and_type 数据
-    all_query_records = []
-
-    for (category, qt), results in all_results_by_category_and_type.items():
-        if qt != 'correct':
-            continue
-
-        family = category.upper()  # 'ACL' or 'CCOMP'
-
-        for r in results:
-            retriever = r['retriever']
-            for rec in r.get('all_query_records', []):
-                level = rec.get('acl', rec.get('ccomp', 0))
-                if level not in [0, 1, 2, 3]:
-                    continue
-                all_query_records.append({
-                    'domain': CATEGORY_NAME,
-                    'retriever': retriever,
-                    'family': family,
-                    'level': level,
-                    'p10': rec.get('p_at10', 0.0),
-                    'qlen': rec.get('query_length', 0),
-                    'qidf': rec.get('mean_idf', 0.0),
-                })
-
-    if not all_query_records:
-        log("  警告: 没有足够的 query 记录进行 OLS 分析")
-        return None, None
-
-    df = pd.DataFrame(all_query_records)
-    log(f"  总记录数: {len(df)}")
-
-    results_df, models = run_all_within_family_ols_centered(df)
-    results_df = add_direction_columns(results_df, threshold=0.01)
-
-    # 分别打印 ACL 和 CCOMP 结果
-    for family in ['ACL', 'CCOMP']:
-        fam_df = results_df[results_df['family'] == family].sort_values(['retriever'])
-        if fam_df.empty:
-            continue
-
-        log(f"\n--- {family} Within-Family OLS (Centered) ---")
-        log(f"{'Retriever':<12} {'N':<6} {'R2':<6} {'L1vsL0':<10} {'p':<8} {'L2vsL0':<10} {'p':<8} {'L3vsL0':<10} {'p':<8} {'L2vsL1':<10} {'p':<8} {'L3vsL1':<10} {'p':<8} {'L3vsL2':<10} {'p':<8}")
-        log("-" * 150)
-
-        for _, row in fam_df.iterrows():
-            retriever = row['retriever']
-            n = row['n']
-            r2 = row['r2']
-
-            # L1vsL0
-            delta_l1 = row.get('delta_l1_vs_l0', float('nan'))
-            p_l1 = row.get('p_l1_vs_l0', float('nan'))
-            # L2vsL0
-            delta_l2 = row.get('delta_l2_vs_l0', float('nan'))
-            p_l2 = row.get('p_l2_vs_l0', float('nan'))
-            # L3vsL0
-            delta_l3 = row.get('delta_l3_vs_l0', float('nan'))
-            p_l3 = row.get('p_l3_vs_l0', float('nan'))
-            # L2vsL1
-            delta_l2_l1 = row.get('delta_l2_vs_l1', float('nan'))
-            p_l2_l1 = row.get('p_l2_vs_l1', float('nan'))
-            # L3vsL1
-            delta_l3_l1 = row.get('delta_l3_vs_l1', float('nan'))
-            p_l3_l1 = row.get('p_l3_vs_l1', float('nan'))
-            # L3vsL2
-            delta_l3_l2 = row.get('delta_l3_vs_l2', float('nan'))
-            p_l3_l2 = row.get('p_l3_vs_l2', float('nan'))
-
-            d1_str = f"{delta_l1:+.4f}" if not pd.isna(delta_l1) else "NaN"
-            p1_str = f"{p_l1:.3e}" if not pd.isna(p_l1) and p_l1 < 0.001 else f"{p_l1:.4f}" if not pd.isna(p_l1) else "NaN"
-            d2_str = f"{delta_l2:+.4f}" if not pd.isna(delta_l2) else "NaN"
-            p2_str = f"{p_l2:.3e}" if not pd.isna(p_l2) and p_l2 < 0.001 else f"{p_l2:.4f}" if not pd.isna(p_l2) else "NaN"
-            d3_str = f"{delta_l3:+.4f}" if not pd.isna(delta_l3) else "NaN"
-            p3_str = f"{p_l3:.3e}" if not pd.isna(p_l3) and p_l3 < 0.001 else f"{p_l3:.4f}" if not pd.isna(p_l3) else "NaN"
-            d21_str = f"{delta_l2_l1:+.4f}" if not pd.isna(delta_l2_l1) else "NaN"
-            p21_str = f"{p_l2_l1:.3e}" if not pd.isna(p_l2_l1) and p_l2_l1 < 0.001 else f"{p_l2_l1:.4f}" if not pd.isna(p_l2_l1) else "NaN"
-            d31_str = f"{delta_l3_l1:+.4f}" if not pd.isna(delta_l3_l1) else "NaN"
-            p31_str = f"{p_l3_l1:.3e}" if not pd.isna(p_l3_l1) and p_l3_l1 < 0.001 else f"{p_l3_l1:.4f}" if not pd.isna(p_l3_l1) else "NaN"
-            d32_str = f"{delta_l3_l2:+.4f}" if not pd.isna(delta_l3_l2) else "NaN"
-            p32_str = f"{p_l3_l2:.3e}" if not pd.isna(p_l3_l2) and p_l3_l2 < 0.001 else f"{p_l3_l2:.4f}" if not pd.isna(p_l3_l2) else "NaN"
-
-            log(f"{retriever:<12} {n:<6} {r2:<6.3f} {d1_str:<10} {p1_str:<8} {d2_str:<10} {p2_str:<8} {d3_str:<10} {p3_str:<8} {d21_str:<10} {p21_str:<8} {d31_str:<10} {p31_str:<8} {d32_str:<10} {p32_str:<8}")
-
-    # 保存结果
-    output_file = os.path.join(OUTPUT_DIR, "within_family_ols_results.csv")
-    results_df.to_csv(output_file, index=False)
-    log(f"\n  结果已保存到: {output_file}")
-
-    return results_df, models
-
 
 if __name__ == "__main__":
     main()

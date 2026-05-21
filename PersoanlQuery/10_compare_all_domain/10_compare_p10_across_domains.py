@@ -1,8 +1,10 @@
 """
 比较三个域上的 syntax-depth hit@10。
 
-08 侧读取 retrieval_syntax_depth_summary.json 中的低/中/深分组 H@10。
-09 侧读取 syntax_depth_correct_vs_noisy_results.json 中的 correct/noisy 低/中分组 H@10。
+08 侧读取 retrieval_syntax_depth_summary.json 中的低/高分组 H@10。
+08 侧另外计算三档 score：低<=6，中7-9，高>=10，score = (|中-低| + |高-中|) / 2。
+09 侧直接读取已经按 pair 过滤过的 correct/noisy 结果，
+并按 syntax_depth 的 1-2 / 3-4 / 5-6 三档统计 H@10。
 """
 
 import json
@@ -18,8 +20,21 @@ SYNTAX_DEPTH_NOISY_RESULTS_FILE = "syntax_depth_correct_vs_noisy_results.json"
 
 CATEGORIES = ["Baby_Products", "Grocery_and_Gourmet_Food", "Pet_Supplies"]
 
-SYNTAX_DEPTH_GROUP_ORDER_CLEAN = ["low_complexity", "medium_complexity", "high_complexity"]
-SYNTAX_DEPTH_GROUP_ORDER_NOISY = ["low_complexity", "medium_complexity"]
+SYNTAX_DEPTH_GROUP_ORDER_CLEAN = ["low_complexity", "high_complexity"]
+SYNTAX_DEPTH_GROUP_ORDER_09 = ["low_complexity", "medium_complexity", "high_complexity"]
+SYNTAX_DEPTH_GROUP_DISPLAY_09 = {
+    "low_complexity": "低",
+    "medium_complexity": "中",
+    "high_complexity": "高",
+}
+THREE_LEVEL_LOW_MAX = 6
+THREE_LEVEL_MID_MIN = 7
+THREE_LEVEL_MID_MAX = 9
+THREE_LEVEL_HIGH_MIN = 10
+THREE_LEVEL_09_LOW_MAX = 2
+THREE_LEVEL_09_MID_MIN = 3
+THREE_LEVEL_09_MID_MAX = 4
+THREE_LEVEL_09_HIGH_MIN = 5
 
 DISABLED_RETRIEVERS = set()
 RETRIEVER_ORDER = [
@@ -79,6 +94,13 @@ def average_domain_values(values: list) -> float:
     return float(sum(values) / len(values))
 
 
+def average_present_values(values: list):
+    present = [float(value) for value in values if value is not None]
+    if not present:
+        return None
+    return float(sum(present) / len(present))
+
+
 def get_group_hit10(group_data: dict, context: str) -> float:
     if not isinstance(group_data, dict):
         raise TypeError(f"{context} group data must be dict, got {type(group_data).__name__}")
@@ -99,6 +121,136 @@ def get_record_hit10(record: dict, context: str) -> float:
     if not isinstance(value, (int, float)):
         raise TypeError(f"{context} missing numeric metrics['H@10']")
     return float(value)
+
+
+def compute_three_level_score(records: list, context: str) -> dict:
+    if not isinstance(records, list):
+        raise TypeError(f"{context} records must be list, got {type(records).__name__}")
+
+    sums = {"low": 0.0, "mid": 0.0, "high": 0.0}
+    counts = {"low": 0, "mid": 0, "high": 0}
+
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise TypeError(f"{context} record {index} must be dict, got {type(record).__name__}")
+
+        depth = record.get("syntax_depth")
+        if not isinstance(depth, int):
+            raise TypeError(f"{context} record {index} syntax_depth must be int")
+
+        hit10 = record.get("hit_at10")
+        if not isinstance(hit10, (int, float)):
+            raise TypeError(f"{context} record {index} missing numeric hit_at10")
+
+        if depth <= THREE_LEVEL_LOW_MAX:
+            bucket = "low"
+        elif THREE_LEVEL_MID_MIN <= depth <= THREE_LEVEL_MID_MAX:
+            bucket = "mid"
+        elif depth >= THREE_LEVEL_HIGH_MIN:
+            bucket = "high"
+        else:
+            raise ValueError(f"{context} record {index} has unsupported depth {depth}")
+
+        sums[bucket] += float(hit10)
+        counts[bucket] += 1
+
+    for bucket in ("low", "mid", "high"):
+        if counts[bucket] == 0:
+            raise ValueError(f"{context} bucket {bucket} is empty under three-level split")
+
+    low_mean = sums["low"] / counts["low"]
+    mid_mean = sums["mid"] / counts["mid"]
+    high_mean = sums["high"] / counts["high"]
+    score = (abs(mid_mean - low_mean) + abs(high_mean - mid_mean)) / 2.0
+    return {
+        "low": low_mean,
+        "mid": mid_mean,
+        "high": high_mean,
+        "score": score,
+        "counts": counts,
+    }
+
+
+def depth_to_09_three_level_group(depth: int) -> str:
+    if depth <= THREE_LEVEL_09_LOW_MAX:
+        return "low_complexity"
+    if THREE_LEVEL_09_MID_MIN <= depth <= THREE_LEVEL_09_MID_MAX:
+        return "medium_complexity"
+    if depth >= THREE_LEVEL_09_HIGH_MIN:
+        return "high_complexity"
+    raise ValueError(f"Unsupported 09 syntax depth for configured groups: {depth}")
+
+
+def compute_09_three_level_group_metrics(records: list, context: str) -> dict:
+    if not isinstance(records, list):
+        raise TypeError(f"{context} records must be list, got {type(records).__name__}")
+
+    sums = {group: 0.0 for group in SYNTAX_DEPTH_GROUP_ORDER_09}
+    counts = {group: 0 for group in SYNTAX_DEPTH_GROUP_ORDER_09}
+
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise TypeError(f"{context} record {index} must be dict, got {type(record).__name__}")
+
+        depth = record.get("syntax_depth")
+        if not isinstance(depth, int):
+            raise TypeError(f"{context} record {index} syntax_depth must be int")
+
+        hit10 = record.get("metrics", {}).get("H@10")
+        if not isinstance(hit10, (int, float)):
+            raise TypeError(f"{context} record {index} missing numeric metrics['H@10']")
+
+        bucket = depth_to_09_three_level_group(depth)
+        sums[bucket] += float(hit10)
+        counts[bucket] += 1
+
+    for bucket in SYNTAX_DEPTH_GROUP_ORDER_09:
+        if counts[bucket] == 0:
+            raise ValueError(f"{context} bucket {bucket} is empty under 09 three-level split")
+
+    return {
+        group: sums[group] / counts[group] for group in SYNTAX_DEPTH_GROUP_ORDER_09
+    } | {"counts": counts}
+
+
+def build_09_filtered_pair_stats(correct_item: dict, noisy_item: dict, context: str) -> dict:
+    correct_records = {record["pair_id"]: record for record in correct_item["all_query_records"]}
+    noisy_records = {record["pair_id"]: record for record in noisy_item["all_query_records"]}
+    if set(correct_records) != set(noisy_records):
+        raise KeyError(f"{context} pair_id sets differ between correct/noisy")
+
+    stats = {
+        "all": {"correct_sum": 0.0, "noisy_sum": 0.0, "count": 0, "diffs": []},
+        "groups": {
+            group: {"correct_sum": 0.0, "noisy_sum": 0.0, "count": 0, "diffs": []}
+            for group in SYNTAX_DEPTH_GROUP_ORDER_09
+        },
+    }
+
+    for pair_id in sorted(correct_records):
+        correct_record = correct_records[pair_id]
+        noisy_record = noisy_records[pair_id]
+        correct_depth = correct_record.get("syntax_depth")
+        noisy_depth = noisy_record.get("syntax_depth")
+        if not isinstance(correct_depth, int):
+            raise TypeError(f"{context} pair_id={pair_id} correct syntax_depth must be int")
+        if not isinstance(noisy_depth, int):
+            raise TypeError(f"{context} pair_id={pair_id} noisy syntax_depth must be int")
+        if correct_depth != noisy_depth:
+            raise ValueError(f"{context} pair_id={pair_id} syntax_depth mismatch")
+
+        correct_hit10 = get_record_hit10(correct_record, f"{context} correct pair {pair_id}")
+        noisy_hit10 = get_record_hit10(noisy_record, f"{context} noisy pair {pair_id}")
+
+        group_name = depth_to_09_three_level_group(correct_depth)
+        for bucket_name in ("all", group_name):
+            bucket_stats = stats["all"] if bucket_name == "all" else stats["groups"][bucket_name]
+            bucket_stats["correct_sum"] += correct_hit10
+            bucket_stats["noisy_sum"] += noisy_hit10
+            bucket_stats["count"] += 1
+            bucket_stats["diffs"].append(noisy_hit10 - correct_hit10)
+
+    return stats
 
 
 def load_08_group_hit10(category: str) -> dict:
@@ -130,6 +282,11 @@ def load_08_group_hit10(category: str) -> dict:
                 f"{category} {retriever} 08 {group_name}",
             )
 
+        results[retriever]["three_level"] = compute_three_level_score(
+            item["all_query_records"],
+            f"{category} {retriever} 08 three_level",
+        )
+
     if not results:
         raise ValueError(f"{category} 08 group hit@10 results are empty")
     return results
@@ -138,17 +295,18 @@ def load_08_group_hit10(category: str) -> dict:
 def load_09_group_hit10(category: str) -> dict:
     results_path = BASE_DIR_09 / category / SYNTAX_DEPTH_NOISY_RESULTS_FILE
     data = load_json(results_path)
-    results = {"correct": {}, "noisy": {}}
+    correct_items = {}
+    noisy_items = {}
 
-    for source_name, output_key, expected_query_type in (
-        ("correct_results", "correct", "correct"),
-        ("noisy_results", "noisy", "noisy"),
+    for source_name, target, expected_query_type in (
+        ("correct_results", correct_items, "correct"),
+        ("noisy_results", noisy_items, "noisy"),
     ):
-        for index, item in enumerate(data.get(source_name, [])):
+        for index, item in enumerate(data[source_name]):
             retriever = item.get("retriever")
             if retriever in DISABLED_RETRIEVERS:
                 continue
-            if retriever in results[output_key]:
+            if retriever in target:
                 raise ValueError(f"{category} duplicate 09 {source_name} retriever: {retriever}")
             if item.get("query_category") != "syntax_depth":
                 raise ValueError(
@@ -160,25 +318,41 @@ def load_09_group_hit10(category: str) -> dict:
                     f"{category} 09 {source_name} item {index} "
                     f"unexpected query_type={item.get('query_type')}"
                 )
+            target[retriever] = item
 
-            group_metrics = item.get("metrics_by_depth_group")
-            if not isinstance(group_metrics, dict):
-                raise TypeError(f"{category} {retriever} 09 {source_name} metrics_by_depth_group must be dict")
-
-            results[output_key][retriever] = {}
-            for group_name in SYNTAX_DEPTH_GROUP_ORDER_NOISY:
-                if group_name not in group_metrics:
-                    raise KeyError(f"{category} {retriever} missing 09 group {group_name}")
-                results[output_key][retriever][group_name] = get_group_hit10(
-                    group_metrics[group_name],
-                    f"{category} {retriever} 09 {source_name} {group_name}",
-                )
-
-    if set(results["correct"]) != set(results["noisy"]):
+    if set(correct_items) != set(noisy_items):
         raise KeyError(
             f"{category} 09 correct/noisy retriever sets differ: "
-            f"correct={sorted(results['correct'])}, noisy={sorted(results['noisy'])}"
+            f"correct={sorted(correct_items)}, noisy={sorted(noisy_items)}"
         )
+
+    results = {"correct": {}, "noisy": {}}
+    for retriever in sort_retrievers(correct_items):
+        stats = build_09_filtered_pair_stats(
+            correct_items[retriever],
+            noisy_items[retriever],
+            f"{category} {retriever} 09 filtered",
+        )
+        per_group = {}
+        for group_name in SYNTAX_DEPTH_GROUP_ORDER_09:
+            group_stats = stats["groups"][group_name]
+            count = group_stats["count"]
+            if count > 0:
+                correct_mean = group_stats["correct_sum"] / count
+                noisy_mean = group_stats["noisy_sum"] / count
+                diff = noisy_mean - correct_mean
+            else:
+                correct_mean = None
+                noisy_mean = None
+                diff = None
+            per_group[group_name] = {
+                "correct": correct_mean,
+                "noisy": noisy_mean,
+                "diff": diff,
+                "count": count,
+            }
+        results["correct"][retriever] = per_group
+        results["noisy"][retriever] = per_group
     return results
 
 
@@ -210,73 +384,85 @@ def print_08_hit10_table(all_data: dict) -> None:
 
     print("\n" + "=" * 132)
     print("08 clean syntax-depth hit@10")
-    print("Mean 低/中/深为三域均值，Mean = (|Mean 中 - Mean 低| + |Mean 深 - Mean 中|) / 2")
+    print("Mean 低/高为两域均值，Mean = |Mean 高 - Mean 低|")
     print("=" * 132)
     print(
         f"{'Retriever':<12} "
-        f"{'Baby 低':>9} {'Baby 中':>9} {'Baby 深':>9} "
-        f"{'Grocery 低':>11} {'Grocery 中':>11} {'Grocery 深':>11} "
-        f"{'Pet 低':>9} {'Pet 中':>9} {'Pet 深':>9} "
-        f"{'Mean 低':>9} {'Mean 中':>9} {'Mean 深':>9} {'Mean':>9}"
+        f"{'Baby 低':>9} {'Baby 高':>9} "
+        f"{'Grocery 低':>11} {'Grocery 高':>11} "
+        f"{'Pet 低':>9} {'Pet 高':>9} "
+        f"{'Mean 低':>9} {'Mean 高':>9} {'Mean':>9}"
     )
     print("-" * 132)
 
     for retriever in retrievers:
         row = f"{retriever:<12}"
-        mean_by_group = {group: [] for group in SYNTAX_DEPTH_GROUP_ORDER_CLEAN}
+        low_high_values = {group: [] for group in SYNTAX_DEPTH_GROUP_ORDER_CLEAN}
         for category in CATEGORIES:
             if retriever not in all_data[category]:
                 raise KeyError(f"{category} missing 08 result for {retriever}")
             group_values = all_data[category][retriever]
             for group_name in SYNTAX_DEPTH_GROUP_ORDER_CLEAN:
                 value = group_values[group_name]
-                mean_by_group[group_name].append(value)
+                low_high_values[group_name].append(value)
                 row += f" {fmt4(value):>9}"
 
         group_means = []
         for group_name in SYNTAX_DEPTH_GROUP_ORDER_CLEAN:
-            group_mean = average_domain_values(mean_by_group[group_name])
+            group_mean = average_domain_values(low_high_values[group_name])
             group_means.append(group_mean)
             row += f" {fmt4(group_mean):>9}"
-        low_mid_delta = group_means[1] - group_means[0]
-        mid_high_delta = group_means[2] - group_means[1]
-        adjacent_delta_mean = float((abs(low_mid_delta) + abs(mid_high_delta)) / 2.0)
-        row += f" {fmt4(adjacent_delta_mean):>9}"
+        low_high_gap = float(abs(group_means[1] - group_means[0]))
+        row += f" {fmt4(low_high_gap):>9}"
         print(row)
     print("-" * 132)
 
 
-def print_08_adjacent_trend(all_data: dict) -> None:
+def print_08_three_level_score_table(all_data: dict) -> None:
     retrievers = get_all_retrievers_from_08(all_data)
 
-    print("\n" + "=" * 110)
-    print("08 clean syntax-depth adjacent trend")
-    print("相邻差值基于原始分组 hit@10：中-低、深-中；mean 为三域差值均值")
-    print("=" * 110)
+    print("\n" + "=" * 132)
+    print("08 clean syntax-depth three-level score")
+    print("低<=6 / 中7-9 / 高>=10，Score = (|中-低| + |高-中|) / 2")
+    print("=" * 132)
     print(
         f"{'Retriever':<12} "
-        f"{'Baby 中-低':>12} {'Baby 深-中':>12} "
-        f"{'Grocery 中-低':>14} {'Grocery 深-中':>14} "
-        f"{'Pet 中-低':>12} {'Pet 深-中':>12} "
-        f"{'Mean 中-低':>12} {'Mean 深-中':>12}"
+        f"{'Baby Score':>12} {'Grocery Score':>14} {'Pet Score':>12} "
+        f"{'Mean Score':>12}"
     )
-    print("-" * 110)
+    print("-" * 132)
 
     for retriever in retrievers:
         row = f"{retriever:<12}"
-        low_to_mid = []
-        mid_to_high = []
+        scores = []
         for category in CATEGORIES:
-            group_values = all_data[category][retriever]
-            d_low_mid = group_values["medium_complexity"] - group_values["low_complexity"]
-            d_mid_high = group_values["high_complexity"] - group_values["medium_complexity"]
-            low_to_mid.append(d_low_mid)
-            mid_to_high.append(d_mid_high)
-            row += f" {fmt_signed(d_low_mid):>12} {fmt_signed(d_mid_high):>12}"
-        row += f" {fmt_signed(average_domain_values(low_to_mid)):>12}"
-        row += f" {fmt_signed(average_domain_values(mid_to_high)):>12}"
+            if retriever not in all_data[category]:
+                raise KeyError(f"{category} missing 08 three-level score for {retriever}")
+            score = all_data[category][retriever]["three_level"]["score"]
+            scores.append(score)
+            row += f" {fmt4(score):>12}"
+        row += f" {fmt4(average_domain_values(scores)):>12}"
         print(row)
-    print("-" * 110)
+    print("-" * 132)
+
+    for category in CATEGORIES:
+        print("\n" + "=" * 132)
+        print(f"08 clean syntax-depth three-level detail - {category}")
+        print("列为低/中/高三个深度区间在该域内的 H@10 均值，Score = (|中-低| + |高-中|) / 2")
+        print("=" * 132)
+        print(f"{'Retriever':<12} {'低':>9} {'中':>9} {'高':>9} {'Score':>9}")
+        print("-" * 132)
+        for retriever in retrievers:
+            if retriever not in all_data[category]:
+                raise KeyError(f"{category} missing 08 three-level score for {retriever}")
+            detail = all_data[category][retriever]["three_level"]
+            row = (
+                f"{retriever:<12} "
+                f"{fmt4(detail['low']):>9} {fmt4(detail['mid']):>9} {fmt4(detail['high']):>9} "
+                f"{fmt4(detail['score']):>9}"
+            )
+            print(row)
+        print("-" * 132)
 
 
 def print_08_low_to_high_trend(all_data: dict) -> None:
@@ -284,14 +470,14 @@ def print_08_low_to_high_trend(all_data: dict) -> None:
 
     print("\n" + "=" * 86)
     print("08 clean syntax-depth low-to-high trend")
-    print("低到高差值基于原始分组 hit@10：深-低；mean 为三域差值均值，保留正负号")
+    print("低到高差值基于原始分组 hit@10：高-低；mean 为三域差值均值，保留正负号")
     print("=" * 86)
     print(
         f"{'Retriever':<12} "
-        f"{'Baby 深-低':>12} "
-        f"{'Grocery 深-低':>14} "
-        f"{'Pet 深-低':>12} "
-        f"{'Mean 深-低':>12}"
+        f"{'Baby 高-低':>12} "
+        f"{'Grocery 高-低':>14} "
+        f"{'Pet 高-低':>12} "
+        f"{'Mean 高-低':>12}"
     )
     print("-" * 86)
 
@@ -313,52 +499,113 @@ def print_09_correct_vs_noisy(all_data: dict) -> None:
 
     print("\n" + "=" * 132)
     print("09 syntax-depth correct vs noisy hit@10")
-    print("09 数据只包含低/中复杂度；Mean Diff = Mean Noisy - Mean Corr")
+    print("09 数据使用已按 pair 过滤过的结果，按 syntax_depth 的 1-2 / 3-4 / 5-6 三档统计；Mean Diff = Mean Noisy - Mean Corr")
     print("=" * 132)
     print(
         f"{'Retriever':<12} "
         f"{'Corr 低':>9} {'Noisy 低':>9} {'Diff 低':>9} "
         f"{'Corr 中':>9} {'Noisy 中':>9} {'Diff 中':>9} "
+        f"{'Corr 高':>9} {'Noisy 高':>9} {'Diff 高':>9} "
         f"{'Mean Corr':>10} {'Mean Noisy':>11} {'Mean Diff':>10}"
     )
     print("-" * 132)
 
     for retriever in retrievers:
-        correct_group_values = {group: [] for group in SYNTAX_DEPTH_GROUP_ORDER_NOISY}
-        noisy_group_values = {group: [] for group in SYNTAX_DEPTH_GROUP_ORDER_NOISY}
+        correct_group_values = {group: [] for group in SYNTAX_DEPTH_GROUP_ORDER_09}
+        noisy_group_values = {group: [] for group in SYNTAX_DEPTH_GROUP_ORDER_09}
         for category in CATEGORIES:
             if retriever not in all_data[category]["correct"]:
                 raise KeyError(f"{category} missing 09 correct result for {retriever}")
             if retriever not in all_data[category]["noisy"]:
                 raise KeyError(f"{category} missing 09 noisy result for {retriever}")
 
-            for group_name in SYNTAX_DEPTH_GROUP_ORDER_NOISY:
-                correct_group_values[group_name].append(all_data[category]["correct"][retriever][group_name])
-                noisy_group_values[group_name].append(all_data[category]["noisy"][retriever][group_name])
+            for group_name in SYNTAX_DEPTH_GROUP_ORDER_09:
+                correct_group_values[group_name].append(all_data[category]["correct"][retriever][group_name]["correct"])
+                noisy_group_values[group_name].append(all_data[category]["noisy"][retriever][group_name]["noisy"])
 
         group_summary = {}
-        for group_name in SYNTAX_DEPTH_GROUP_ORDER_NOISY:
-            correct_mean = average_domain_values(correct_group_values[group_name])
-            noisy_mean = average_domain_values(noisy_group_values[group_name])
+        for group_name in SYNTAX_DEPTH_GROUP_ORDER_09:
+            correct_mean = average_present_values(correct_group_values[group_name])
+            noisy_mean = average_present_values(noisy_group_values[group_name])
+            if correct_mean is None or noisy_mean is None:
+                diff = None
+            else:
+                diff = noisy_mean - correct_mean
             group_summary[group_name] = {
                 "correct": correct_mean,
                 "noisy": noisy_mean,
-                "diff": noisy_mean - correct_mean,
+                "diff": diff,
             }
 
-        mean_correct = float(np.mean([group_summary[g]["correct"] for g in SYNTAX_DEPTH_GROUP_ORDER_NOISY]))
-        mean_noisy = float(np.mean([group_summary[g]["noisy"] for g in SYNTAX_DEPTH_GROUP_ORDER_NOISY]))
-        print(
-            f"{retriever:<12} "
-            f"{fmt4(group_summary['low_complexity']['correct']):>9} "
-            f"{fmt4(group_summary['low_complexity']['noisy']):>9} "
-            f"{fmt_signed(group_summary['low_complexity']['diff']):>9} "
-            f"{fmt4(group_summary['medium_complexity']['correct']):>9} "
-            f"{fmt4(group_summary['medium_complexity']['noisy']):>9} "
-            f"{fmt_signed(group_summary['medium_complexity']['diff']):>9} "
-            f"{fmt4(mean_correct):>10} {fmt4(mean_noisy):>11} {fmt_signed(mean_noisy - mean_correct):>10}"
-        )
+        mean_correct = average_present_values([group_summary[g]["correct"] for g in SYNTAX_DEPTH_GROUP_ORDER_09])
+        mean_noisy = average_present_values([group_summary[g]["noisy"] for g in SYNTAX_DEPTH_GROUP_ORDER_09])
+        if mean_correct is None or mean_noisy is None:
+            mean_diff = None
+        else:
+            mean_diff = mean_noisy - mean_correct
+        row = f"{retriever:<12}"
+        for group_name in SYNTAX_DEPTH_GROUP_ORDER_09:
+            row += (
+                f" {fmt4(group_summary[group_name]['correct']):>9}"
+                f" {fmt4(group_summary[group_name]['noisy']):>9}"
+                f" {fmt_signed(group_summary[group_name]['diff']):>9}"
+            )
+        row += f" {fmt4(mean_correct):>10} {fmt4(mean_noisy):>11} {fmt_signed(mean_diff):>10}"
+        print(row)
     print("-" * 132)
+
+    for category in CATEGORIES:
+        print("\n" + "=" * 132)
+        print(f"09 syntax-depth correct vs noisy hit@10 - {category}")
+        print("09 数据使用已按 pair 过滤过的结果，按 syntax_depth 的 1-2 / 3-4 / 5-6 三档统计；Mean Diff = Mean Noisy - Mean Corr")
+        print("=" * 132)
+        print(
+            f"{'Retriever':<12} "
+            f"{'Corr 低':>9} {'Noisy 低':>9} {'Diff 低':>9} "
+            f"{'Corr 中':>9} {'Noisy 中':>9} {'Diff 中':>9} "
+            f"{'Corr 高':>9} {'Noisy 高':>9} {'Diff 高':>9} "
+            f"{'Mean Corr':>10} {'Mean Noisy':>11} {'Mean Diff':>10}"
+        )
+        print("-" * 132)
+
+        category_data = all_data[category]
+        for retriever in retrievers:
+            if retriever not in category_data["correct"]:
+                raise KeyError(f"{category} missing 09 correct result for {retriever}")
+            if retriever not in category_data["noisy"]:
+                raise KeyError(f"{category} missing 09 noisy result for {retriever}")
+
+            group_summary = {}
+            for group_name in SYNTAX_DEPTH_GROUP_ORDER_09:
+                correct_value = category_data["correct"][retriever][group_name]["correct"]
+                noisy_value = category_data["noisy"][retriever][group_name]["noisy"]
+                if correct_value is None or noisy_value is None:
+                    diff = None
+                else:
+                    diff = noisy_value - correct_value
+                group_summary[group_name] = {
+                    "correct": correct_value,
+                    "noisy": noisy_value,
+                    "diff": diff,
+                }
+
+            mean_correct = average_present_values([group_summary[g]["correct"] for g in SYNTAX_DEPTH_GROUP_ORDER_09])
+            mean_noisy = average_present_values([group_summary[g]["noisy"] for g in SYNTAX_DEPTH_GROUP_ORDER_09])
+            if mean_correct is None or mean_noisy is None:
+                mean_diff = None
+            else:
+                mean_diff = mean_noisy - mean_correct
+
+            row = f"{retriever:<12}"
+            for group_name in SYNTAX_DEPTH_GROUP_ORDER_09:
+                row += (
+                    f" {fmt4(group_summary[group_name]['correct']):>9}"
+                    f" {fmt4(group_summary[group_name]['noisy']):>9}"
+                    f" {fmt_signed(group_summary[group_name]['diff']):>9}"
+                )
+            row += f" {fmt4(mean_correct):>10} {fmt4(mean_noisy):>11} {fmt_signed(mean_diff):>10}"
+            print(row)
+        print("-" * 132)
 
 
 def load_09_paired_diffs(category: str) -> dict:
@@ -371,7 +618,7 @@ def load_09_paired_diffs(category: str) -> dict:
         ("correct_results", correct_items, "correct"),
         ("noisy_results", noisy_items, "noisy"),
     ):
-        for item in data.get(source_name, []):
+        for item in data[source_name]:
             retriever = item["retriever"]
             if retriever in DISABLED_RETRIEVERS:
                 continue
@@ -391,31 +638,14 @@ def load_09_paired_diffs(category: str) -> dict:
 
     result = {}
     for retriever in sort_retrievers(correct_items):
-        correct_records = {
-            record["pair_id"]: record
-            for record in correct_items[retriever].get("all_query_records", [])
-        }
-        noisy_records = {
-            record["pair_id"]: record
-            for record in noisy_items[retriever].get("all_query_records", [])
-        }
-        if set(correct_records) != set(noisy_records):
-            raise KeyError(f"{category} {retriever} 09 pair_id sets differ")
-
-        result[retriever] = {"all": [], "low_complexity": [], "medium_complexity": []}
-        for pair_id in sorted(correct_records):
-            correct_record = correct_records[pair_id]
-            noisy_record = noisy_records[pair_id]
-            group_name = correct_record.get("syntax_depth_group")
-            if group_name != noisy_record.get("syntax_depth_group"):
-                raise ValueError(f"{category} {retriever} pair_id={pair_id} syntax_depth_group mismatch")
-            if group_name not in SYNTAX_DEPTH_GROUP_ORDER_NOISY:
-                raise KeyError(f"{category} {retriever} pair_id={pair_id} unsupported group {group_name}")
-            correct_hit10 = get_record_hit10(correct_record, f"{category} {retriever} correct pair {pair_id}")
-            noisy_hit10 = get_record_hit10(noisy_record, f"{category} {retriever} noisy pair {pair_id}")
-            diff = noisy_hit10 - correct_hit10
-            result[retriever]["all"].append(diff)
-            result[retriever][group_name].append(diff)
+        stats = build_09_filtered_pair_stats(
+            correct_items[retriever],
+            noisy_items[retriever],
+            f"{category} {retriever} 09 paired filtered",
+        )
+        result[retriever] = {"all": stats["all"]["diffs"]}
+        for group_name in SYNTAX_DEPTH_GROUP_ORDER_09:
+            result[retriever][group_name] = stats["groups"][group_name]["diffs"]
     return result
 
 
@@ -440,11 +670,16 @@ def bootstrap_mean_ci(values, n_boot: int = 2000, confidence: float = 0.95, seed
 
 def print_09_paired_significance(all_data: dict) -> None:
     retrievers = sort_retrievers({r for cat_data in all_data.values() for r in cat_data})
-    groups = [("all", "ALL"), ("low_complexity", "低"), ("medium_complexity", "中")]
+    groups = [
+        ("all", "ALL"),
+        ("low_complexity", "低"),
+        ("medium_complexity", "中"),
+        ("high_complexity", "高"),
+    ]
 
     print("\n" + "=" * 118)
     print("09 paired significance: noisy hit@10 - correct hit@10")
-    print("基于 pair_id 配对的逐查询 hit@10 差值")
+    print("基于 pair_id 配对的逐查询 hit@10 差值，使用 09 已过滤过的样本")
     print("=" * 118)
 
     for group_name, group_label in groups:
@@ -460,7 +695,11 @@ def print_09_paired_significance(all_data: dict) -> None:
                     raise KeyError(f"{category} {retriever} missing paired group {group_name}")
                 diffs.extend(all_data[category][retriever][group_name])
             if len(diffs) < 2:
-                raise ValueError(f"{retriever} {group_name} has insufficient paired diffs: {len(diffs)}")
+                print(
+                    f"{retriever:<12} {len(diffs):>10} {fmt_signed(None):>12} "
+                    f"{'N/A':>22} {'N/A':>12} {'N/A':>6}"
+                )
+                continue
 
             diffs_array = np.asarray(diffs, dtype=float)
             mean_diff = float(np.mean(diffs_array))
@@ -481,7 +720,7 @@ def main():
     for category in CATEGORIES:
         print(f"  {category}: {len(data_08[category])} retrievers")
 
-    print("\nLoading 09 syntax-depth correct/noisy grouped hit@10...")
+    print("\nLoading 09 syntax-depth correct/noisy three-level hit@10...")
     data_09 = build_09_results()
     for category in CATEGORIES:
         print(
@@ -492,8 +731,8 @@ def main():
     paired_09 = build_09_paired_diffs()
 
     print_08_hit10_table(data_08)
+    print_08_three_level_score_table(data_08)
     print_08_low_to_high_trend(data_08)
-    print_08_adjacent_trend(data_08)
     print_09_correct_vs_noisy(data_09)
     print_09_paired_significance(paired_09)
 
