@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-快速全量评估脚本 - 使用 syntax-depth 查询缓存并按树深度复杂度分组对比。
+快速全量评估脚本 - 使用 Stage 6 查询缓存进行检索评估。
 查询缓存由 08_generate_query_cache_Baby_Products.py 生成。
 """
 
@@ -77,13 +77,10 @@ RETRIEVERS = DENSE_RETRIEVERS + COLBERTV2_RETRIEVERS + SPARSE_RETRIEVERS + ['bm2
 DENSE_SEARCH_BATCH_SIZE = 64
 SPLADE_QUERY_BATCH_SIZE = 128
 
-DEPTH_GROUP_FIELD = 'syntax_depth_group'
-DEPTH_GROUPS = [
-    ('low_complexity', 5, 7, '低复杂度(5-7)'),
-    ('high_complexity', 8, 10, '高复杂度(8-10)'),
-]
-DEPTH_GROUP_ORDER = [name for name, _, _, _ in DEPTH_GROUPS]
-DEPTH_GROUP_DISPLAY = {name: label for name, _, _, label in DEPTH_GROUPS}
+QUERY_GROUP_FIELD = 'query_group'
+QUERY_GROUP_KEY = 'all_queries'
+QUERY_GROUP_ORDER = [QUERY_GROUP_KEY]
+QUERY_GROUP_DISPLAY = {QUERY_GROUP_KEY: '全部查询'}
 
 # IDF 分层配置
 IDF_BINS = [(2.5, 3.5), (3.5, 4.5), (4.5, 5.0), (5.0, float('inf'))]
@@ -263,22 +260,15 @@ def validate_cache() -> bool:
     return True
 
 # ============ 分组配置 ============
-# 模块级变量，按 syntax-depth 复杂度分组。
-UNIQUE_LEVELS = DEPTH_GROUP_ORDER.copy()
-GROUP_FIELD = DEPTH_GROUP_FIELD
+# 模块级变量，仅保留单一查询集合分组。
+UNIQUE_LEVELS = QUERY_GROUP_ORDER.copy()
+GROUP_FIELD = QUERY_GROUP_FIELD
 
 
 def get_group_display(group) -> str:
-    if group not in DEPTH_GROUP_DISPLAY:
-        raise KeyError(f"Unknown syntax depth group: {group}")
-    return DEPTH_GROUP_DISPLAY[group]
-
-
-def depth_to_complexity_group(depth: int) -> str | None:
-    for group_name, low, high, _ in DEPTH_GROUPS:
-        if low <= depth <= high:
-            return group_name
-    return None
+    if group not in QUERY_GROUP_DISPLAY:
+        raise KeyError(f"Unknown query group: {group}")
+    return QUERY_GROUP_DISPLAY[group]
 
 
 # ============ ACL/CCOMP Paired Analysis ============
@@ -814,8 +804,8 @@ def _find_same_level_pairs(data: list) -> set:
     return valid_pairs
 
 
-def load_user_queries(query_type: str = SYNTAX_DEPTH_QUERY_TYPE, query_category: str = SYNTAX_DEPTH_QUERY_CATEGORY, filter_same_level: bool = False) -> Tuple[Dict[str, List[Dict]], Dict[str, str], List[Tuple[int, int, int]]]:
-    """加载 syntax-depth 查询，并按 actual_depth 映射到复杂度分组。"""
+def load_user_queries(query_type: str = SYNTAX_DEPTH_QUERY_TYPE, query_category: str = SYNTAX_DEPTH_QUERY_CATEGORY, filter_same_level: bool = False) -> Tuple[Dict[str, List[Dict]], Dict[str, str], List[Tuple[int, int]]]:
+    """加载 Stage 6 查询，不读取任何深度字段。"""
     global GROUP_FIELD, UNIQUE_LEVELS
 
     if query_type != SYNTAX_DEPTH_QUERY_TYPE:
@@ -827,8 +817,8 @@ def load_user_queries(query_type: str = SYNTAX_DEPTH_QUERY_TYPE, query_category:
     if not os.path.exists(SYNTAX_DEPTH_QUERY_FILE):
         raise FileNotFoundError(f"syntax-depth query file not found: {SYNTAX_DEPTH_QUERY_FILE}")
 
-    GROUP_FIELD = DEPTH_GROUP_FIELD
-    UNIQUE_LEVELS = DEPTH_GROUP_ORDER.copy()
+    GROUP_FIELD = QUERY_GROUP_FIELD
+    UNIQUE_LEVELS = QUERY_GROUP_ORDER.copy()
 
     with open(SYNTAX_DEPTH_QUERY_FILE, 'r', encoding='utf-8') as f:
         data = json.load(f)
@@ -837,8 +827,7 @@ def load_user_queries(query_type: str = SYNTAX_DEPTH_QUERY_TYPE, query_category:
 
     user_queries: Dict[str, List[Dict]] = {}
     user_to_group: Dict[str, str] = {}
-    all_query_metadata: List[Tuple[int, int, int]] = []
-    excluded_depth_counts = Counter()
+    all_query_metadata: List[Tuple[int, int]] = []
     idx = 0
 
     for row_index, item in enumerate(data):
@@ -858,7 +847,7 @@ def load_user_queries(query_type: str = SYNTAX_DEPTH_QUERY_TYPE, query_category:
         if not isinstance(syntax_depth_query, dict):
             raise TypeError(f"syntax_depth_query must be dict for user={user_id}, index={row_index}")
 
-        for field in ('query', 'actual_depth', 'target_depth', 'user_avg_depth', 'word_count'):
+        for field in ('query', 'word_count'):
             if field not in syntax_depth_query:
                 raise ValueError(f"syntax_depth_query missing required field '{field}' for user={user_id}, index={row_index}")
 
@@ -869,51 +858,32 @@ def load_user_queries(query_type: str = SYNTAX_DEPTH_QUERY_TYPE, query_category:
         if not query_text:
             raise ValueError(f"query is empty for user={user_id}, index={row_index}")
 
-        actual_depth = syntax_depth_query['actual_depth']
-        target_depth = syntax_depth_query['target_depth']
         word_count = syntax_depth_query['word_count']
-        user_avg_depth = syntax_depth_query['user_avg_depth']
-        if not isinstance(actual_depth, int):
-            raise TypeError(f"actual_depth must be int for user={user_id}, index={row_index}, got {type(actual_depth).__name__}")
-        if not isinstance(target_depth, int):
-            raise TypeError(f"target_depth must be int for user={user_id}, index={row_index}, got {type(target_depth).__name__}")
         if not isinstance(word_count, int):
             raise TypeError(f"word_count must be int for user={user_id}, index={row_index}, got {type(word_count).__name__}")
-        if not isinstance(user_avg_depth, (int, float)):
-            raise TypeError(f"user_avg_depth must be numeric for user={user_id}, index={row_index}, got {type(user_avg_depth).__name__}")
-
-        depth_group = depth_to_complexity_group(actual_depth)
-        if depth_group is None:
-            excluded_depth_counts[actual_depth] += 1
-            continue
+        query_group = QUERY_GROUP_KEY
 
         if user_id not in user_queries:
             user_queries[user_id] = []
-            user_to_group[user_id] = depth_group
-        elif user_to_group[user_id] != depth_group:
+            user_to_group[user_id] = query_group
+        elif user_to_group[user_id] != query_group:
             raise ValueError(
-                f"user {user_id} appears in multiple syntax depth groups: "
-                f"{user_to_group[user_id]} and {depth_group}"
+                f"user {user_id} appears in multiple query groups: "
+                f"{user_to_group[user_id]} and {query_group}"
             )
 
         user_queries[user_id].append({
             'query': query_text,
             'asin': asin,
             'word_count': word_count,
-            'syntax_depth': actual_depth,
-            'target_depth': target_depth,
-            'user_avg_depth': float(user_avg_depth),
-            'depth_group_label': get_group_display(depth_group),
             f'{GROUP_FIELD}_ratio': 0.0,
-            GROUP_FIELD: depth_group,
+            GROUP_FIELD: query_group,
         })
-        all_query_metadata.append((idx, word_count, actual_depth))
+        all_query_metadata.append((idx, word_count))
         idx += 1
 
-    if excluded_depth_counts:
-        log(f"  已按实验定义排除分组范围外的树深度: {dict(sorted(excluded_depth_counts.items()))}")
     if not user_queries:
-        raise ValueError("No syntax-depth queries remained after applying depth groups 5-7, 8-10")
+        raise ValueError("No syntax-depth queries loaded for evaluation")
 
     return user_queries, user_to_group, all_query_metadata
 
@@ -1099,7 +1069,7 @@ class BM25Searcher:
 # ============ 评估 ============
 def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = SYNTAX_DEPTH_QUERY_TYPE, query_category: str = SYNTAX_DEPTH_QUERY_CATEGORY) -> Dict:
     global GROUP_FIELD, UNIQUE_LEVELS
-    GROUP_FIELD = DEPTH_GROUP_FIELD
+    GROUP_FIELD = QUERY_GROUP_FIELD
     # 清理 CUDA 缓存，避免 cuBLAS 上下文冲突
     import torch
     if torch.cuda.is_available():
@@ -1185,10 +1155,6 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_gr
             'user_id': user_id,
             'asin': relevant_asin,
             f'{GROUP_FIELD}': q_group,
-            'syntax_depth': query_info['syntax_depth'],
-            'target_depth': query_info['target_depth'],
-            'user_avg_depth': query_info['user_avg_depth'],
-            'depth_group_label': query_info['depth_group_label'],
             'mean_idf': q_idf,
             'query_length': word_count,
             f'{GROUP_FIELD}_ratio': group_ratio,
@@ -1295,7 +1261,7 @@ def evaluate_dense_retriever(retriever_name: str, user_queries: Dict, user_to_gr
 
 def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = SYNTAX_DEPTH_QUERY_TYPE, query_category: str = SYNTAX_DEPTH_QUERY_CATEGORY) -> Dict:
     global GROUP_FIELD, UNIQUE_LEVELS
-    GROUP_FIELD = DEPTH_GROUP_FIELD
+    GROUP_FIELD = QUERY_GROUP_FIELD
     log(f"\n{'='*60}")
     log(f"检索器: BM25 (稀疏) - SYNTAX_DEPTH/{query_type.upper()}")
     log(f"{'='*60}")
@@ -1314,10 +1280,6 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: L
     all_query_group_ratios = []
     all_query_groups = []
     all_query_idf_values = []
-    all_query_depths = []
-    all_query_target_depths = []
-    all_query_user_avg_depths = []
-
     for user_id in matched_users:
         queries = user_queries[user_id]
         for q in queries:
@@ -1328,9 +1290,6 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: L
             all_query_group_ratios.append(q[f'{GROUP_FIELD}_ratio'])
             all_query_groups.append(q[GROUP_FIELD])
             all_query_idf_values.append(0.0)
-            all_query_depths.append(q['syntax_depth'])
-            all_query_target_depths.append(q['target_depth'])
-            all_query_user_avg_depths.append(q['user_avg_depth'])
 
     log(f"  总查询数: {len(all_query_texts)}")
     if not all_query_texts:
@@ -1390,10 +1349,6 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: L
             'user_id': all_query_users[i],
             'asin': relevant_asin,
             f'{GROUP_FIELD}': group,
-            'syntax_depth': all_query_depths[i],
-            'target_depth': all_query_target_depths[i],
-            'user_avg_depth': all_query_user_avg_depths[i],
-            'depth_group_label': get_group_display(group),
             'mean_idf': all_query_idf_values[i],
             'query_length': all_query_word_counts[i],
             f'{GROUP_FIELD}_ratio': all_query_group_ratios[i],
@@ -1498,7 +1453,7 @@ def evaluate_bm25_retriever(user_queries: Dict, user_to_group: Dict, k_values: L
 def evaluate_cached_result_retriever(retriever_name: str, user_queries: Dict, user_to_group: Dict, k_values: List[int], word_idf: Dict[str, float] = None, query_type: str = SYNTAX_DEPTH_QUERY_TYPE, query_category: str = SYNTAX_DEPTH_QUERY_CATEGORY) -> Dict:
     """评估缓存为 user -> query -> token embedding 的 ColBERTv2 查询缓存"""
     global GROUP_FIELD, UNIQUE_LEVELS
-    GROUP_FIELD = DEPTH_GROUP_FIELD
+    GROUP_FIELD = QUERY_GROUP_FIELD
 
     required_k_values = {1, 3, 5, 10}
     if not required_k_values.issubset(set(k_values)):
@@ -1534,10 +1489,6 @@ def evaluate_cached_result_retriever(retriever_name: str, user_queries: Dict, us
     all_query_group_ratios = []
     all_query_groups = []
     all_query_idf_values = []
-    all_query_depths = []
-    all_query_target_depths = []
-    all_query_user_avg_depths = []
-
     total_candidate_queries = 0
     skipped_missing_queries = 0
     for user_id in matched_users:
@@ -1558,9 +1509,6 @@ def evaluate_cached_result_retriever(retriever_name: str, user_queries: Dict, us
             all_query_group_ratios.append(q[f'{GROUP_FIELD}_ratio'])
             all_query_groups.append(q[GROUP_FIELD])
             all_query_idf_values.append(0.0)
-            all_query_depths.append(q['syntax_depth'])
-            all_query_target_depths.append(q['target_depth'])
-            all_query_user_avg_depths.append(q['user_avg_depth'])
 
     if not all_query_texts:
         raise ValueError(f"{retriever_name} has no cached syntax-depth queries to evaluate")
@@ -1608,10 +1556,6 @@ def evaluate_cached_result_retriever(retriever_name: str, user_queries: Dict, us
             'user_id': all_query_users[i],
             'asin': relevant_asin,
             f'{GROUP_FIELD}': group,
-            'syntax_depth': all_query_depths[i],
-            'target_depth': all_query_target_depths[i],
-            'user_avg_depth': all_query_user_avg_depths[i],
-            'depth_group_label': get_group_display(group),
             'mean_idf': all_query_idf_values[i],
             'query_length': all_query_word_counts[i],
             f'{GROUP_FIELD}_ratio': all_query_group_ratios[i],
@@ -1751,7 +1695,7 @@ def evaluate_splade_retriever(user_queries: Dict, user_to_group: Dict, k_values:
     我们直接调用 search() 方法进行检索，而不是依赖缓存。
     """
     global GROUP_FIELD, UNIQUE_LEVELS
-    GROUP_FIELD = DEPTH_GROUP_FIELD
+    GROUP_FIELD = QUERY_GROUP_FIELD
 
     log(f"\n{'='*60}")
     log(f"检索器: SPLADE (稀疏) - SYNTAX_DEPTH/{query_type.upper()}")
@@ -1837,10 +1781,6 @@ def evaluate_splade_retriever(user_queries: Dict, user_to_group: Dict, k_values:
                 'word_count': q['word_count'],
                 'group_ratio': q[f'{GROUP_FIELD}_ratio'],
                 'q_group': q[GROUP_FIELD],
-                'syntax_depth': q['syntax_depth'],
-                'target_depth': q['target_depth'],
-                'user_avg_depth': q['user_avg_depth'],
-                'depth_group_label': q['depth_group_label'],
                 'q_vec': cached_queries[query_text]
             })
 
@@ -1972,10 +1912,6 @@ def evaluate_splade_retriever(user_queries: Dict, user_to_group: Dict, k_values:
             'user_id': q['user_id'],
             'asin': relevant_asin,
             f'{GROUP_FIELD}': q_group,
-            'syntax_depth': q['syntax_depth'],
-            'target_depth': q['target_depth'],
-            'user_avg_depth': q['user_avg_depth'],
-            'depth_group_label': q['depth_group_label'],
             'mean_idf': q_idf,
             'query_length': word_count,
             f'{GROUP_FIELD}_ratio': group_ratio,
@@ -2131,10 +2067,10 @@ def print_summary_table_wide(all_results: List[Dict], query_type: str = 'CORRECT
 
 
 def print_hit10_complexity_table(all_results: List[Dict]):
-    """按树深度复杂度展示 H@10 对比表。"""
+    """按查询分组展示 H@10 对比表。"""
     sep_width = 100
     log(f"\n{'='*sep_width}")
-    log("H@10 复杂度对比表")
+    log("H@10 查询组对比表")
     log(f"{'='*sep_width}")
 
     COL_W = 18
@@ -2163,72 +2099,6 @@ def print_hit10_complexity_table(all_results: List[Dict]):
                 for i in range(len(hit10_values) - 1)
             ]
             mean_abs_diff = sum(adjacent_diffs) / len(adjacent_diffs)
-        row += f" {mean_abs_diff:>{COL_W}.4f}"
-        log(row)
-
-    log("-" * sep_width)
-
-
-def print_hit10_exact_depth_table(all_results: List[Dict], depths: Optional[Tuple[int, ...]] = None):
-    """按精确树深度展示 H@10 对比表。
-
-    若未显式传入 depths，则自动使用评估结果中实际出现的全部 syntax_depth。
-    """
-    sep_width = 100
-    log(f"\n{'='*sep_width}")
-    log("H@10 精确深度对比表")
-    log(f"{'='*sep_width}")
-
-    if depths is None:
-        depth_set = set()
-        for result in all_results:
-            for record in result.get('all_query_records', []):
-                depth = record.get('syntax_depth')
-                if not isinstance(depth, int):
-                    raise TypeError(
-                        f"{result.get('retriever', 'unknown')} has invalid syntax_depth record: {depth!r}"
-                    )
-                depth_set.add(depth)
-
-        if not depth_set:
-            raise ValueError("No exact syntax_depth records found for H@10 table")
-        depths = tuple(sorted(depth_set))
-
-    COL_W = 18
-    header = f"{'检索器':<12}"
-    for depth in depths:
-        header += f" {f'深度{depth}':>{COL_W}}"
-    header += f" {'样本数':>{COL_W}}"
-    header += f" {'平均差值':>{COL_W}}"
-    log(header)
-    log("-" * sep_width)
-
-    for result in sorted(all_results, key=lambda item: item['retriever']):
-        retriever = result['retriever']
-        depth_hits = {depth: [] for depth in depths}
-        for record in result.get('all_query_records', []):
-            depth = record.get('syntax_depth')
-            if depth in depth_hits:
-                depth_hits[depth].append(float(record['hit_at10']))
-
-        row = f"{retriever:<12}"
-        hit10_values = []
-        total_count = 0
-        for depth in depths:
-            hits = depth_hits[depth]
-            if not hits:
-                raise ValueError(f"{retriever} has no query records for exact syntax depth {depth}")
-            value = sum(hits) / len(hits)
-            hit10_values.append(value)
-            total_count += len(hits)
-            row += f" {value:>{COL_W}.4f}"
-
-        adjacent_diffs = [
-            abs(hit10_values[i] - hit10_values[i + 1])
-            for i in range(len(hit10_values) - 1)
-        ]
-        mean_abs_diff = sum(adjacent_diffs) / len(adjacent_diffs)
-        row += f" {total_count:>{COL_W}d}"
         row += f" {mean_abs_diff:>{COL_W}.4f}"
         log(row)
 
@@ -2322,11 +2192,11 @@ def print_query_type_comparison(all_results_by_type: Dict[str, List[Dict]], k_va
 
 def main():
     global GROUP_FIELD, UNIQUE_LEVELS
-    GROUP_FIELD = DEPTH_GROUP_FIELD
-    UNIQUE_LEVELS = DEPTH_GROUP_ORDER.copy()
+    GROUP_FIELD = QUERY_GROUP_FIELD
+    UNIQUE_LEVELS = QUERY_GROUP_ORDER.copy()
 
     log("=" * 60)
-    log("快速全量评估 - syntax-depth 查询缓存 + 树深度复杂度分组")
+    log("快速全量评估 - syntax-depth 查询缓存")
     log(f"类别: {CATEGORY_NAME}")
     log(f"查询缓存目录: {os.path.join(QUERY_CACHE_BASE_DIR, 'syntax_depth_correct_query')}")
     log(f"分组: {', '.join(get_group_display(g) for g in UNIQUE_LEVELS)}")
@@ -2355,12 +2225,9 @@ def main():
     log(f"  syntax-depth 用户数: {len(user_queries)}")
 
     group_dist = Counter()
-    exact_depth_dist = Counter()
     for user_qs in user_queries.values():
         for q in user_qs:
             group_dist[q[GROUP_FIELD]] += 1
-            exact_depth_dist[q['syntax_depth']] += 1
-    log(f"  树深度精确分布: {dict(sorted(exact_depth_dist.items()))}")
     log(f"  复杂度分组分布: {dict((get_group_display(g), group_dist[g]) for g in UNIQUE_LEVELS)}")
 
     all_word_counts = [q['word_count'] for user_qs in user_queries.values() for q in user_qs]
@@ -2436,7 +2303,6 @@ def main():
 
     print_summary_table_wide(query_type_results, f'{CATEGORY_NAME} SYNTAX_DEPTH-CORRECT')
     print_hit10_complexity_table(query_type_results)
-    print_hit10_exact_depth_table(query_type_results)
 
     # 保存结果（处理 tuple key 等不可 JSON 序列化的问题）
     def sanitize_for_json(obj):
@@ -2460,10 +2326,6 @@ def main():
             'query_types': QUERY_TYPES,
             'query_categories': QUERY_CATEGORIES,
             'group_field': GROUP_FIELD,
-            'depth_groups': [
-                {'group': name, 'low': low, 'high': high, 'label': label}
-                for name, low, high, label in DEPTH_GROUPS
-            ],
             'results_by_category_and_type': sanitize_for_json(all_results_by_category_and_type),
             'all_results_combined': sanitize_for_json(all_results_combined),
         }, f, indent=2, default=str)

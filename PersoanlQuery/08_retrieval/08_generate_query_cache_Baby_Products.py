@@ -780,8 +780,9 @@ def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
 
 
 def load_syntax_depth_queries() -> List[Dict]:
-    """从 query_by_syntax_depth.json 加载每个用户的 syntax-depth 查询。
+    """从 query_by_syntax_depth.json 加载每个用户的查询文本。
 
+    这里只读取 query 文本，不读取任何深度字段。
     如果 noisy_query.json 中存在同一 (user_id, asin) 的记录，则使用其 original_query 覆盖。
     """
     if not os.path.exists(SYNTAX_DEPTH_QUERY_FILE):
@@ -807,33 +808,31 @@ def load_syntax_depth_queries() -> List[Dict]:
 
         user_id = item['user_id']
         asin = item['asin']
-        syntax_depth_query = item['syntax_depth_query']
+        query_block = item['syntax_depth_query']
         if not user_id:
             raise ValueError(f"syntax-depth row missing user_id at index {index}")
         if not asin:
             raise ValueError(f"syntax-depth row missing asin for user={user_id}, index={index}")
-        if not isinstance(syntax_depth_query, dict):
+        if not isinstance(query_block, dict):
             raise TypeError(
                 f"syntax_depth_query must be dict for user={user_id}, index={index}, "
-                f"got {type(syntax_depth_query).__name__}"
+                f"got {type(query_block).__name__}"
             )
 
-        if 'query' not in syntax_depth_query:
+        if 'query' not in query_block:
             raise ValueError(f"syntax_depth_query missing required field 'query' for user={user_id}, index={index}")
 
-        syntax_depth_query_text = syntax_depth_query['query']
-        if not isinstance(syntax_depth_query_text, str):
+        query_text = query_block['query']
+        if not isinstance(query_text, str):
             raise TypeError(f"query must be a string for user={user_id}, index={index}")
-        syntax_depth_query_text = syntax_depth_query_text.strip()
-        if not syntax_depth_query_text:
+        query_text = query_text.strip()
+        if not query_text:
             raise ValueError(f"query is empty for user={user_id}, index={index}")
 
         override_query = noisy_original_query_map.get((user_id, asin))
         if override_query is not None:
             query_text = override_query
             overridden_count += 1
-        else:
-            query_text = syntax_depth_query_text
 
         if user_id in seen_user_ids:
             log_with_timestamp(f"⚠️  用户 {user_id} 在 syntax-depth 查询文件中出现多次，缓存会保留所有查询")
@@ -844,7 +843,6 @@ def load_syntax_depth_queries() -> List[Dict]:
             'asin': asin,
             'query': query_text,
             'source_query': query_text,
-            'syntax_depth_source_query': syntax_depth_query_text,
             'source': 'syntax_depth',
         })
 
