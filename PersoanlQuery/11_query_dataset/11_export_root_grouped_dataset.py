@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild root dataset/*_query.json from Stage 11 syntax-depth JSONL outputs."""
+"""Rebuild root dataset/*_query.json from Stage 11 clustered JSONL outputs."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ REPO_ROOT = Path("/fs04/ar57/wenyu")
 ROOT_DATASET_DIR = REPO_ROOT / "dataset"
 STAGE11_DATASET_DIR = REPO_ROOT / "result" / "personal_query" / "11_query_dataset"
 TARGET_CATEGORIES = ("Baby_Products", "Grocery_and_Gourmet_Food", "Pet_Supplies")
-COMPLEXITY_GROUP_ORDER = {"low": 0, "medium": 1, "high": 2}
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,6 +37,15 @@ def require_text(item: dict[str, Any], key: str, label: str) -> str:
     return value
 
 
+def require_int(item: dict[str, Any], key: str, label: str) -> int:
+    if key not in item:
+        raise KeyError(f"{label} is missing required key: {key}")
+    value = item[key]
+    if not isinstance(value, int):
+        raise TypeError(f"{label}.{key} must be an integer")
+    return value
+
+
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     rows = []
     with path.open("r", encoding="utf-8") as handle:
@@ -49,26 +57,19 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def query_sort_key(query: dict[str, Any]) -> tuple[int, int, str]:
-    complexity_group = query["complexity_group"]
-    if complexity_group not in COMPLEXITY_GROUP_ORDER:
-        raise ValueError(f"Unsupported complexity_group in grouped query: {complexity_group}")
+def query_sort_key(query: dict[str, Any]) -> tuple[int, str]:
     return (
-        COMPLEXITY_GROUP_ORDER[complexity_group],
-        query["depth"],
+        query["cluster_index"],
         query["correct_query"],
     )
 
 
 def build_grouped_query(row: dict[str, Any]) -> dict[str, Any]:
     return {
-        "complexity_group": row["complexity_group"],
-        "depth": row["depth"],
+        "cluster_label": row["cluster_label"],
+        "cluster_index": row["cluster_index"],
         "correct_query": row["correct_query"],
         "attrs_used": row["attrs_used"],
-        "has_error_query": row["has_error_query"],
-        "error_query": row["error_query"],
-        "injected_errors": row["injected_errors"],
     }
 
 
@@ -79,9 +80,10 @@ def build_grouped_rows(category: str, flat_rows: list[dict[str, Any]]) -> list[d
         user_id = require_text(row, "uuid", row_label)
         asin = require_text(row, "asin", row_label)
         attrs_used = require_dict(row["attrs_used"], f"{row_label}.attrs_used")
-        complexity_group = require_text(row, "complexity_group", row_label)
-        if complexity_group not in COMPLEXITY_GROUP_ORDER:
-            raise ValueError(f"{row_label}.complexity_group is unsupported: {complexity_group}")
+        cluster_label = require_text(row, "cluster_label", row_label)
+        cluster_index = require_int(row, "cluster_index", row_label)
+        if cluster_index < 0:
+            raise ValueError(f"{row_label}.cluster_index must be non-negative")
 
         key = (user_id, asin)
         if key not in grouped:
@@ -94,12 +96,13 @@ def build_grouped_rows(category: str, flat_rows: list[dict[str, Any]]) -> list[d
             }
 
         grouped[key]["queries"].append(build_grouped_query(row))
+        grouped[key]["queries"][-1]["cluster_label"] = cluster_label
 
     result = []
     for key, grouped_row in grouped.items():
         grouped_row["queries"].sort(key=query_sort_key)
         seen_query_keys = [
-            (item["has_error_query"], item["complexity_group"], item["depth"], item["correct_query"])
+            (item["cluster_label"], item["cluster_index"], item["correct_query"])
             for item in grouped_row["queries"]
         ]
         if len(seen_query_keys) != len(set(seen_query_keys)):

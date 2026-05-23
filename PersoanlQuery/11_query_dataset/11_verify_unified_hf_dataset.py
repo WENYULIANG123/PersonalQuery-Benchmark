@@ -15,7 +15,7 @@ from datasets import get_dataset_split_names, load_dataset
 
 
 CONFIGS = ("baby", "grocery", "pets")
-SPLITS = ("full", "paired")
+SPLITS = ("train",)
 UPLOAD_SCRIPT = Path(__file__).with_name("11_upload_unified_hf_dataset.py")
 
 
@@ -62,18 +62,24 @@ def main() -> None:
             first_row = dataset[0]
             required_fields = {
                 "uuid",
-                "complexity_group",
-                "depth",
+                "cluster_label",
+                "cluster_index",
                 "correct_query",
                 "attrs_used",
-                "has_error_query",
-                "error_query",
-                "injected_errors",
             }
             missing_fields = sorted(required_fields - set(first_row))
             if missing_fields:
                 raise RuntimeError(f"{config}/{split} first row missing fields: {missing_fields}")
-            forbidden_fields = {"source_stage", "query_category", "complexity_level"}
+            forbidden_fields = {
+                "source_stage",
+                "query_category",
+                "complexity_level",
+                "complexity_group",
+                "depth",
+                "has_error_query",
+                "error_query",
+                "injected_errors",
+            }
             present_forbidden_fields = sorted(forbidden_fields.intersection(first_row))
             if present_forbidden_fields:
                 raise RuntimeError(f"{config}/{split} first row contains forbidden fields: {present_forbidden_fields}")

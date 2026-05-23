@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print Stage 11 query dataset statistics from summary.json."""
+"""Print Stage 11 clustered query dataset statistics from summary.json."""
 
 from __future__ import annotations
 
@@ -11,12 +11,10 @@ from typing import Any
 
 
 DEFAULT_SUMMARY_FILE = Path("/home/wlia0047/ar57/wenyu/result/personal_query/11_query_dataset/summary.json")
-SOURCE_STAGE_08 = "08_clean"
-SOURCE_STAGE_09 = "09_noisy"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Print Stage 11 query dataset statistics.")
+    parser = argparse.ArgumentParser(description="Print Stage 11 clustered query dataset statistics.")
     parser.add_argument("--summary-file", default=str(DEFAULT_SUMMARY_FILE), help="Path to Stage 11 summary.json.")
     return parser.parse_args()
 
@@ -49,15 +47,6 @@ def require_int_value(item: dict[str, Any], key: str, label: str) -> int:
     if not isinstance(value, int):
         raise TypeError(f"{label}.{key} must be an integer")
     return value
-
-
-def require_number_value(item: dict[str, Any], key: str, label: str) -> float:
-    if key not in item:
-        raise KeyError(f"{label} is missing required key: {key}")
-    value = item[key]
-    if not isinstance(value, (int, float)):
-        raise TypeError(f"{label}.{key} must be numeric")
-    return float(value)
 
 
 def load_summary(path: Path) -> dict[str, Any]:
@@ -124,8 +113,7 @@ def category_label(category: str) -> str:
 
 def build_statistics_rows(summary: dict[str, Any]) -> list[tuple[str, int | float]]:
     category_summaries = require_list(summary.get("category_summaries"), "summary.category_summaries")
-    source_stage_counts: Counter[str] = Counter()
-    complexity_group_counts: Counter[str] = Counter()
+    cluster_counts: Counter[str] = Counter()
     table_rows: list[tuple[str, int | float]] = []
 
     for summary_index, raw_category_summary in enumerate(category_summaries):
@@ -133,16 +121,11 @@ def build_statistics_rows(summary: dict[str, Any]) -> list[tuple[str, int | floa
         category = require_text(category_summary, "category", f"category_summaries[{summary_index}]")
         label = category_label(category)
 
-        rows_by_source_stage = require_dict(
-            category_summary.get("rows_by_source_stage"),
-            f"{label}.rows_by_source_stage",
+        rows_by_cluster_label = require_dict(
+            category_summary.get("rows_by_cluster_label"),
+            f"{label}.rows_by_cluster_label",
         )
-        rows_by_complexity_group = require_dict(
-            category_summary.get("rows_by_complexity_group"),
-            f"{label}.rows_by_complexity_group",
-        )
-        source_stage_counts.update({str(key): int(value) for key, value in rows_by_source_stage.items()})
-        complexity_group_counts.update({str(key): int(value) for key, value in rows_by_complexity_group.items()})
+        cluster_counts.update({str(key): int(value) for key, value in rows_by_cluster_label.items()})
 
         table_rows.extend(
             [
@@ -155,13 +138,10 @@ def build_statistics_rows(summary: dict[str, Any]) -> list[tuple[str, int | floa
         [
             ("Total Category Users", sum(require_int_value(item, "num_unique_users", "category summary") for item in category_summaries)),
             ("Total Query", require_int_value(summary, "num_dataset_rows", "summary")),
-            ("Correct Rows", source_stage_counts[SOURCE_STAGE_08]),
-            ("Writing Typo Rows", source_stage_counts[SOURCE_STAGE_09]),
-            ("Low Complexity Rows", sum(value for key, value in complexity_group_counts.items() if key.endswith(":low"))),
-            ("Medium Complexity Rows", sum(value for key, value in complexity_group_counts.items() if key.endswith(":medium"))),
-            ("High Complexity Rows", sum(value for key, value in complexity_group_counts.items() if key.endswith(":high"))),
         ]
     )
+    for cluster_label in sorted(cluster_counts):
+        table_rows.append((f"{cluster_label} Rows", cluster_counts[cluster_label]))
     return table_rows
 
 

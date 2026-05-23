@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-# hf-xet uses native networking and bypasses the Python socket/DNS patches below.
 os.environ["HF_HUB_DISABLE_XET"] = "1"
 
 import requests
@@ -68,6 +67,7 @@ def parse_args() -> argparse.Namespace:
 def get_raw_socket_class():
     if getattr(socket.socket, "__module__", "") == "socks":
         import socks
+
         return socks._orgsocket
     return _ORIGINAL_SOCKET_CLASS
 
@@ -247,7 +247,6 @@ def required_upload_files() -> set[Path]:
     files = {Path("README.md"), Path("summary.json")}
     for config in CONFIGS:
         files.add(Path(config.category) / "data.jsonl")
-        files.add(Path(config.category) / "paired_data.jsonl")
         files.add(Path(config.category) / "summary.json")
     return files
 
@@ -273,7 +272,7 @@ def copy_required_files() -> None:
         source_dir = SOURCE_ROOT / config.category
         target_dir = UPLOAD_ROOT / config.category
         target_dir.mkdir(parents=True, exist_ok=True)
-        for filename in ("data.jsonl", "paired_data.jsonl", "summary.json"):
+        for filename in ("data.jsonl", "summary.json"):
             source_file = source_dir / filename
             if not source_file.is_file():
                 raise FileNotFoundError(f"Required source file does not exist: {source_file}")
@@ -293,14 +292,11 @@ def format_dict_table(values: dict[str, Any], key_title: str, value_title: str) 
 
 def build_size_table(category_summaries: list[dict[str, Any]]) -> str:
     lines = [
-        "| Config | Category | Full Rows | Paired Rows | Unpaired Rows |",
-        "|---|---|---:|---:|---:|",
+        "| Config | Category | Full Rows |",
+        "|---|---|---:|",
     ]
     for config, summary in zip(CONFIGS, category_summaries, strict=True):
-        lines.append(
-            f"| `{config.config_name}` | {config.title} | {summary['num_dataset_rows']} | "
-            f"{summary['num_paired_rows']} | {summary['num_unpaired_rows']} |"
-        )
+        lines.append(f"| `{config.config_name}` | {config.title} | {summary['num_dataset_rows']} |")
     return "\n".join(lines)
 
 
@@ -316,21 +312,13 @@ def build_card(namespace: str, aggregate_summary: dict[str, Any]) -> str:
         detail_sections.append(
             f"""### `{config.config_name}`: {config.title}
 
-Rows by source stage:
+Rows by cluster label:
 
-{format_dict_table(summary["rows_by_source_stage"], "source_stage", "rows")}
+{format_dict_table(summary["rows_by_cluster_label"], "cluster_label", "rows")}
 
-Paired rows by source stage:
+Rows by cluster index:
 
-{format_dict_table(summary["paired_rows_by_source_stage"], "source_stage", "rows")}
-
-Rows by complexity group:
-
-{format_dict_table(summary["rows_by_complexity_group"], "source_stage:complexity_group", "rows")}
-
-Rows by depth:
-
-{format_dict_table(summary["rows_by_depth"], "source_stage:depth", "rows")}
+{format_dict_table(summary["rows_by_cluster_index"], "cluster_index", "rows")}
 """
         )
 
@@ -346,28 +334,22 @@ tags:
 - personalized-search
 - personalized-query
 - query-generation
-- error-query
+- clustered-query
 - synthetic-data
 - amazon-reviews
 configs:
 - config_name: baby
   data_files:
-  - split: full
+  - split: train
     path: Baby_Products/data.jsonl
-  - split: paired
-    path: Baby_Products/paired_data.jsonl
 - config_name: grocery
   data_files:
-  - split: full
+  - split: train
     path: Grocery_and_Gourmet_Food/data.jsonl
-  - split: paired
-    path: Grocery_and_Gourmet_Food/paired_data.jsonl
 - config_name: pets
   data_files:
-  - split: full
+  - split: train
     path: Pet_Supplies/data.jsonl
-  - split: paired
-    path: Pet_Supplies/paired_data.jsonl
 ---
 
 # Personalized Query
@@ -380,18 +362,13 @@ Each config corresponds to one product category:
 - `grocery`: Grocery and Gourmet Food
 - `pets`: Pet Supplies
 
-Each config has two splits:
-
-- `full`: Stage 08 correct rows plus Stage 09 paired correct/writing-typo rows.
-- `paired`: only Stage 09 rows where a correct query has a paired writing-typo query.
+Each config contains one clean clustered query split.
 
 ## Dataset Size
 
 {build_size_table(category_summaries)}
 
-Total rows across all full splits: {aggregate_summary["num_dataset_rows"]}
-
-Total paired rows: {aggregate_summary["num_paired_rows"]}
+Total rows across all configs: {aggregate_summary["num_dataset_rows"]}
 
 ## Category Details
 
@@ -404,39 +381,33 @@ Total paired rows: {aggregate_summary["num_paired_rows"]}
 | `category` | string | Product category. |
 | `uuid` | string | User identifier. |
 | `asin` | string | Amazon product identifier. |
-| `complexity_group` | string | Syntax-depth group: `low`, `medium`, or `high`. |
-| `depth` | integer | Target syntax depth used during query construction. |
-| `correct_query` | string | Correct query text used for evaluation. |
+| `cluster_label` | string | Query-cluster label such as `cluster_0`. |
+| `cluster_index` | integer | Query-cluster index aligned with the cluster label. |
+| `correct_query` | string | Clean query text used for evaluation. |
 | `attrs_used` | object | Product attributes used to generate the query. |
-| `has_error_query` | boolean | Whether a Stage 09 writing-typo query is available. |
-| `error_query` | string or null | Writing-typo query from Stage 09. |
-| `injected_errors` | list | Injected error metadata with fixed field `target_token_depth`. |
 
 ## Loading
 
 ```python
 from datasets import load_dataset
 
-baby_full = load_dataset("{namespace}/{REPO_NAME}", name="baby", split="full")
-baby_paired = load_dataset("{namespace}/{REPO_NAME}", name="baby", split="paired")
-
-grocery_full = load_dataset("{namespace}/{REPO_NAME}", name="grocery", split="full")
-pets_full = load_dataset("{namespace}/{REPO_NAME}", name="pets", split="full")
+baby = load_dataset("{namespace}/{REPO_NAME}", name="baby", split="train")
+grocery = load_dataset("{namespace}/{REPO_NAME}", name="grocery", split="train")
+pets = load_dataset("{namespace}/{REPO_NAME}", name="pets", split="train")
 ```
 
 ## Source Pipeline
 
-- Stage 08 provides the correct syntax-depth retrieval query set.
-- Stage 09 provides paired correct/writing-typo syntax-depth query records when writing typo injection is available.
-- Stage 07 `original_query` is used for Stage 08 rows when the same user/product pair appears in noisy injection input, matching the retrieval cache construction logic.
+- Stage 06 provides the latest clean syntax-depth query set.
+- Stage 12 provides the `strict5550_query_gmm_user_profiles.jsonl` cluster assignment for each user-product query.
 
 ## Intended Use
 
-This dataset is intended for research on personalized product search, query generation, error-query robustness, and retrieval evaluation.
+This dataset is intended for research on personalized product search, clustered query style analysis, query generation, and retrieval evaluation.
 
 ## Data Notes
 
-The queries are synthetic outputs generated from user/product signals in the local Personal Query pipeline. The writing-typo queries are generated by injecting syntax-depth-targeted perturbations. Review license and redistribution requirements for any upstream source data before external reuse.
+The queries are synthetic outputs generated from user/product signals in the local Personal Query pipeline. Review license and redistribution requirements for any upstream source data before external reuse.
 """
 
 
@@ -461,55 +432,38 @@ def upload(namespace: str, create_repo: bool, max_upload_attempts: int) -> str:
     repo_id = f"{namespace}/{REPO_NAME}"
     api = HfApi()
     if create_repo:
-        api.create_repo(repo_id=repo_id, repo_type="dataset", private=False, exist_ok=False)
-        print(f"[CREATED] repo_id={repo_id}", flush=True)
+        api.create_repo(repo_id=repo_id, repo_type="dataset", private=False, exist_ok=True)
 
-    if max_upload_attempts < 1:
-        raise ValueError("--max-upload-attempts must be >= 1")
-
-    commit_info = None
-    for attempt in range(1, max_upload_attempts + 1):
+    attempts = 0
+    while True:
+        attempts += 1
         try:
-            print(f"[UPLOAD] attempt={attempt}/{max_upload_attempts} repo_id={repo_id}", flush=True)
             commit_info = api.upload_folder(
                 folder_path=str(UPLOAD_ROOT),
                 repo_id=repo_id,
                 repo_type="dataset",
-                commit_message="Upload unified personalized query dataset",
+                commit_message="Upload unified personalized clustered query dataset",
             )
-            break
-        except requests.exceptions.RequestException as exc:
-            if attempt == max_upload_attempts:
-                raise
-            sleep_seconds = min(60, 10 * attempt)
-            print(
-                f"[UPLOAD_RETRY] attempt={attempt} failed error={exc.__class__.__name__}; "
-                f"sleep_seconds={sleep_seconds}",
-                flush=True,
-            )
-            time.sleep(sleep_seconds)
-
-    if commit_info is None:
-        raise RuntimeError(f"Upload did not produce a commit for {repo_id}")
-
-    remote_files = set(api.list_repo_files(repo_id=repo_id, repo_type="dataset"))
-    expected_remote_files = {str(path) for path in required_upload_files()}
-    missing_remote_files = sorted(expected_remote_files - remote_files)
-    if missing_remote_files:
-        raise RuntimeError(f"Upload verification failed for {repo_id}, missing files: {missing_remote_files}")
-    print(f"[UPLOADED] repo_id={repo_id} commit={commit_info.oid}", flush=True)
-    return repo_id
+            return commit_info.oid
+        except (requests.RequestException, OSError) as exc:
+            if attempts >= max_upload_attempts:
+                raise RuntimeError(f"Upload failed after {attempts} attempts: {exc}") from exc
+            print(f"[UPLOAD] retry attempt={attempts} reason={exc}", flush=True)
+            time.sleep(2)
 
 
 def main() -> None:
     args = parse_args()
     if args.network_mode == "ssh-socks":
         ensure_ssh_socks_network()
+    elif args.network_mode != "direct":
+        raise ValueError(f"Unsupported network mode: {args.network_mode}")
+
     copy_required_files()
     write_readme(args.namespace)
     verify_upload_root()
-    repo_id = upload(args.namespace, args.create_repo, args.max_upload_attempts)
-    print(f"[SUMMARY] repo_id={repo_id} local_upload_root={UPLOAD_ROOT}", flush=True)
+    commit_oid = upload(args.namespace, args.create_repo, args.max_upload_attempts)
+    print(f"[SUMMARY] repo_id={args.namespace}/{REPO_NAME} commit={commit_oid}", flush=True)
 
 
 if __name__ == "__main__":

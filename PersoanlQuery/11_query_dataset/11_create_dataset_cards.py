@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create and upload Hugging Face dataset cards for the three query datasets."""
+"""Create and upload Hugging Face dataset cards for the three clustered query datasets."""
 
 from __future__ import annotations
 
@@ -50,12 +50,8 @@ def load_summary(category: str) -> dict[str, Any]:
     required_keys = [
         "category",
         "num_dataset_rows",
-        "num_paired_rows",
-        "num_unpaired_rows",
-        "rows_by_source_stage",
-        "paired_rows_by_source_stage",
-        "rows_by_complexity_group",
-        "rows_by_depth",
+        "rows_by_cluster_label",
+        "rows_by_cluster_index",
     ]
     for key in required_keys:
         if key not in summary:
@@ -73,10 +69,8 @@ def format_dict_table(values: dict[str, Any], key_title: str, value_title: str) 
 
 
 def build_card(target: DatasetCardTarget, summary: dict[str, Any], namespace: str) -> str:
-    rows_by_source_stage = summary["rows_by_source_stage"]
-    paired_rows_by_source_stage = summary["paired_rows_by_source_stage"]
-    rows_by_complexity_group = summary["rows_by_complexity_group"]
-    rows_by_depth = summary["rows_by_depth"]
+    rows_by_cluster_label = summary["rows_by_cluster_label"]
+    rows_by_cluster_index = summary["rows_by_cluster_index"]
 
     return f"""---
 language:
@@ -89,7 +83,7 @@ task_categories:
 tags:
 - personalized-search
 - query-generation
-- error-query
+- clustered-query
 - synthetic-data
 - amazon-reviews
 configs:
@@ -97,10 +91,6 @@ configs:
   data_files:
   - split: train
     path: data.jsonl
-- config_name: paired
-  data_files:
-  - split: train
-    path: paired_data.jsonl
 ---
 
 # {target.pretty_name}
@@ -109,14 +99,12 @@ This dataset contains personalized product search queries for the `{target.categ
 
 Each record is built from the Personal Query pipeline:
 
-- Stage 08 provides the correct syntax-depth retrieval query set.
-- Stage 09 provides paired correct/writing-typo syntax-depth query records when writing typo injection is available.
-- Stage 07 `original_query` is used for Stage 08 rows when the same user/product pair appears in noisy injection input, matching the retrieval cache construction logic.
+- Stage 06 provides the latest clean syntax-depth query set.
+- Stage 12 provides the `strict5550_query_gmm_user_profiles.jsonl` cluster assignment for each user-product query.
 
 ## Files
 
-- `data.jsonl`: Stage 08 correct rows plus Stage 09 paired correct/writing-typo rows.
-- `paired_data.jsonl`: only Stage 09 rows where a correct query has a paired writing-typo query.
+- `data.jsonl`: clean query rows with cluster labels.
 - `summary.json`: generation statistics for this category.
 
 ## Dataset Size
@@ -124,24 +112,14 @@ Each record is built from the Personal Query pipeline:
 | Metric | Count |
 |---|---:|
 | Total rows in `data.jsonl` | {summary["num_dataset_rows"]} |
-| Rows in `paired_data.jsonl` | {summary["num_paired_rows"]} |
-| Rows without writing-typo query | {summary["num_unpaired_rows"]} |
 
-## Rows By Source Stage
+## Rows By Cluster Label
 
-{format_dict_table(rows_by_source_stage, "source_stage", "rows")}
+{format_dict_table(rows_by_cluster_label, "cluster_label", "rows")}
 
-## Paired Rows By Source Stage
+## Rows By Cluster Index
 
-{format_dict_table(paired_rows_by_source_stage, "source_stage", "rows")}
-
-## Rows By Complexity Group
-
-{format_dict_table(rows_by_complexity_group, "source_stage:complexity_group", "rows")}
-
-## Rows By Depth
-
-{format_dict_table(rows_by_depth, "source_stage:depth", "rows")}
+{format_dict_table(rows_by_cluster_index, "cluster_index", "rows")}
 
 ## Schema
 
@@ -150,13 +128,10 @@ Each record is built from the Personal Query pipeline:
 | `category` | string | Product category. |
 | `uuid` | string | User identifier. |
 | `asin` | string | Amazon product identifier. |
-| `complexity_group` | string | Syntax-depth group: `low`, `medium`, or `high`. |
-| `depth` | integer | Target syntax depth used during query construction. |
-| `correct_query` | string | Correct query text used for evaluation. |
+| `cluster_label` | string | Query-cluster label such as `cluster_0`. |
+| `cluster_index` | integer | Query-cluster index aligned with the cluster label. |
+| `correct_query` | string | Clean query text used for evaluation. |
 | `attrs_used` | object | Product attributes used to generate the query. |
-| `has_error_query` | boolean | Whether a Stage 09 writing-typo query is available. |
-| `error_query` | string or null | Writing-typo query from Stage 09. |
-| `injected_errors` | list | Injected error metadata with fixed field `target_token_depth`. |
 
 ## Loading
 
@@ -164,16 +139,15 @@ Each record is built from the Personal Query pipeline:
 from datasets import load_dataset
 
 full = load_dataset("{namespace}/{target.repo_name}", name="full", split="train")
-paired = load_dataset("{namespace}/{target.repo_name}", name="paired", split="train")
 ```
 
 ## Intended Use
 
-This dataset is intended for research on personalized product search, query generation, error query robustness, and retrieval evaluation.
+This dataset is intended for research on personalized product search, clustered query style analysis, query generation, and retrieval evaluation.
 
 ## Data Notes
 
-The queries are synthetic outputs generated from user/product signals in the local Personal Query pipeline. The writing-typo queries are generated by injecting syntax-depth-targeted perturbations. Review license and redistribution requirements for any upstream source data before external reuse.
+The queries are synthetic outputs generated from user/product signals in the local Personal Query pipeline. Review license and redistribution requirements for any upstream source data before external reuse.
 """
 
 
