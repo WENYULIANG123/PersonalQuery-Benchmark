@@ -63,7 +63,11 @@ NOISY_QUERY_FILE = os.path.join(GLOBAL_PATHS['inject_noisy'], CATEGORY_NAME, "no
 QUERY_FILE = CAT_CONFIG['query_file']
 ACL_QUERY_FILE = QUERY_FILE
 CCOMP_QUERY_FILE = QUERY_FILE
-SYNTAX_DEPTH_QUERY_FILE = os.path.join(STAGE6_DIR, CATEGORY_NAME, "query_by_syntax_depth.json")
+SYNTAX_DEPTH_QUERY_FILE = os.path.join(
+    STAGE6_DIR,
+    CATEGORY_NAME,
+    "query_by_syntax_depth_vades_lite_sentence_user_distribution_train10_holdout10.json",
+)
 SYNTAX_DEPTH_MODE = "syntax_depth_correct"
 CACHE_DIR = CAT_CONFIG['query_cache_dir']
 BM25_RETRIEVER_CACHE_DIR = CAT_CONFIG['retriever_cache_dir']
@@ -780,10 +784,7 @@ def load_ccomp_queries() -> Tuple[List[Dict], List[Dict]]:
 
 
 def load_syntax_depth_queries() -> List[Dict]:
-    """从 query_by_syntax_depth.json 加载每个用户的 syntax-depth 查询。
-
-    如果 noisy_query.json 中存在同一 (user_id, asin) 的记录，则使用其 original_query 覆盖。
-    """
+    """从最终 query JSON 加载每个用户的 syntax-depth 查询。"""
     if not os.path.exists(SYNTAX_DEPTH_QUERY_FILE):
         raise FileNotFoundError(f"syntax-depth query file not found: {SYNTAX_DEPTH_QUERY_FILE}")
 
@@ -795,8 +796,6 @@ def load_syntax_depth_queries() -> List[Dict]:
 
     queries = []
     seen_user_ids = set()
-    noisy_original_query_map = load_noisy_original_query_map()
-    overridden_count = 0
     for index, item in enumerate(data):
         if not isinstance(item, dict):
             raise TypeError(f"syntax-depth row must be dict at index {index}, got {type(item).__name__}")
@@ -828,12 +827,7 @@ def load_syntax_depth_queries() -> List[Dict]:
         if not syntax_depth_query_text:
             raise ValueError(f"query is empty for user={user_id}, index={index}")
 
-        override_query = noisy_original_query_map.get((user_id, asin))
-        if override_query is not None:
-            query_text = override_query
-            overridden_count += 1
-        else:
-            query_text = syntax_depth_query_text
+        query_text = syntax_depth_query_text
 
         if user_id in seen_user_ids:
             log_with_timestamp(f"⚠️  用户 {user_id} 在 syntax-depth 查询文件中出现多次，缓存会保留所有查询")
@@ -848,10 +842,7 @@ def load_syntax_depth_queries() -> List[Dict]:
             'source': 'syntax_depth',
         })
 
-    log_with_timestamp(
-        f"✓ 从 {SYNTAX_DEPTH_QUERY_FILE} 加载了 {len(queries)} 条 syntax-depth 查询，"
-        f"其中 {overridden_count} 条使用 noisy original_query 覆盖"
-    )
+    log_with_timestamp(f"✓ 从 {SYNTAX_DEPTH_QUERY_FILE} 加载了 {len(queries)} 条 syntax-depth 查询")
     return queries
 
 
@@ -1754,7 +1745,7 @@ def main():
     log_with_timestamp(f"HF_HOME: {os.environ.get('HF_HOME', 'not set')}")
     log_with_timestamp(f"TRANSFORMERS_CACHE: {os.environ.get('TRANSFORMERS_CACHE', 'not set')}")
 
-    log_with_timestamp("📋 使用 query_by_syntax_depth.json 作为数据源，命中 noisy_query.json 时使用 original_query")
+    log_with_timestamp("📋 使用最终 syntax-depth query 文件作为数据源")
     generate_cache_from_syntax_depth_source(
         retriever_names=RETRIEVER_NAMES,
         clear_cache_before=CLEAR_CACHE_BEFORE,

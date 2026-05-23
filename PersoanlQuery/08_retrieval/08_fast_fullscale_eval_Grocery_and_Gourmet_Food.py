@@ -63,7 +63,7 @@ SYNTAX_DEPTH_QUERY_CATEGORY = 'syntax_depth'
 SYNTAX_DEPTH_QUERY_TYPE = 'correct'
 QUERY_TYPES = [SYNTAX_DEPTH_QUERY_TYPE]
 QUERY_CATEGORIES = [SYNTAX_DEPTH_QUERY_CATEGORY]
-SYNTAX_DEPTH_QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Grocery_and_Gourmet_Food/query_by_syntax_depth.json"
+SYNTAX_DEPTH_QUERY_FILE = "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Grocery_and_Gourmet_Food/query_by_syntax_depth_vades_lite_sentence_user_distribution_train10_holdout10.json"
 ACL_QUERIES_FILE = CAT_CONFIG['query_file']
 CCOMP_QUERIES_FILE = CAT_CONFIG['query_file']
 OUTPUT_DIR = CAT_CONFIG['output_dir']
@@ -77,10 +77,9 @@ RETRIEVERS = DENSE_RETRIEVERS + COLBERTV2_RETRIEVERS + SPARSE_RETRIEVERS + ['bm2
 DENSE_SEARCH_BATCH_SIZE = 64
 SPLADE_QUERY_BATCH_SIZE = 128
 
-DEPTH_GROUP_FIELD = 'syntax_depth_group'
+DEPTH_GROUP_FIELD = 'query_group'
 DEPTH_GROUPS = [
-    ('low_complexity', 1, 7, '低复杂度(7及以下)'),
-    ('high_complexity', 8, 14, '高复杂度(8及以上)'),
+    ('all_queries', None, None, '全部查询'),
 ]
 DEPTH_GROUP_ORDER = [name for name, _, _, _ in DEPTH_GROUPS]
 DEPTH_GROUP_DISPLAY = {name: label for name, _, _, label in DEPTH_GROUPS}
@@ -275,10 +274,7 @@ def get_group_display(group) -> str:
 
 
 def depth_to_complexity_group(depth: int) -> str | None:
-    for group_name, low, high, _ in DEPTH_GROUPS:
-        if low <= depth <= high:
-            return group_name
-    return None
+    return 'all_queries'
 
 
 # ============ ACL/CCOMP Paired Analysis ============
@@ -815,7 +811,7 @@ def _find_same_level_pairs(data: list) -> set:
 
 
 def load_user_queries(query_type: str = SYNTAX_DEPTH_QUERY_TYPE, query_category: str = SYNTAX_DEPTH_QUERY_CATEGORY, filter_same_level: bool = False) -> Tuple[Dict[str, List[Dict]], Dict[str, str], List[Tuple[int, int, int]]]:
-    """加载 syntax-depth 查询，并按 actual_depth 映射到复杂度分组。"""
+    """加载最终 syntax-depth 查询，不再按深度做任何筛选或分组。"""
     global GROUP_FIELD, UNIQUE_LEVELS
 
     if query_type != SYNTAX_DEPTH_QUERY_TYPE:
@@ -838,7 +834,6 @@ def load_user_queries(query_type: str = SYNTAX_DEPTH_QUERY_TYPE, query_category:
     user_queries: Dict[str, List[Dict]] = {}
     user_to_group: Dict[str, str] = {}
     all_query_metadata: List[Tuple[int, int, int]] = []
-    excluded_depth_counts = Counter()
     idx = 0
 
     for row_index, item in enumerate(data):
@@ -858,7 +853,7 @@ def load_user_queries(query_type: str = SYNTAX_DEPTH_QUERY_TYPE, query_category:
         if not isinstance(syntax_depth_query, dict):
             raise TypeError(f"syntax_depth_query must be dict for user={user_id}, index={row_index}")
 
-        for field in ('query', 'actual_depth', 'target_depth', 'user_avg_depth', 'word_count'):
+        for field in ('query', 'target_depth', 'user_avg_depth', 'word_count'):
             if field not in syntax_depth_query:
                 raise ValueError(f"syntax_depth_query missing required field '{field}' for user={user_id}, index={row_index}")
 
@@ -873,8 +868,6 @@ def load_user_queries(query_type: str = SYNTAX_DEPTH_QUERY_TYPE, query_category:
         target_depth = syntax_depth_query['target_depth']
         word_count = syntax_depth_query['word_count']
         user_avg_depth = syntax_depth_query['user_avg_depth']
-        if not isinstance(actual_depth, int):
-            raise TypeError(f"actual_depth must be int for user={user_id}, index={row_index}, got {type(actual_depth).__name__}")
         if not isinstance(target_depth, int):
             raise TypeError(f"target_depth must be int for user={user_id}, index={row_index}, got {type(target_depth).__name__}")
         if not isinstance(word_count, int):
@@ -882,19 +875,11 @@ def load_user_queries(query_type: str = SYNTAX_DEPTH_QUERY_TYPE, query_category:
         if not isinstance(user_avg_depth, (int, float)):
             raise TypeError(f"user_avg_depth must be numeric for user={user_id}, index={row_index}, got {type(user_avg_depth).__name__}")
 
-        depth_group = depth_to_complexity_group(actual_depth)
-        if depth_group is None:
-            excluded_depth_counts[actual_depth] += 1
-            continue
+        depth_group = 'all_queries'
 
         if user_id not in user_queries:
             user_queries[user_id] = []
             user_to_group[user_id] = depth_group
-        elif user_to_group[user_id] != depth_group:
-            raise ValueError(
-                f"user {user_id} appears in multiple syntax depth groups: "
-                f"{user_to_group[user_id]} and {depth_group}"
-            )
 
         user_queries[user_id].append({
             'query': query_text,
@@ -910,10 +895,8 @@ def load_user_queries(query_type: str = SYNTAX_DEPTH_QUERY_TYPE, query_category:
         all_query_metadata.append((idx, word_count, actual_depth))
         idx += 1
 
-    if excluded_depth_counts:
-        log(f"  已按实验定义排除分组范围外的树深度: {dict(sorted(excluded_depth_counts.items()))}")
     if not user_queries:
-        raise ValueError("No syntax-depth queries remained after applying depth groups 7及以下, 8及以上")
+        raise ValueError("No syntax-depth queries were loaded")
 
     return user_queries, user_to_group, all_query_metadata
 
@@ -2131,10 +2114,10 @@ def print_summary_table_wide(all_results: List[Dict], query_type: str = 'CORRECT
 
 
 def print_hit10_complexity_table(all_results: List[Dict]):
-    """按树深度复杂度展示 H@10 对比表。"""
+    """按当前查询集合展示 H@10 对比表。"""
     sep_width = 100
     log(f"\n{'='*sep_width}")
-    log("H@10 复杂度对比表")
+    log("H@10 查询集合对比表")
     log(f"{'='*sep_width}")
 
     COL_W = 18
@@ -2157,12 +2140,6 @@ def print_hit10_complexity_table(all_results: List[Dict]):
         overall = result['metrics'].get('H@10', 0.0)
         row += f" {overall:>{COL_W}.4f}"
         mean_abs_diff = 0.0
-        if len(hit10_values) >= 2:
-            adjacent_diffs = [
-                abs(hit10_values[i] - hit10_values[i + 1])
-                for i in range(len(hit10_values) - 1)
-            ]
-            mean_abs_diff = sum(adjacent_diffs) / len(adjacent_diffs)
         row += f" {mean_abs_diff:>{COL_W}.4f}"
         log(row)
 
@@ -2170,69 +2147,7 @@ def print_hit10_complexity_table(all_results: List[Dict]):
 
 
 def print_hit10_exact_depth_table(all_results: List[Dict], depths: Optional[Tuple[int, ...]] = None):
-    """按精确树深度展示 H@10 对比表。
-
-    若未显式传入 depths，则自动使用评估结果中实际出现的全部 syntax_depth。
-    """
-    sep_width = 100
-    log(f"\n{'='*sep_width}")
-    log("H@10 精确深度对比表")
-    log(f"{'='*sep_width}")
-
-    if depths is None:
-        depth_set = set()
-        for result in all_results:
-            for record in result.get('all_query_records', []):
-                depth = record.get('syntax_depth')
-                if not isinstance(depth, int):
-                    raise TypeError(
-                        f"{result.get('retriever', 'unknown')} has invalid syntax_depth record: {depth!r}"
-                    )
-                depth_set.add(depth)
-
-        if not depth_set:
-            raise ValueError("No exact syntax_depth records found for H@10 table")
-        depths = tuple(sorted(depth_set))
-
-    COL_W = 18
-    header = f"{'检索器':<12}"
-    for depth in depths:
-        header += f" {f'深度{depth}':>{COL_W}}"
-    header += f" {'样本数':>{COL_W}}"
-    header += f" {'平均差值':>{COL_W}}"
-    log(header)
-    log("-" * sep_width)
-
-    for result in sorted(all_results, key=lambda item: item['retriever']):
-        retriever = result['retriever']
-        depth_hits = {depth: [] for depth in depths}
-        for record in result.get('all_query_records', []):
-            depth = record.get('syntax_depth')
-            if depth in depth_hits:
-                depth_hits[depth].append(float(record['hit_at10']))
-
-        row = f"{retriever:<12}"
-        hit10_values = []
-        total_count = 0
-        for depth in depths:
-            hits = depth_hits[depth]
-            if not hits:
-                raise ValueError(f"{retriever} has no query records for exact syntax depth {depth}")
-            value = sum(hits) / len(hits)
-            hit10_values.append(value)
-            total_count += len(hits)
-            row += f" {value:>{COL_W}.4f}"
-
-        adjacent_diffs = [
-            abs(hit10_values[i] - hit10_values[i + 1])
-            for i in range(len(hit10_values) - 1)
-        ]
-        mean_abs_diff = sum(adjacent_diffs) / len(adjacent_diffs)
-        row += f" {total_count:>{COL_W}d}"
-        row += f" {mean_abs_diff:>{COL_W}.4f}"
-        log(row)
-
-    log("-" * sep_width)
+    return
 
 
 # ============ 主流程 ============
@@ -2326,10 +2241,9 @@ def main():
     UNIQUE_LEVELS = DEPTH_GROUP_ORDER.copy()
 
     log("=" * 60)
-    log("快速全量评估 - syntax-depth 查询缓存 + 树深度复杂度分组")
+    log("快速全量评估 - 最终 syntax-depth 查询缓存")
     log(f"类别: {CATEGORY_NAME}")
     log(f"查询缓存目录: {os.path.join(QUERY_CACHE_BASE_DIR, 'syntax_depth_correct_query')}")
-    log(f"分组: {', '.join(get_group_display(g) for g in UNIQUE_LEVELS)}")
     log("=" * 60)
 
     if torch.cuda.is_available():
@@ -2353,15 +2267,6 @@ def main():
 
     user_queries, user_to_group, _ = load_user_queries(query_type, query_category)
     log(f"  syntax-depth 用户数: {len(user_queries)}")
-
-    group_dist = Counter()
-    exact_depth_dist = Counter()
-    for user_qs in user_queries.values():
-        for q in user_qs:
-            group_dist[q[GROUP_FIELD]] += 1
-            exact_depth_dist[q['syntax_depth']] += 1
-    log(f"  树深度精确分布: {dict(sorted(exact_depth_dist.items()))}")
-    log(f"  复杂度分组分布: {dict((get_group_display(g), group_dist[g]) for g in UNIQUE_LEVELS)}")
 
     all_word_counts = [q['word_count'] for user_qs in user_queries.values() for q in user_qs]
     if not all_word_counts:
@@ -2436,7 +2341,6 @@ def main():
 
     print_summary_table_wide(query_type_results, f'{CATEGORY_NAME} SYNTAX_DEPTH-CORRECT')
     print_hit10_complexity_table(query_type_results)
-    print_hit10_exact_depth_table(query_type_results)
 
     # 保存结果（处理 tuple key 等不可 JSON 序列化的问题）
     def sanitize_for_json(obj):
@@ -2460,10 +2364,6 @@ def main():
             'query_types': QUERY_TYPES,
             'query_categories': QUERY_CATEGORIES,
             'group_field': GROUP_FIELD,
-            'depth_groups': [
-                {'group': name, 'low': low, 'high': high, 'label': label}
-                for name, low, high, label in DEPTH_GROUPS
-            ],
             'results_by_category_and_type': sanitize_for_json(all_results_by_category_and_type),
             'all_results_combined': sanitize_for_json(all_results_combined),
         }, f, indent=2, default=str)
