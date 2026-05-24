@@ -58,282 +58,319 @@ def summarize_array(values: np.ndarray) -> dict:
     }
 
 
-def feature_matrix(rows: list[dict], feature_names: list[str]) -> np.ndarray:
-    matrix = np.array([[float(row["features"][name]) for name in feature_names] for row in rows], dtype=float)
-    if matrix.shape[0] == 0:
-        raise ValueError("特征矩阵为空")
-    return matrix
-
-
-def choose_pca_dim(X: np.ndarray) -> tuple[int, dict]:
-    scaler = StandardScaler()
-    X_std = scaler.fit_transform(X)
-    pca = PCA(n_components=min(PCA_DIM_MAX, X_std.shape[1]), random_state=RANDOM_STATE)
-    pca.fit(X_std)
-    cumulative = np.cumsum(pca.explained_variance_ratio_)
-    target_dim = None
-    for idx, value in enumerate(cumulative, start=1):
-        if value >= 0.90 and idx >= PCA_DIM_MIN:
-            target_dim = idx
-            break
-    if target_dim is None:
-        target_dim = min(PCA_DIM_MAX, X_std.shape[1])
-    return target_dim, {
-        "explained_variance_ratio": [float(v) for v in pca.explained_variance_ratio_],
-        "cumulative_explained_variance_ratio": [float(v) for v in cumulative],
-        "selected_pca_dim": int(target_dim),
-    }
-
-
-def choose_gmm(X: np.ndarray) -> tuple[GaussianMixture, np.ndarray, dict]:
-    candidates = []
-    for k in GMM_K_RANGE:
-        gmm = GaussianMixture(n_components=k, covariance_type="full", random_state=RANDOM_STATE, n_init=5)
-        labels = gmm.fit_predict(X)
-        if len(np.unique(labels)) != k:
-            raise ValueError(f"GMM 期望 {k} 个簇，实际得到 {len(np.unique(labels))} 个")
-        candidates.append(
+def load_query_rows(query_file: Path) -> list[dict]:
+    rows = load_json(query_file)
+    normalized_rows: list[dict] = []
+    for row in rows:
+        user_id = row.get("user_id")
+        asin = row.get("asin")
+        query_info = row.get("syntax_depth_query")
+        if user_id is None or asin is None or query_info is None:
+            raise ValueError(f"{query_file} 存在缺少 user_id / asin / syntax_depth_query 的记录")
+        query_text = query_info.get("query")
+        if not query_text:
+            raise ValueError(f"{query_file} 记录缺少 query: user_id={user_id}, asin={asin}")
+        normalized_rows.append(
             {
-                "k": k,
-                "gmm": gmm,
-                "labels": labels,
-                "bic": float(gmm.bic(X)),
-                "aic": float(gmm.aic(X)),
-                "silhouette": float(silhouette_score(X, labels)),
+                "original_row": row,
+                "user_id": user_id,
+                "asin": asin,
+                "query_text": query_text,
+                "word_count": int(query_info.get("word_count", len(query_text.split()))),
+                "target_depth": query_info.get("target_depth"),
+                "user_avg_depth": query_info.get("user_avg_depth"),
             }
         )
-    best = min(candidates, key=lambda item: (item["bic"], -item["silhouette"]))
-    summary = {
+    return normalized_rows
+
+
+def extract_feature_matrix(query_rows: list[dict]) -> tuple[list[str], np.ndarray, list[dict]]:
+    log("开始抽取 query 句法特征")
+    nlp = load_spacy_model()
+    feature_names: list[str] | None = None
+    feature_rows: list[dict] = []
+    matrix: list[list[float]] = []
+    for row in query_rows:
+        doc = nlp(row["query_text"])
+        extracted = extract_clause_features_from_doc(doc, row["query_text"])
+        if feature_names is None:
+            feature_names = list(extracted.keys())
+        elif list(extracted.keys()) != feature_names:
+            raise ValueError("句法特征字段顺序不一致")
+        values = [float(extracted[name]) for name in feature_names]
+        feature_row = dict(row)
+        feature_row["features"] = extracted
+        feature_rows.append(feature_row)
+        matrix.append(values)
+    if feature_names is None:
+        raise ValueError("未提取到任何特征")
+    return feature_names, np.asarray(matrix, dtype=np.float64), feature_rows
+
+
+def run_pca_selection(feature_matrix: np.ndarray) -> tuple[np.ndarray, StandardScaler, PCA, dict]:
+    log("开始标准化、PCA 降维并选择维度")
+    scaler = StandardScaler()
+    scaled = scaler.fit_transform(feature_matrix)
+
+    full_pca = PCA(random_state=RANDOM_STATE)
+    full_pca.fit(scaled)
+    cumulative_variance = np.cumsum(full_pca.explained_variance_ratio_)
+
+    selected_dim = PCA_DIM_MAX
+    for dim in range(PCA_DIM_MIN, min(PCA_DIM_MAX, scaled.shape[1]) + 1):
+        if cumulative_variance[dim - 1] >= 0.90:
+            selected_dim = dim
+            break
+
+    pca = PCA(n_components=selected_dim, random_state=RANDOM_STATE)
+    embedding = pca.fit_transform(scaled)
+    pca_summary = {
+        "selected_dim": int(selected_dim),
+        "explained_variance_ratio": [float(v) for v in pca.explained_variance_ratio_],
+        "explained_variance_ratio_sum": float(np.sum(pca.explained_variance_ratio_)),
+    }
+    return embedding, scaler, pca, pca_summary
+
+
+def select_best_gmm(embedding: np.ndarray) -> tuple[np.ndarray, GaussianMixture, dict]:
+    log("开始 GMM 聚类并自动选 K")
+    candidate_rows: list[dict] = []
+    for k in GMM_K_RANGE:
+        gmm = GaussianMixture(
+            n_components=k,
+            covariance_type="full",
+            random_state=RANDOM_STATE,
+            n_init=10,
+        )
+        labels = gmm.fit_predict(embedding)
+        bic = float(gmm.bic(embedding))
+        aic = float(gmm.aic(embedding))
+        silhouette = float(silhouette_score(embedding, labels)) if len(set(labels)) > 1 else float("-inf")
+        candidate_rows.append(
+            {
+                "k": int(k),
+                "bic": bic,
+                "aic": aic,
+                "silhouette": silhouette,
+                "gmm": gmm,
+                "labels": labels,
+            }
+        )
+
+    candidate_rows.sort(key=lambda row: (row["bic"], -row["silhouette"]))
+    best = candidate_rows[0]
+    selection_summary = {
         "selected_k": int(best["k"]),
-        "selection_rule": "min_bic_then_max_silhouette",
+        "criterion": "min_bic_then_max_silhouette",
         "candidates": [
-            {"k": int(item["k"]), "bic": item["bic"], "aic": item["aic"], "silhouette": item["silhouette"]}
-            for item in candidates
+            {
+                "k": int(row["k"]),
+                "bic": float(row["bic"]),
+                "aic": float(row["aic"]),
+                "silhouette": float(row["silhouette"]),
+            }
+            for row in candidate_rows
         ],
     }
-    return best["gmm"], best["labels"], summary
+    return best["labels"], best["gmm"], selection_summary
 
 
-def cluster_name_map(labels: np.ndarray) -> dict[int, str]:
-    valid = sorted(set(labels))
-    counts = {lab: int(np.sum(labels == lab)) for lab in valid}
-    ordered = sorted(valid, key=lambda lab: counts[lab], reverse=True)
-    return {lab: f"cluster_{idx}" for idx, lab in enumerate(ordered)}
+def remap_cluster_labels(labels: np.ndarray) -> tuple[np.ndarray, dict[int, int], dict[str, int]]:
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    label_order = [
+        original for original, _count in sorted(zip(unique_labels, counts, strict=True), key=lambda item: (-item[1], item[0]))
+    ]
+    remap = {int(original): int(new_index) for new_index, original in enumerate(label_order)}
+    remapped = np.asarray([remap[int(label)] for label in labels], dtype=np.int64)
+    cluster_counts = {f"cluster_{new_index}": int(np.sum(remapped == new_index)) for new_index in range(len(label_order))}
+    return remapped, remap, cluster_counts
 
 
-def build_paths(category: str, query_file: Path | None = None) -> dict[str, Path]:
-    clause_dir = REPO_ROOT / "result" / "personal_query" / "12_complexity_analysis_clause_features" / category
-    retrieval_dir = REPO_ROOT / "result" / "personal_query" / "08_retrieval" / category
-    default_query_file = (
-        REPO_ROOT
-        / "result"
-        / "personal_query"
-        / "06_query"
-        / category
-        / "query_by_syntax_depth_vades_lite_sentence_user_distribution_train10_holdout10.json"
+def build_feature_summaries(feature_names: list[str], feature_matrix: np.ndarray, cluster_labels: np.ndarray) -> dict[str, dict]:
+    summary: dict[str, dict] = {}
+    for cluster_index in sorted(set(cluster_labels.tolist())):
+        cluster_mask = cluster_labels == cluster_index
+        cluster_matrix = feature_matrix[cluster_mask]
+        feature_summary = {}
+        for feature_index, feature_name in enumerate(feature_names):
+            feature_summary[feature_name] = summarize_array(cluster_matrix[:, feature_index])
+        summary[f"cluster_{cluster_index}"] = feature_summary
+    return summary
+
+
+def attach_retrieval_results(category: str, user_rows: list[dict], cluster_labels: np.ndarray) -> None:
+    retrieval_summary_file = (
+        REPO_ROOT / "result" / "personal_query" / "08_retrieval" / category / "retrieval_syntax_depth_summary.json"
     )
-    selected_query_file = query_file if query_file is not None else default_query_file
-    return {
-        "query_file": selected_query_file,
-        "retrieval_summary_file": retrieval_dir / "retrieval_syntax_depth_summary.json",
-        "feature_file": clause_dir / "strict5550_query_gmm_features.jsonl",
-        "summary_file": clause_dir / "strict5550_query_gmm_summary.json",
-        "user_file": clause_dir / "strict5550_query_gmm_user_profiles.jsonl",
-        "retrieval_out_file": retrieval_dir / "retrieval_by_strict5550_query_gmm_summary.json",
+    if not retrieval_summary_file.exists():
+        raise FileNotFoundError(f"缺少 retrieval summary: {retrieval_summary_file}")
+
+    retrieval_summary = json.loads(retrieval_summary_file.read_text(encoding="utf-8"))
+    retrieval_rows = retrieval_summary.get("retriever_results")
+    if retrieval_rows is None:
+        retrieval_rows = retrieval_summary.get("retriever_group_results")
+    if retrieval_rows is None:
+        retrieval_rows = retrieval_summary.get("all_results_combined")
+    if retrieval_rows is None:
+        raise ValueError(f"{retrieval_summary_file} 缺少 retriever_results / retriever_group_results")
+
+    cluster_by_user = {row["user_id"]: int(cluster_labels[idx]) for idx, row in enumerate(user_rows)}
+    grouped_summary = {
+        "category": category,
+        "method": "gmm_query_syntax_feature_clustering",
+        "selected_k": int(len(set(cluster_labels.tolist()))),
+        "retriever_group_results": [],
     }
 
+    for retriever_row in retrieval_rows:
+        retriever_name = retriever_row.get("retriever")
+        records = retriever_row.get("records")
+        if records is None:
+            records = retriever_row.get("all_query_records")
+        if retriever_name is None or records is None:
+            raise ValueError(f"{retrieval_summary_file} 检索器结果缺少 retriever 或 records")
+        grouped_records: dict[int, list[dict]] = defaultdict(list)
+        for record in records:
+            user_id = record.get("user_id")
+            if user_id is None:
+                raise ValueError(f"{retrieval_summary_file} record 缺少 user_id")
+            cluster_index = cluster_by_user.get(user_id)
+            if cluster_index is None:
+                raise KeyError(user_id)
+            grouped_records[cluster_index].append(record)
 
-def enrich_query_rows_with_clusters(query_rows: list[dict], cluster_labels: list[str], cluster_indices: list[int]) -> list[dict]:
-    if len(query_rows) != len(cluster_labels) or len(query_rows) != len(cluster_indices):
-        raise ValueError("query rows 与 cluster labels 数量不一致")
-    enriched_rows = []
-    for row, cluster_label, cluster_index in zip(query_rows, cluster_labels, cluster_indices, strict=True):
-        enriched = json.loads(json.dumps(row, ensure_ascii=False))
-        enriched["query_cluster_label"] = cluster_label
-        enriched["query_cluster_index"] = cluster_index
-        enriched_rows.append(enriched)
-    return enriched_rows
+        cluster_hit_at10 = {}
+        for cluster_index, cluster_records in grouped_records.items():
+            hit_values = [float(record["hit_at10"]) for record in cluster_records]
+            cluster_hit_at10[f"cluster_{cluster_index}"] = float(np.mean(hit_values))
+
+        hit_values = np.asarray(list(cluster_hit_at10.values()), dtype=np.float64)
+        kruskal_stat, kruskal_pvalue = kruskal(
+            *[
+                np.asarray([float(record["hit_at10"]) for record in grouped_records[cluster_index]], dtype=np.float64)
+                for cluster_index in sorted(grouped_records.keys())
+            ]
+        )
+        grouped_summary["retriever_group_results"].append(
+            {
+                "retriever": retriever_name,
+                "cluster_hit_at10": cluster_hit_at10,
+                "hit_at10_gap": float(np.max(hit_values) - np.min(hit_values)),
+                "hit_at10_kruskal_statistic": float(kruskal_stat),
+                "hit_at10_kruskal_pvalue": float(kruskal_pvalue),
+            }
+        )
+
+    output_file = (
+        REPO_ROOT / "result" / "personal_query" / "08_retrieval" / category / "retrieval_by_strict5550_query_gmm_summary.json"
+    )
+    output_file.write_text(json.dumps(grouped_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    log(f"已写入 retrieval cluster summary: {output_file}")
 
 
 def run_query_gmm_pipeline(
-    category: str,
+    category: str = DEFAULT_CATEGORY,
     query_file: Path | None = None,
     write_back_to_query_file: bool = False,
     attach_retrieval: bool = True,
 ) -> dict:
-    paths = build_paths(category, query_file=query_file)
-    query_path = paths["query_file"]
-    log(f"开始读取 query 文件: {query_path}")
-    query_rows = load_json(query_path)
-    nlp = load_spacy_model()
-
-    log("开始抽取 query 句法特征")
-    feature_rows = []
-    feature_names = None
-    for idx, row in enumerate(query_rows, start=1):
-        user_id = row["user_id"]
-        asin = row["asin"]
-        query_info = row["syntax_depth_query"]
-        query_text = query_info["query"]
-        doc = nlp(query_text)
-        extracted = extract_clause_features_from_doc(doc, query_text)
-        features = extracted["features"]
-        if feature_names is None:
-            feature_names = list(features.keys())
-        elif list(features.keys()) != feature_names:
-            raise ValueError(f"第 {idx} 条 query 特征名不一致")
-        feature_rows.append(
-            {
-                "user_id": user_id,
-                "asin": asin,
-                "query": query_text,
-                "target_depth": int(query_info["target_depth"]),
-                "actual_depth": query_info["actual_depth"],
-                "user_avg_depth": float(query_info["user_avg_depth"]),
-                "word_count": int(extracted["word_count"]),
-                "features": features,
-            }
+    clause_dir = REPO_ROOT / "result" / "personal_query" / "12_complexity_analysis_clause_features" / category
+    clause_dir.mkdir(parents=True, exist_ok=True)
+    if query_file is None:
+        query_file = (
+            REPO_ROOT
+            / "result"
+            / "personal_query"
+            / "06_query"
+            / category
+            / "query_by_syntax_depth_vades_lite_sentence_user_distribution_train10_holdout10.json"
         )
-    if feature_names is None:
-        raise ValueError("没有抽取到 query 特征")
+    if not query_file.exists():
+        raise FileNotFoundError(f"缺少 query 文件: {query_file}")
 
-    paths["feature_file"].parent.mkdir(parents=True, exist_ok=True)
-    write_jsonl(paths["feature_file"], feature_rows)
+    feature_file = clause_dir / "strict5550_query_gmm_features.jsonl"
+    user_file = clause_dir / "strict5550_query_gmm_user_profiles.jsonl"
+    summary_file = clause_dir / "strict5550_query_gmm_summary.json"
 
-    X_raw = feature_matrix(feature_rows, feature_names)
-    log("开始标准化、PCA 降维并选择维度")
-    scaler = StandardScaler()
-    X_std = scaler.fit_transform(X_raw)
-    pca_dim, pca_summary = choose_pca_dim(X_raw)
-    pca = PCA(n_components=pca_dim, random_state=RANDOM_STATE)
-    X = pca.fit_transform(X_std)
-    pca_summary["selected_pca_dim"] = int(pca_dim)
-    pca_summary["selected_pca_explained_variance_ratio_sum"] = float(np.sum(pca.explained_variance_ratio_))
-    pca_summary["selected_pca_explained_variance_ratio"] = [float(v) for v in pca.explained_variance_ratio_]
+    log(f"开始读取 query 文件: {query_file}")
+    query_rows = load_query_rows(query_file)
+    feature_names, feature_matrix, feature_rows = extract_feature_matrix(query_rows)
+    embedding, _scaler, _pca, pca_summary = run_pca_selection(feature_matrix)
+    raw_labels, _gmm, selection_summary = select_best_gmm(embedding)
+    cluster_labels, _remap, cluster_counts = remap_cluster_labels(raw_labels)
+    cluster_feature_summaries = build_feature_summaries(feature_names, feature_matrix, cluster_labels)
 
-    log("开始 GMM 聚类并自动选 K")
-    _, labels, selection = choose_gmm(X)
-    mapping = cluster_name_map(labels)
-
-    cluster_counts = {mapping[lab]: int(np.sum(labels == lab)) for lab in sorted(set(labels))}
-    cluster_metric_summary = {}
-    for lab in sorted(set(labels)):
-        rows_in_cluster = [r for r, lb in zip(feature_rows, labels, strict=True) if lb == lab]
-        feature_means = {name: float(np.mean([float(r["features"][name]) for r in rows_in_cluster])) for name in feature_names}
-        top_features = sorted(feature_means.items(), key=lambda item: abs(item[1]), reverse=True)[:5]
-        cluster_metric_summary[mapping[lab]] = {
-            "feature_means": feature_means,
-            "top_features_by_abs_mean": [{"feature": name, "mean": value} for name, value in top_features],
-        }
-
-    cluster_labels = [mapping[int(label)] for label in labels]
-    cluster_indices = [int(label.split("_")[1]) for label in cluster_labels]
-    user_rows = []
-    for row, label, cluster_index, pca_score in zip(feature_rows, cluster_labels, cluster_indices, X, strict=True):
-        user_rows.append(
+    feature_output_rows = []
+    user_output_rows = []
+    for idx, row in enumerate(feature_rows):
+        cluster_index = int(cluster_labels[idx])
+        cluster_label = f"cluster_{cluster_index}"
+        feature_output_rows.append(
             {
                 "user_id": row["user_id"],
                 "asin": row["asin"],
-                "cluster_label": label,
+                "cluster_label": cluster_label,
                 "cluster_index": cluster_index,
-                "query_text": row["query"],
-                "word_count": int(row["word_count"]),
-                "target_depth": int(row["target_depth"]),
-                "user_avg_depth": float(row["user_avg_depth"]),
-                "pca_embedding": [float(v) for v in pca_score],
+                "query_text": row["query_text"],
+                "word_count": row["word_count"],
+                "target_depth": row["target_depth"],
+                "user_avg_depth": row["user_avg_depth"],
+                "features": row["features"],
+                "pca_embedding": embedding[idx].tolist(),
             }
         )
-    write_jsonl(paths["user_file"], user_rows)
+        user_output_rows.append(
+            {
+                "user_id": row["user_id"],
+                "asin": row["asin"],
+                "cluster_label": cluster_label,
+                "cluster_index": cluster_index,
+                "query_text": row["query_text"],
+                "word_count": row["word_count"],
+                "target_depth": row["target_depth"],
+                "user_avg_depth": row["user_avg_depth"],
+                "pca_embedding": embedding[idx].tolist(),
+            }
+        )
+        if write_back_to_query_file:
+            row["original_row"]["query_cluster_label"] = cluster_label
+            row["original_row"]["query_cluster_index"] = cluster_index
+
+    write_jsonl(feature_file, feature_output_rows)
+    write_jsonl(user_file, user_output_rows)
 
     if write_back_to_query_file:
-        log(f"开始回写 cluster 标签到 query 文件: {query_path}")
-        enriched_query_rows = enrich_query_rows_with_clusters(query_rows, cluster_labels, cluster_indices)
-        query_path.write_text(json.dumps(enriched_query_rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        query_file.write_text(
+            json.dumps([row["original_row"] for row in query_rows], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     summary = {
         "category": category,
         "method": "gmm_query_syntax_feature_clustering",
-        "query_file": str(query_path),
-        "feature_file": str(paths["feature_file"]),
-        "user_file": str(paths["user_file"]),
-        "retrieval_summary_file": str(paths["retrieval_summary_file"]),
+        "query_file": str(query_file),
+        "feature_file": str(feature_file),
+        "user_file": str(user_file),
+        "retrieval_summary_file": str(
+            REPO_ROOT / "result" / "personal_query" / "08_retrieval" / category / "retrieval_by_strict5550_query_gmm_summary.json"
+        ),
         "feature_names": feature_names,
         "pca": pca_summary,
-        "cluster_selection": selection,
+        "cluster_selection": selection_summary,
         "cluster_counts": cluster_counts,
-        "cluster_feature_summaries": cluster_metric_summary,
+        "cluster_feature_summaries": cluster_feature_summaries,
         "write_back_to_query_file": bool(write_back_to_query_file),
     }
-    paths["summary_file"].write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    summary_file.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    log(f"已写入 query GMM summary: {summary_file}")
 
     if attach_retrieval:
-        retrieval_summary = json.loads(paths["retrieval_summary_file"].read_text(encoding="utf-8"))
-        results_key = "('syntax_depth', 'correct')"
-        retriever_results = retrieval_summary["results_by_category_and_type"][results_key]
-        metric_names = ["p_at1", "p_at3", "p_at5", "p_at10", "n_at10", "mrr_at10", "hit_at10"]
-        group_by_user = {row["user_id"]: row["cluster_label"] for row in user_rows}
-        retriever_group_rows = []
-        for retriever_result in retriever_results:
-            retriever_name = retriever_result["retriever"]
-            records = retriever_result.get("all_query_records")
-            if not isinstance(records, list) or len(records) == 0:
-                raise ValueError(f"retriever {retriever_name} 缺少 all_query_records")
-            grouped_records: dict[str, list[dict]] = defaultdict(list)
-            for record in records:
-                grouped_records[group_by_user[record["user_id"]]].append(record)
-            group_names = sorted(grouped_records.keys())
-            hit_groups = [np.array([float(row["hit_at10"]) for row in grouped_records[label]], dtype=float) for label in group_names]
-            hit_kruskal = kruskal(*hit_groups)
-            group_mean_metrics = {
-                label: {
-                    metric_name: float(np.mean([float(row[metric_name]) for row in grouped_records[label]]))
-                    for metric_name in metric_names
-                }
-                for label in group_names
-            }
-            retriever_group_rows.append(
-                {
-                    "retriever": retriever_name,
-                    "num_records": len(records),
-                    "group_counts": {label: len(grouped_records[label]) for label in group_names},
-                    "group_mean_metrics": group_mean_metrics,
-                    "hit_at10_gap": float(max(group_mean_metrics[label]["hit_at10"] for label in group_names) - min(group_mean_metrics[label]["hit_at10"] for label in group_names)),
-                    "hit_at10_kruskal_pvalue": float(hit_kruskal.pvalue),
-                    "hit_at10_kruskal_statistic": float(hit_kruskal.statistic),
-                }
-            )
-        retrieval_out = {
-            "category": category,
-            "method": "gmm_query_syntax_feature_clustering",
-            "query_file": str(query_path),
-            "source_retrieval_summary_file": str(paths["retrieval_summary_file"]),
-            "selected_k": selection["selected_k"],
-            "cluster_counts": cluster_counts,
-            "retriever_group_results": sorted(retriever_group_rows, key=lambda row: row["hit_at10_gap"], reverse=True),
-        }
-        paths["retrieval_out_file"].write_text(json.dumps(retrieval_out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    else:
-        retrieval_out = None
-
-    return {
-        "summary_file": str(paths["summary_file"]),
-        "feature_file": str(paths["feature_file"]),
-        "user_file": str(paths["user_file"]),
-        "retrieval_out_file": None if retrieval_out is None else str(paths["retrieval_out_file"]),
-        "query_file": str(query_path),
-        "selected_k": selection["selected_k"],
-        "cluster_counts": cluster_counts,
-    }
+        attach_retrieval_results(category, feature_rows, cluster_labels)
+    return summary
 
 
-def main() -> None:
-    result = run_query_gmm_pipeline(
-        category=DEFAULT_CATEGORY,
-        query_file=None,
-        write_back_to_query_file=False,
-        attach_retrieval=True,
-    )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+def main():
+    run_query_gmm_pipeline()
 
 
 if __name__ == "__main__":

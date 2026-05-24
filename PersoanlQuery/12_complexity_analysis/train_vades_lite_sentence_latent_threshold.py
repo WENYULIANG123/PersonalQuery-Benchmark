@@ -49,6 +49,8 @@ STYLE_RECON_WEIGHT = 0.8
 SENT_KL_WEIGHT = 0.05
 USER_PRIOR_KL_WEIGHT = 0.02
 ABS_THRESHOLD_QUANTILE = float(os.environ.get("VADES_ABS_THRESHOLD_QUANTILE", "0.95"))
+MAX_USERS_OVERRIDE = os.environ.get("VADES_MAX_USERS")
+SKIP_POST_CLUSTERING = os.environ.get("VADES_SKIP_POST_CLUSTERING", "0") == "1"
 
 SUMMARY_FILE = INPUT_DIR / f"{OUTPUT_TAG}_summary.json"
 DETAIL_FILE = INPUT_DIR / f"{OUTPUT_TAG}_epoch_details.jsonl"
@@ -67,43 +69,26 @@ def log(message: str) -> None:
 def set_random_seed(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
-def require_cuda_device() -> torch.device:
-    if not torch.cuda.is_available():
-        raise RuntimeError("该脚本要求 CUDA GPU 环境，请使用 sbatch_wrapper --gpu 提交")
-    return torch.device("cuda")
+def infer_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
 
 
-def normalize_review_text(text: str) -> str:
-    text = re.sub(r"<br\s*/?>", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+", " ", text)
-    text = text.strip()
-    if not text:
-        raise ValueError("评论文本归一化后为空")
-    return text
+def load_json(path: Path):
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def sentence_has_non_root_dependency(doc_like) -> bool:
-    tokens = [token for token in doc_like if not token.is_space]
-    if not tokens:
-        return False
-    return any(token.head != token for token in tokens)
-
-
-def load_jsonl(path: Path) -> list[dict]:
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    if not rows:
-        raise ValueError(f"{path} 为空")
-    return rows
-
-
-def load_json_list(path: Path) -> list[dict]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, list) or not data:
-        raise ValueError(f"{path} 必须是非空列表")
-    return data
+def write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False))
+            handle.write("\n")
 
 
 def summarize_array(values: np.ndarray) -> dict:
@@ -121,301 +106,23 @@ def summarize_array(values: np.ndarray) -> dict:
     }
 
 
-def feature_names_from_rows(rows: list[dict]) -> list[str]:
-    names = list(rows[0]["features"].keys())
-    if not names:
-        raise ValueError("特征名为空")
-    for idx, row in enumerate(rows):
-        if list(row["features"].keys()) != names:
-            raise ValueError(f"第 {idx} 行特征名不一致")
-    return names
+def diagonal_gaussian_kl(mu_q: torch.Tensor, logvar_q: torch.Tensor, mu_p: torch.Tensor, logvar_p: torch.Tensor) -> torch.Tensor:
+    var_q = torch.exp(logvar_q)
+    var_p = torch.exp(logvar_p)
+    return 0.5 * (
+        logvar_p
+        - logvar_q
+        + (var_q + (mu_q - mu_p) ** 2) / var_p
+        - 1.0
+    ).sum(dim=-1)
 
 
-def feature_vector(row: dict, feature_names: list[str]) -> np.ndarray:
-    return np.array([float(row["features"][name]) for name in feature_names], dtype=np.float32)
-
-
-def build_candidate_feature_rows_from_raw_query_file() -> list[dict]:
-    if not RAW_CANDIDATE_QUERY_FILE.exists():
-        raise FileNotFoundError(f"缺少原始 10 候选 query 文件: {RAW_CANDIDATE_QUERY_FILE}")
-
-    raw_rows = load_json_list(RAW_CANDIDATE_QUERY_FILE)
-    nlp = load_spacy_model()
-    candidate_feature_rows = []
-    expected_feature_names = None
-
-    for row_index, raw_row in enumerate(raw_rows, start=1):
-        user_id = raw_row.get("user_id")
-        asin = raw_row.get("asin")
-        candidates = raw_row.get("syntax_depth_queries")
-        if not isinstance(user_id, str) or not user_id:
-            raise ValueError(f"第 {row_index} 条原始候选缺少合法 user_id")
-        if not isinstance(asin, str) or not asin:
-            raise ValueError(f"第 {row_index} 条原始候选缺少合法 asin")
-        if not isinstance(candidates, list) or len(candidates) != 10:
-            raise ValueError(f"user {user_id} 的 syntax_depth_queries 数量不是 10")
-
-        query_texts = []
-        for candidate_index, candidate in enumerate(candidates, start=1):
-            query_text = candidate.get("query")
-            if not isinstance(query_text, str) or not query_text.strip():
-                raise ValueError(f"user {user_id} candidate {candidate_index} 缺少合法 query 文本")
-            query_texts.append(query_text.strip())
-
-        for candidate_index, (candidate, doc) in enumerate(zip(candidates, nlp.pipe(query_texts, batch_size=16), strict=True), start=1):
-            extracted = extract_clause_features_from_doc(doc, query_texts[candidate_index - 1])
-            features = extracted["features"]
-            feature_names = list(features.keys())
-            if expected_feature_names is None:
-                expected_feature_names = feature_names
-            elif feature_names != expected_feature_names:
-                raise ValueError(f"user {user_id} candidate {candidate_index} 的特征名与前文不一致")
-
-            target_depth = candidate.get("target_depth")
-            user_avg_depth = candidate.get("user_avg_depth")
-            attrs_used = candidate.get("attrs_used")
-            if not isinstance(target_depth, int):
-                raise ValueError(f"user {user_id} candidate {candidate_index} 缺少合法 target_depth")
-            if not isinstance(user_avg_depth, (int, float)):
-                raise ValueError(f"user {user_id} candidate {candidate_index} 缺少合法 user_avg_depth")
-            if not isinstance(attrs_used, dict):
-                raise ValueError(f"user {user_id} candidate {candidate_index} 缺少合法 attrs_used")
-
-            candidate_feature_rows.append({
-                "user_id": user_id,
-                "asin": asin,
-                "candidate_index": candidate_index,
-                "query": query_texts[candidate_index - 1],
-                "word_count": int(extracted["word_count"]),
-                "target_depth": int(target_depth),
-                "user_avg_depth": float(user_avg_depth),
-                "attrs_used": attrs_used,
-                "features": features,
-            })
-
-    if expected_feature_names is None:
-        raise ValueError("未能从原始 10 候选 query 文件中抽取任何特征")
-    return candidate_feature_rows
-
-
-def ensure_candidate_feature_file_exists() -> None:
-    if CANDIDATE_QUERY_FILE.exists():
-        return
-
-    log(f"未发现候选特征文件，开始从原始 10 候选 query 生成: {RAW_CANDIDATE_QUERY_FILE}")
-    candidate_feature_rows = build_candidate_feature_rows_from_raw_query_file()
-    CANDIDATE_QUERY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with CANDIDATE_QUERY_FILE.open("w", encoding="utf-8") as handle:
-        for row in candidate_feature_rows:
-            handle.write(json.dumps(row, ensure_ascii=False))
-            handle.write("\n")
-    log(f"候选特征文件已写入: {CANDIDATE_QUERY_FILE}")
-
-
-def load_candidate_rows() -> tuple[list[str], list[dict], list[str]]:
-    ensure_candidate_feature_file_exists()
-    candidate_rows = load_jsonl(CANDIDATE_QUERY_FILE)
-    feature_names = feature_names_from_rows(candidate_rows)
-    counts = defaultdict(int)
-    for row in candidate_rows:
-        counts[row["user_id"]] += 1
-    bad_users = [user_id for user_id, count in counts.items() if count != 10]
-    if bad_users:
-        raise ValueError(f"存在候选 query 数量不是 10 的用户: {bad_users[:5]}")
-    return sorted(counts.keys()), candidate_rows, feature_names
-
-
-def validate_sentence_rows(sentence_rows: list[dict], user_ids: list[str], feature_names: list[str]) -> None:
-    if not sentence_rows:
-        raise ValueError("句子缓存为空")
-    if feature_names_from_rows(sentence_rows) != feature_names:
-        raise ValueError("句子缓存特征名与候选 query 特征名不一致")
-
-    rows_by_user: dict[str, list[dict]] = defaultdict(list)
-    for row in sentence_rows:
-        user_id = row.get("user_id")
-        if not isinstance(user_id, str) or not user_id:
-            raise ValueError("句子缓存存在非法 user_id")
-        rows_by_user[user_id].append(row)
-
-    expected_users = set(user_ids)
-    cached_users = set(rows_by_user.keys())
-    if cached_users != expected_users:
-        missing_users = sorted(expected_users - cached_users)
-        extra_users = sorted(cached_users - expected_users)
-        raise ValueError(f"句子缓存用户集合不匹配: missing={missing_users[:5]}, extra={extra_users[:5]}")
-
-    for user_id in user_ids:
-        user_rows = rows_by_user[user_id]
-        if len(user_rows) != TOTAL_SENTENCES_PER_USER:
-            raise ValueError(f"user {user_id} 的句子数不是 {TOTAL_SENTENCES_PER_USER}")
-
-
-def extract_first_twenty_sentences_for_users(user_ids: list[str]) -> tuple[list[dict], list[dict]]:
-    source = json.loads(REVIEW_SOURCE_FILE.read_text(encoding="utf-8"))
-    users = source.get("users")
-    if not isinstance(users, list):
-        raise TypeError("stage1_filtered_users_reviews.json 顶层 users 必须是列表")
-
-    user_entries = {}
-    for user_entry in users:
-        user_id = user_entry.get("user_id")
-        if user_id in user_ids:
-            user_entries[user_id] = user_entry
-    missing_users = [user_id for user_id in user_ids if user_id not in user_entries]
-    if missing_users:
-        raise ValueError(f"源评论文件缺少用户: {missing_users[:5]}")
-
-    nlp = load_spacy_model()
-    sentence_rows = []
-    excluded_rows = []
-    total_users = len(user_ids)
-    for user_offset, user_id in enumerate(user_ids, start=1):
-        user_entry = user_entries[user_id]
-        review_texts = []
-        results = user_entry.get("results", [])
-        if not isinstance(results, list):
-            raise TypeError("user.results 必须是列表")
-        for product in results:
-            target_reviews = product.get("target_reviews", [])
-            if not isinstance(target_reviews, list):
-                raise TypeError("product.target_reviews 必须是列表")
-            for review in target_reviews:
-                if not isinstance(review, str):
-                    raise TypeError("target_reviews 中存在非字符串评论")
-                if not review.strip():
-                    continue
-                review_texts.append(normalize_review_text(review))
-        if not review_texts:
-            raise ValueError(f"user {user_id} 没有可用评论文本")
-
-        collected = []
-        for review_index, review_doc in enumerate(nlp.pipe(review_texts, batch_size=16)):
-            for sentence_index, sent in enumerate(review_doc.sents):
-                sentence_text = sent.text.strip()
-                if not sentence_text:
-                    continue
-                if not sentence_has_non_root_dependency(sent):
-                    continue
-                extracted = extract_clause_features_from_doc(sent, sentence_text)
-                collected.append({
-                    "user_id": user_id,
-                    "review_index": review_index,
-                    "sentence_index": sentence_index,
-                    "sentence_text": sentence_text,
-                    "word_count": extracted["word_count"],
-                    "features": extracted["features"],
-                })
-                if len(collected) == TOTAL_SENTENCES_PER_USER:
-                    break
-            if len(collected) == TOTAL_SENTENCES_PER_USER:
-                break
-        if len(collected) < TOTAL_SENTENCES_PER_USER:
-            excluded_rows.append({
-                "user_id": user_id,
-                "usable_sentence_count": len(collected),
-            })
-            log(
-                f"用户 {user_offset}/{total_users}: {user_id}, 句子数不足 {TOTAL_SENTENCES_PER_USER}, "
-                f"实际={len(collected)}，从本方法中过滤"
-            )
-            continue
-
-        sentence_rows.extend(collected)
-        log(f"已完成用户 {user_offset}/{total_users}: {user_id}, 句子数={len(collected)}")
-
-    return sentence_rows, excluded_rows
-
-
-def load_or_extract_sentence_rows(user_ids: list[str], feature_names: list[str]) -> tuple[list[dict], list[dict]]:
-    if SENTENCE_FILE.exists() and EXCLUDED_USER_FILE.exists():
-        log(f"发现句子缓存，开始校验并复用: {SENTENCE_FILE}")
-        sentence_rows = load_jsonl(SENTENCE_FILE)
-        validate_sentence_rows(sentence_rows, user_ids, feature_names)
-        excluded_rows = load_jsonl(EXCLUDED_USER_FILE)
-        excluded_user_ids = {row["user_id"] for row in excluded_rows}
-        cached_user_ids = {row["user_id"] for row in sentence_rows}
-        if cached_user_ids & excluded_user_ids:
-            raise ValueError("句子缓存用户与排除用户有重叠")
-        if cached_user_ids | excluded_user_ids != set(user_ids):
-            raise ValueError("句子缓存与排除用户集合并后不等于原始候选用户集合")
-        log(f"句子缓存校验通过，直接复用: {len(sentence_rows)} 条；排除用户数={len(excluded_rows)}")
-        return sentence_rows, excluded_rows
-
-    log(f"未发现 {TOTAL_SENTENCES_PER_USER} 句缓存，开始抽取每个用户前 {TOTAL_SENTENCES_PER_USER} 个可用评论句子")
-    sentence_rows, excluded_rows = extract_first_twenty_sentences_for_users(user_ids)
-    cached_user_ids = sorted({row["user_id"] for row in sentence_rows})
-    validate_sentence_rows(sentence_rows, cached_user_ids, feature_names)
-    SENTENCE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with SENTENCE_FILE.open("w", encoding="utf-8") as handle:
-        for row in sentence_rows:
-            handle.write(json.dumps(row, ensure_ascii=False))
-            handle.write("\n")
-    with EXCLUDED_USER_FILE.open("w", encoding="utf-8") as handle:
-        for row in excluded_rows:
-            handle.write(json.dumps(row, ensure_ascii=False))
-            handle.write("\n")
-    log(f"句子缓存已写入: {SENTENCE_FILE}")
-    log(f"排除用户文件已写入: {EXCLUDED_USER_FILE}")
-    return sentence_rows, excluded_rows
-
-
-def build_datasets(
-    sentence_rows: list[dict],
-    excluded_rows: list[dict],
-    candidate_rows: list[dict],
-    feature_names: list[str],
-) -> tuple[list[str], dict]:
-    all_rows_by_user: dict[str, list[dict]] = defaultdict(list)
-    for row in sentence_rows:
-        all_rows_by_user[row["user_id"]].append(row)
-
-    train_by_user: dict[str, list[np.ndarray]] = defaultdict(list)
-    train_meta_by_user: dict[str, list[dict]] = defaultdict(list)
-    holdout_by_user: dict[str, list[np.ndarray]] = defaultdict(list)
-    holdout_meta_by_user: dict[str, list[dict]] = defaultdict(list)
-    for user_id, rows in all_rows_by_user.items():
-        if len(rows) != TOTAL_SENTENCES_PER_USER:
-            raise ValueError(f"user {user_id} 句子数不是 {TOTAL_SENTENCES_PER_USER}")
-        train_rows = rows[:TRAIN_SENTENCES_PER_USER]
-        holdout_rows = rows[TRAIN_SENTENCES_PER_USER:]
-        if len(train_rows) != TRAIN_SENTENCES_PER_USER or len(holdout_rows) != HOLDOUT_SENTENCES_PER_USER:
-            raise ValueError(f"user {user_id} 的 train/holdout 句子切分不正确")
-        for row in train_rows:
-            train_by_user[user_id].append(feature_vector(row, feature_names))
-            train_meta_by_user[user_id].append(row)
-        for row in holdout_rows:
-            holdout_by_user[user_id].append(feature_vector(row, feature_names))
-            holdout_meta_by_user[user_id].append(row)
-
-    candidates_by_user: dict[str, list[dict]] = defaultdict(list)
-    for row in candidate_rows:
-        row_copy = dict(row)
-        row_copy["feature_vector"] = feature_vector(row_copy, feature_names)
-        candidates_by_user[row["user_id"]].append(row_copy)
-
-    user_ids = sorted(train_by_user.keys())
-    for user_id in user_ids:
-        if len(train_by_user[user_id]) != TRAIN_SENTENCES_PER_USER:
-            raise ValueError(f"user {user_id} 训练句子数不是 {TRAIN_SENTENCES_PER_USER}")
-        if len(holdout_by_user[user_id]) != HOLDOUT_SENTENCES_PER_USER:
-            raise ValueError(f"user {user_id} 校准句子数不是 {HOLDOUT_SENTENCES_PER_USER}")
-        if user_id not in candidates_by_user or len(candidates_by_user[user_id]) != 10:
-            raise ValueError(f"user {user_id} 候选 query 数量不是 10")
-
-    return user_ids, {
-        "original_candidate_user_count": len(user_ids) + len(excluded_rows),
-        "excluded_rows": excluded_rows,
-        "train_by_user": train_by_user,
-        "train_meta_by_user": train_meta_by_user,
-        "holdout_by_user": holdout_by_user,
-        "holdout_meta_by_user": holdout_meta_by_user,
-        "candidates_by_user": candidates_by_user,
-    }
+def standard_normal_kl(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+    return 0.5 * (torch.exp(logvar) + mu**2 - 1.0 - logvar).sum(dim=-1)
 
 
 class SentenceEncoder(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int) -> None:
+    def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int):
         super().__init__()
         self.backbone = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -431,79 +138,236 @@ class SentenceEncoder(nn.Module):
             nn.Linear(hidden_dim, input_dim),
         )
 
-    def encode(self, inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        hidden = self.backbone(inputs)
-        return self.mu_head(hidden), self.logvar_head(hidden)
-
-    def decode(self, latent_mu: torch.Tensor) -> torch.Tensor:
-        return self.decoder(latent_mu)
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        hidden = self.backbone(x)
+        mu = self.mu_head(hidden)
+        logvar = self.logvar_head(hidden)
+        reconstruction = self.decoder(mu)
+        return mu, logvar, reconstruction
 
 
 class UserDistributionTable(nn.Module):
-    def __init__(self, num_users: int, latent_dim: int) -> None:
+    def __init__(self, num_users: int, latent_dim: int):
         super().__init__()
-        self.mu = nn.Embedding(num_users, latent_dim)
-        self.logvar = nn.Embedding(num_users, latent_dim)
-        nn.init.normal_(self.mu.weight, mean=0.0, std=0.02)
-        nn.init.constant_(self.logvar.weight, -1.5)
+        self.user_mu = nn.Embedding(num_users, latent_dim)
+        self.user_logvar = nn.Embedding(num_users, latent_dim)
+        nn.init.zeros_(self.user_mu.weight)
+        nn.init.zeros_(self.user_logvar.weight)
 
-    def forward(self, user_indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.mu(user_indices), self.logvar(user_indices)
-
-
-def gaussian_kl_to_standard_normal(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-    return 0.5 * torch.mean(torch.sum(torch.exp(logvar) + mu.pow(2) - 1.0 - logvar, dim=1))
+    def forward(self, user_index: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.user_mu(user_index), self.user_logvar(user_index)
 
 
-def diagonal_gaussian_kl(
-    mu_p: torch.Tensor,
-    logvar_p: torch.Tensor,
-    mu_q: torch.Tensor,
-    logvar_q: torch.Tensor,
-) -> torch.Tensor:
-    var_p = torch.exp(logvar_p)
-    var_q = torch.exp(logvar_q)
-    kl = 0.5 * (logvar_q - logvar_p + (var_p + (mu_p - mu_q).pow(2)) / var_q - 1.0)
-    return torch.sum(kl, dim=-1)
+def normalize_text(text: str) -> str:
+    return re.sub(r"\\s+", " ", text.strip())
 
 
-def diagonal_gaussian_kl_numpy(
-    mu_p: np.ndarray,
-    logvar_p: np.ndarray,
-    mu_q: np.ndarray,
-    logvar_q: np.ndarray,
-) -> float:
-    var_p = np.exp(logvar_p)
-    var_q = np.exp(logvar_q)
-    kl = 0.5 * (logvar_q - logvar_p + (var_p + (mu_p - mu_q) ** 2) / var_q - 1.0)
-    return float(np.sum(kl))
+def extract_sentences_from_review_text(text: str) -> list[str]:
+    nlp = load_spacy_model()
+    doc = nlp(text)
+    sentences = []
+    for sent in doc.sents:
+        normalized = normalize_text(sent.text)
+        if normalized:
+            sentences.append(normalized)
+    return sentences
 
 
-def tensor_from_numpy(array: np.ndarray) -> torch.Tensor:
-    if DEVICE is None:
-        raise RuntimeError("DEVICE 尚未初始化")
-    return torch.from_numpy(array.astype(np.float32)).to(DEVICE)
+def load_filtered_user_reviews() -> list[dict]:
+    if not REVIEW_SOURCE_FILE.exists():
+        raise FileNotFoundError(f"缺少用户评论文件: {REVIEW_SOURCE_FILE}")
+    payload = load_json(REVIEW_SOURCE_FILE)
+    if isinstance(payload, list):
+        if not payload:
+            raise ValueError(f"{REVIEW_SOURCE_FILE} 必须是非空列表")
+        return payload
+    if isinstance(payload, dict):
+        users = payload.get("users")
+        if not isinstance(users, list) or not users:
+            raise ValueError(f"{REVIEW_SOURCE_FILE} 的 users 字段必须是非空列表")
+        return users
+    raise ValueError(f"{REVIEW_SOURCE_FILE} 必须是列表或包含 users 的字典")
 
 
-def build_training_rows(user_ids: list[str], dataset: dict) -> tuple[np.ndarray, np.ndarray, dict]:
-    user_to_idx = {user_id: idx for idx, user_id in enumerate(user_ids)}
-    feature_rows = []
-    label_rows = []
-    for user_id in user_ids:
-        block = np.vstack(dataset["train_by_user"][user_id]).astype(np.float32)
-        for row in block:
-            feature_rows.append(row)
-            label_rows.append(user_to_idx[user_id])
-    return np.vstack(feature_rows), np.array(label_rows, dtype=np.int64), user_to_idx
+def extract_first_twenty_sentences_for_users(user_rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    log("开始为用户抽取前 20 个句子")
+    kept_rows: list[dict] = []
+    excluded_rows: list[dict] = []
+    total_users = len(user_rows)
+    for user_offset, user_row in enumerate(user_rows, start=1):
+        user_id = user_row.get("user_id")
+        reviews = user_row.get("reviews")
+        if reviews is None:
+            reviews = user_row.get("results")
+        if user_id is None or not isinstance(reviews, list):
+            raise ValueError(f"用户记录缺少 user_id 或 reviews/results: index={user_offset}")
+        collected: list[dict] = []
+        for review_index, review_row in enumerate(reviews):
+            review_texts = review_row.get("target_reviews")
+            if review_texts is not None:
+                if not isinstance(review_texts, list):
+                    raise ValueError(f"target_reviews 必须是列表: user_id={user_id}, review_index={review_index}")
+                candidate_texts = [text for text in review_texts if text]
+            else:
+                single_review_text = review_row.get("text")
+                candidate_texts = [single_review_text] if single_review_text else []
+            if not candidate_texts:
+                continue
+            for source_text in candidate_texts:
+                for sentence_index, sentence_text in enumerate(extract_sentences_from_review_text(source_text)):
+                    collected.append(
+                        {
+                            "user_id": user_id,
+                            "review_index": review_index,
+                            "sentence_index": sentence_index,
+                            "sentence_text": sentence_text,
+                            "word_count": len(sentence_text.split()),
+                        }
+                    )
+                    if len(collected) == TOTAL_SENTENCES_PER_USER:
+                        break
+                if len(collected) == TOTAL_SENTENCES_PER_USER:
+                    break
+            if len(collected) == TOTAL_SENTENCES_PER_USER:
+                break
+
+        if len(collected) < TOTAL_SENTENCES_PER_USER:
+            log(f"用户 {user_offset}/{total_users}: {user_id}, 句子数不足 20, 实际={len(collected)}，从本方法中过滤")
+            excluded_rows.append(
+                {
+                    "user_id": user_id,
+                    "available_sentence_count": int(len(collected)),
+                    "required_sentence_count": TOTAL_SENTENCES_PER_USER,
+                }
+            )
+            continue
+
+        log(f"已完成用户 {user_offset}/{total_users}: {user_id}, 句子数={len(collected)}")
+        kept_rows.extend(collected)
+    return kept_rows, excluded_rows
+
+
+def build_sentence_feature_rows(sentence_rows: list[dict]) -> tuple[list[dict], list[str]]:
+    log("开始提取评论句法特征")
+    nlp = load_spacy_model()
+    feature_names: list[str] | None = None
+    enriched_rows: list[dict] = []
+    for row in sentence_rows:
+        doc = nlp(row["sentence_text"])
+        extracted = extract_clause_features_from_doc(doc, row["sentence_text"])
+        if feature_names is None:
+            feature_names = list(extracted.keys())
+        elif list(extracted.keys()) != feature_names:
+            raise ValueError(f"评论句法特征字段顺序不一致: user_id={row['user_id']}")
+        enriched = dict(row)
+        enriched["features"] = extracted
+        enriched_rows.append(enriched)
+    if feature_names is None:
+        raise ValueError("没有可用评论句法特征")
+    return enriched_rows, feature_names
+
+
+def load_candidate_query_rows() -> list[dict]:
+    if CANDIDATE_QUERY_FILE.exists():
+        log(f"开始读取候选 query 特征文件: {CANDIDATE_QUERY_FILE}")
+        rows = []
+        with CANDIDATE_QUERY_FILE.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                rows.append(json.loads(line))
+        if not rows:
+            raise ValueError(f"{CANDIDATE_QUERY_FILE} 为空")
+        return rows
+
+    if not RAW_CANDIDATE_QUERY_FILE.exists():
+        raise FileNotFoundError(f"缺少原始 10 候选 query 文件: {RAW_CANDIDATE_QUERY_FILE}")
+    log(f"未发现候选特征文件，开始从原始 10 候选 query 生成: {RAW_CANDIDATE_QUERY_FILE}")
+    raw_rows = load_json(RAW_CANDIDATE_QUERY_FILE)
+    if not isinstance(raw_rows, list) or not raw_rows:
+        raise ValueError(f"{RAW_CANDIDATE_QUERY_FILE} 必须是非空列表")
+    rows = build_candidate_feature_rows_from_raw_query_file(raw_rows)
+    write_jsonl(CANDIDATE_QUERY_FILE, rows)
+    log(f"候选特征文件已写入: {CANDIDATE_QUERY_FILE}")
+    return rows
+
+
+def build_candidate_feature_rows_from_raw_query_file(raw_rows: list[dict]) -> list[dict]:
+    nlp = load_spacy_model()
+    total_users = len(raw_rows)
+    rows: list[dict] = []
+    for user_offset, row in enumerate(raw_rows, start=1):
+        user_id = row.get("user_id")
+        asin = row.get("asin")
+        candidates = row.get("syntax_depth_queries")
+        if user_id is None or asin is None or not isinstance(candidates, list):
+            raise ValueError(f"原始 10 候选 query 记录缺少 user_id / asin / syntax_depth_queries: index={user_offset}")
+        for candidate_index, candidate in enumerate(candidates, start=1):
+            query_text = candidate.get("query")
+            if not query_text:
+                raise ValueError(f"候选 query 缺少 query 文本: user_id={user_id}, candidate_index={candidate_index}")
+            doc = nlp(query_text)
+            extracted = extract_clause_features_from_doc(doc, query_text)
+            rows.append(
+                {
+                    "user_id": user_id,
+                    "asin": asin,
+                    "candidate_index": candidate_index,
+                    "query": query_text,
+                    "word_count": int(candidate.get("word_count", len(query_text.split()))),
+                    "target_depth": candidate.get("target_depth"),
+                    "user_avg_depth": candidate.get("user_avg_depth"),
+                    "attrs_used": candidate.get("attrs_used"),
+                    "features": extracted,
+                }
+            )
+        log(f"已完成用户 {user_offset}/{total_users}: {user_id}, 10 候选已处理")
+    return rows
+
+
+def build_training_dataset(sentence_rows: list[dict], feature_names: list[str]) -> tuple[list[str], dict]:
+    feature_matrix = np.asarray(
+        [[float(row["features"][name]) for name in feature_names] for row in sentence_rows],
+        dtype=np.float64,
+    )
+    scaler = StandardScaler()
+    scaled_features = scaler.fit_transform(feature_matrix)
+
+    grouped_rows: dict[str, list[dict]] = defaultdict(list)
+    for row in sentence_rows:
+        grouped_rows[row["user_id"]].append(row)
+    user_ids = sorted(grouped_rows.keys())
+    user_to_index = {user_id: idx for idx, user_id in enumerate(user_ids)}
+
+    user_indices: list[int] = []
+    train_mask: list[bool] = []
+    holdout_mask: list[bool] = []
+    for row in sentence_rows:
+        user_rows = grouped_rows[row["user_id"]]
+        per_user_offset = user_rows.index(row)
+        user_indices.append(user_to_index[row["user_id"]])
+        train_mask.append(per_user_offset < TRAIN_SENTENCES_PER_USER)
+        holdout_mask.append(per_user_offset >= TRAIN_SENTENCES_PER_USER)
+
+    dataset = {
+        "scaler": scaler,
+        "feature_names": feature_names,
+        "sentence_rows": sentence_rows,
+        "scaled_features": scaled_features,
+        "feature_matrix": feature_matrix,
+        "user_indices": np.asarray(user_indices, dtype=np.int64),
+        "train_mask": np.asarray(train_mask, dtype=bool),
+        "holdout_mask": np.asarray(holdout_mask, dtype=bool),
+        "user_to_index": user_to_index,
+        "grouped_rows": grouped_rows,
+    }
+    return user_ids, dataset
 
 
 def train_vades_user_distribution_model(user_ids: list[str], dataset: dict, feature_names: list[str]) -> tuple[SentenceEncoder, UserDistributionTable, dict]:
-    set_random_seed(SEED)
-    raw_features, labels, user_to_idx = build_training_rows(user_ids, dataset)
-    scaler = StandardScaler()
-    feature_matrix = scaler.fit_transform(raw_features).astype(np.float32)
-
-    encoder = SentenceEncoder(input_dim=len(feature_names), hidden_dim=HIDDEN_DIM, latent_dim=LATENT_DIM).to(DEVICE)
+    input_dim = len(feature_names)
+    encoder = SentenceEncoder(input_dim=input_dim, hidden_dim=HIDDEN_DIM, latent_dim=LATENT_DIM).to(DEVICE)
     user_table = UserDistributionTable(num_users=len(user_ids), latent_dim=LATENT_DIM).to(DEVICE)
     optimizer = torch.optim.Adam(
         list(encoder.parameters()) + list(user_table.parameters()),
@@ -511,488 +375,375 @@ def train_vades_user_distribution_model(user_ids: list[str], dataset: dict, feat
         weight_decay=WEIGHT_DECAY,
     )
 
-    feature_tensor = tensor_from_numpy(feature_matrix)
-    label_tensor = torch.from_numpy(labels).to(DEVICE)
-    num_rows = feature_tensor.shape[0]
-    epoch_records = []
+    features_tensor = torch.tensor(dataset["scaled_features"], dtype=torch.float32, device=DEVICE)
+    user_index_tensor = torch.tensor(dataset["user_indices"], dtype=torch.long, device=DEVICE)
+    train_indices = np.flatnonzero(dataset["train_mask"])
+    train_indices_tensor = torch.tensor(train_indices, dtype=torch.long, device=DEVICE)
 
-    for epoch in range(EPOCHS):
-        encoder.train()
-        user_table.train()
-        permutation = torch.randperm(num_rows, device=DEVICE)
+    epoch_rows: list[dict] = []
+    encoder.train()
+    user_table.train()
 
-        batch_totals = []
-        batch_user_match = []
-        batch_recon = []
-        batch_sent_kl = []
-        batch_user_prior = []
+    for epoch in range(1, EPOCHS + 1):
+        shuffled_indices = train_indices.copy()
+        np.random.shuffle(shuffled_indices)
+        batch_metrics = []
+        for start in range(0, len(shuffled_indices), BATCH_SIZE):
+            batch_indices = shuffled_indices[start : start + BATCH_SIZE]
+            batch_idx_tensor = torch.tensor(batch_indices, dtype=torch.long, device=DEVICE)
+            batch_features = features_tensor[batch_idx_tensor]
+            batch_user_indices = user_index_tensor[batch_idx_tensor]
 
-        for start in range(0, num_rows, BATCH_SIZE):
-            end = min(start + BATCH_SIZE, num_rows)
-            batch_indices = permutation[start:end]
-            batch_features = feature_tensor[batch_indices]
-            batch_labels = label_tensor[batch_indices]
+            sent_mu, sent_logvar, reconstruction = encoder(batch_features)
+            user_mu_all = user_table.user_mu.weight
+            user_logvar_all = user_table.user_logvar.weight
+            kl_matrix = []
+            for sent_offset in range(sent_mu.shape[0]):
+                sent_mu_row = sent_mu[sent_offset].unsqueeze(0).expand_as(user_mu_all)
+                sent_logvar_row = sent_logvar[sent_offset].unsqueeze(0).expand_as(user_logvar_all)
+                kl_row = diagonal_gaussian_kl(sent_mu_row, sent_logvar_row, user_mu_all, user_logvar_all)
+                kl_matrix.append(kl_row)
+            kl_matrix_tensor = torch.stack(kl_matrix, dim=0)
+            user_match_loss = F.cross_entropy(-kl_matrix_tensor, batch_user_indices)
 
-            optimizer.zero_grad()
-
-            sent_mu, sent_logvar = encoder.encode(batch_features)
-            reconstruction = encoder.decode(sent_mu)
-
-            all_user_mu = user_table.mu.weight
-            all_user_logvar = user_table.logvar.weight
-            expanded_sent_mu = sent_mu.unsqueeze(1)
-            expanded_sent_logvar = sent_logvar.unsqueeze(1)
-            expanded_user_mu = all_user_mu.unsqueeze(0)
-            expanded_user_logvar = all_user_logvar.unsqueeze(0)
-            kl_matrix = diagonal_gaussian_kl(
-                expanded_sent_mu,
-                expanded_sent_logvar,
-                expanded_user_mu,
-                expanded_user_logvar,
-            )
-            user_match_loss = F.cross_entropy(-kl_matrix, batch_labels)
             style_recon_loss = F.mse_loss(reconstruction, batch_features)
-            sent_kl_loss = gaussian_kl_to_standard_normal(sent_mu, sent_logvar)
-            user_mu, user_logvar = user_table(batch_labels)
-            user_prior_kl_loss = gaussian_kl_to_standard_normal(user_mu, user_logvar)
+            sent_kl_loss = standard_normal_kl(sent_mu, sent_logvar).mean()
+            batch_user_mu, batch_user_logvar = user_table(batch_user_indices)
+            user_prior_kl_loss = standard_normal_kl(batch_user_mu, batch_user_logvar).mean()
+
             total_loss = (
                 USER_MATCH_WEIGHT * user_match_loss
                 + STYLE_RECON_WEIGHT * style_recon_loss
                 + SENT_KL_WEIGHT * sent_kl_loss
                 + USER_PRIOR_KL_WEIGHT * user_prior_kl_loss
             )
+
+            optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
 
-            batch_totals.append(float(total_loss.detach().cpu().item()))
-            batch_user_match.append(float(user_match_loss.detach().cpu().item()))
-            batch_recon.append(float(style_recon_loss.detach().cpu().item()))
-            batch_sent_kl.append(float(sent_kl_loss.detach().cpu().item()))
-            batch_user_prior.append(float(user_prior_kl_loss.detach().cpu().item()))
-
-        epoch_record = {
-            "epoch": epoch + 1,
-            "total_loss": float(np.mean(batch_totals)),
-            "user_match_loss": float(np.mean(batch_user_match)),
-            "style_recon_loss": float(np.mean(batch_recon)),
-            "sent_kl_loss": float(np.mean(batch_sent_kl)),
-            "user_prior_kl_loss": float(np.mean(batch_user_prior)),
-        }
-        epoch_records.append(epoch_record)
-        if epoch == 0 or (epoch + 1) % 50 == 0:
-            log(
-                f"epoch {epoch + 1}/{EPOCHS}: total={epoch_record['total_loss']:.6f}, "
-                f"user_match={epoch_record['user_match_loss']:.6f}, "
-                f"recon={epoch_record['style_recon_loss']:.6f}, "
-                f"sent_kl={epoch_record['sent_kl_loss']:.6f}, "
-                f"user_prior_kl={epoch_record['user_prior_kl_loss']:.6f}"
+            batch_metrics.append(
+                {
+                    "total_loss": float(total_loss.item()),
+                    "user_match_loss": float(user_match_loss.item()),
+                    "style_recon_loss": float(style_recon_loss.item()),
+                    "sent_kl_loss": float(sent_kl_loss.item()),
+                    "user_prior_kl_loss": float(user_prior_kl_loss.item()),
+                }
             )
 
-    return encoder, user_table, {
-        "scaler_mean": scaler.mean_.tolist(),
-        "scaler_scale": scaler.scale_.tolist(),
-        "epoch_records": epoch_records,
-        "user_to_idx": user_to_idx,
-    }
+        epoch_summary = {
+            "epoch": epoch,
+            "batch_count": int(len(batch_metrics)),
+            "total_loss_mean": float(np.mean([row["total_loss"] for row in batch_metrics])),
+            "user_match_loss_mean": float(np.mean([row["user_match_loss"] for row in batch_metrics])),
+            "style_recon_loss_mean": float(np.mean([row["style_recon_loss"] for row in batch_metrics])),
+            "sent_kl_loss_mean": float(np.mean([row["sent_kl_loss"] for row in batch_metrics])),
+            "user_prior_kl_loss_mean": float(np.mean([row["user_prior_kl_loss"] for row in batch_metrics])),
+        }
+        epoch_rows.append(epoch_summary)
+    return encoder, user_table, {"epochs": epoch_rows}
 
 
-def extract_user_distributions(user_ids: list[str], training_info: dict, user_table: UserDistributionTable) -> dict:
-    user_table.eval()
-    user_to_idx = training_info["user_to_idx"]
-    user_mu = {}
-    user_logvar = {}
-    user_var = {}
-    with torch.no_grad():
-        for user_id in user_ids:
-            idx_tensor = torch.tensor([user_to_idx[user_id]], dtype=torch.long, device=DEVICE)
-            mu, logvar = user_table(idx_tensor)
-            mu_np = mu.cpu().numpy()[0]
-            logvar_np = logvar.cpu().numpy()[0]
-            user_mu[user_id] = mu_np
-            user_logvar[user_id] = logvar_np
-            user_var[user_id] = np.exp(logvar_np)
-    return {
-        "user_mu": user_mu,
-        "user_logvar": user_logvar,
-        "user_var": user_var,
-    }
-
-
-def encode_sentence_distributions(
+def infer_user_sentence_distributions(
     encoder: SentenceEncoder,
-    training_info: dict,
+    user_table: UserDistributionTable,
     user_ids: list[str],
     dataset: dict,
-) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+) -> tuple[list[dict], list[dict]]:
+    feature_names = dataset["feature_names"]
+    sentence_rows = dataset["sentence_rows"]
+    feature_tensor = torch.tensor(dataset["scaled_features"], dtype=torch.float32, device=DEVICE)
     encoder.eval()
-    scaler_mean = np.array(training_info["scaler_mean"], dtype=np.float32)
-    scaler_scale = np.array(training_info["scaler_scale"], dtype=np.float32)
-    encoded_train_by_user: dict[str, list[dict]] = {}
-    encoded_holdout_by_user: dict[str, list[dict]] = {}
+    user_table.eval()
     with torch.no_grad():
-        for user_id in user_ids:
-            train_sentence_rows = dataset["train_meta_by_user"][user_id]
-            train_feature_rows = dataset["train_by_user"][user_id]
-            encoded_train_rows = []
-            for meta_row, feature_row in zip(train_sentence_rows, train_feature_rows, strict=True):
-                standardized = (feature_row - scaler_mean) / scaler_scale
-                sent_mu, sent_logvar = encoder.encode(tensor_from_numpy(standardized.reshape(1, -1)))
-                sent_mu_np = sent_mu.cpu().numpy()[0]
-                sent_logvar_np = sent_logvar.cpu().numpy()[0]
-                encoded_train_rows.append({
-                    "sentence_text": meta_row["sentence_text"],
-                    "word_count": meta_row["word_count"],
-                    "sentence_mu": sent_mu_np,
-                    "sentence_logvar": sent_logvar_np,
-                    "sentence_var": np.exp(sent_logvar_np),
-                })
-            if len(encoded_train_rows) != TRAIN_SENTENCES_PER_USER:
-                raise ValueError(f"user {user_id} 编码训练句子数不是 {TRAIN_SENTENCES_PER_USER}")
+        sent_mu, sent_logvar, _ = encoder(feature_tensor)
+        user_mu_weight = user_table.user_mu.weight.detach().cpu().numpy()
+        user_logvar_weight = user_table.user_logvar.weight.detach().cpu().numpy()
 
-            holdout_sentence_rows = dataset["holdout_meta_by_user"][user_id]
-            holdout_feature_rows = dataset["holdout_by_user"][user_id]
-            encoded_holdout_rows = []
-            for meta_row, feature_row in zip(holdout_sentence_rows, holdout_feature_rows, strict=True):
-                standardized = (feature_row - scaler_mean) / scaler_scale
-                sent_mu, sent_logvar = encoder.encode(tensor_from_numpy(standardized.reshape(1, -1)))
-                sent_mu_np = sent_mu.cpu().numpy()[0]
-                sent_logvar_np = sent_logvar.cpu().numpy()[0]
-                encoded_holdout_rows.append({
-                    "sentence_text": meta_row["sentence_text"],
-                    "word_count": meta_row["word_count"],
-                    "sentence_mu": sent_mu_np,
-                    "sentence_logvar": sent_logvar_np,
-                    "sentence_var": np.exp(sent_logvar_np),
-                })
-            if len(encoded_holdout_rows) != HOLDOUT_SENTENCES_PER_USER:
-                raise ValueError(f"user {user_id} 编码校准句子数不是 {HOLDOUT_SENTENCES_PER_USER}")
+    sentence_output_rows: list[dict] = []
+    user_scores: dict[str, list[float]] = defaultdict(list)
+    user_profile_rows: list[dict] = []
+    user_mu_weight_tensor = user_table.user_mu.weight.detach()
+    user_logvar_weight_tensor = user_table.user_logvar.weight.detach()
 
-            encoded_train_by_user[user_id] = encoded_train_rows
-            encoded_holdout_by_user[user_id] = encoded_holdout_rows
-    return encoded_train_by_user, encoded_holdout_by_user
+    for idx, row in enumerate(sentence_rows):
+        user_id = row["user_id"]
+        user_index = dataset["user_to_index"][user_id]
+        sentence_output_rows.append(
+            {
+                "user_id": user_id,
+                "review_index": row["review_index"],
+                "sentence_index": row["sentence_index"],
+                "sentence_text": row["sentence_text"],
+                "word_count": row["word_count"],
+                "features": row["features"],
+            }
+        )
+        score = diagonal_gaussian_kl(
+            sent_mu[idx].unsqueeze(0),
+            sent_logvar[idx].unsqueeze(0),
+            user_mu_weight_tensor[user_index].unsqueeze(0),
+            user_logvar_weight_tensor[user_index].unsqueeze(0),
+        ).item()
+        user_scores[user_id].append(float(score))
 
-
-def estimate_distribution_from_sentence_distributions(sentence_rows: list[dict]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    if not sentence_rows:
-        raise ValueError("无法从空句子集合估计用户分布")
-    mu_matrix = np.stack([row["sentence_mu"] for row in sentence_rows], axis=0)
-    var_matrix = np.stack([row["sentence_var"] for row in sentence_rows], axis=0)
-    user_mu = np.mean(mu_matrix, axis=0)
-    second_moment = np.mean(var_matrix + mu_matrix ** 2, axis=0)
-    user_var = second_moment - user_mu ** 2
-    if np.any(user_var <= 0.0):
-        raise ValueError("估计出的用户方差存在非正值")
-    user_logvar = np.log(user_var)
-    return user_mu.astype(np.float32), user_logvar.astype(np.float32), user_var.astype(np.float32)
-
-
-def build_full_sentence_estimated_user_distributions(
-    user_ids: list[str],
-    encoded_train_sentences_by_user: dict[str, list[dict]],
-) -> dict:
-    user_mu = {}
-    user_logvar = {}
-    user_var = {}
     for user_id in user_ids:
-        mu, logvar, var = estimate_distribution_from_sentence_distributions(encoded_train_sentences_by_user[user_id])
-        user_mu[user_id] = mu
-        user_logvar[user_id] = logvar
-        user_var[user_id] = var
-    return {
-        "user_mu": user_mu,
-        "user_logvar": user_logvar,
-        "user_var": user_var,
-    }
-
-
-def calibrate_absolute_threshold_leave_one_out(
-    user_ids: list[str],
-    encoded_train_sentences_by_user: dict[str, list[dict]],
-) -> tuple[dict[str, float], np.ndarray]:
-    d_pos = []
-    thresholds_by_user: dict[str, float] = {}
-    for user_id in user_ids:
-        sentence_rows = encoded_train_sentences_by_user[user_id]
-        if len(sentence_rows) != TRAIN_SENTENCES_PER_USER:
-            raise ValueError(f"user {user_id} 训练句子数不是 {TRAIN_SENTENCES_PER_USER}")
-        user_distances = []
-        for holdout_idx in range(TRAIN_SENTENCES_PER_USER):
-            retained_rows = sentence_rows[:holdout_idx] + sentence_rows[holdout_idx + 1 :]
-            if len(retained_rows) != TRAIN_SENTENCES_PER_USER - 1:
-                raise ValueError("leave-one-out retained_rows 长度不正确")
-            loo_mu, loo_logvar, _ = estimate_distribution_from_sentence_distributions(retained_rows)
-            holdout_row = sentence_rows[holdout_idx]
-            kl_value = diagonal_gaussian_kl_numpy(
-                holdout_row["sentence_mu"],
-                holdout_row["sentence_logvar"],
-                loo_mu,
-                loo_logvar,
-            )
-            d_pos.append(kl_value)
-            user_distances.append(kl_value)
-        user_distance_array = np.array(user_distances, dtype=np.float64)
-        if len(user_distance_array) != TRAIN_SENTENCES_PER_USER:
-            raise ValueError(f"user {user_id} 的 leave-one-out KL 数量不正确")
-        thresholds_by_user[user_id] = float(np.quantile(user_distance_array, ABS_THRESHOLD_QUANTILE))
-    d_pos_array = np.array(d_pos, dtype=np.float64)
-    if len(d_pos_array) != len(user_ids) * TRAIN_SENTENCES_PER_USER:
-        raise ValueError("leave-one-out 校准样本数不正确")
-    return thresholds_by_user, d_pos_array
+        user_index = dataset["user_to_index"][user_id]
+        score_array = np.asarray(user_scores[user_id], dtype=np.float64)
+        user_profile_rows.append(
+            {
+                "user_id": user_id,
+                "user_mu": user_mu_weight[user_index].tolist(),
+                "user_logvar": user_logvar_weight[user_index].tolist(),
+                "user_var": np.exp(user_logvar_weight[user_index]).tolist(),
+                "kl_score_summary": summarize_array(score_array),
+            }
+        )
+    return sentence_output_rows, user_profile_rows
 
 
 def calibrate_absolute_threshold_with_unseen_holdout(
-    user_ids: list[str],
-    encoded_train_sentences_by_user: dict[str, list[dict]],
-    encoded_holdout_sentences_by_user: dict[str, list[dict]],
-) -> tuple[dict[str, float], np.ndarray]:
-    d_pos = []
-    thresholds_by_user: dict[str, float] = {}
-    for user_id in user_ids:
-        train_rows = encoded_train_sentences_by_user[user_id]
-        holdout_rows = encoded_holdout_sentences_by_user[user_id]
-        if len(train_rows) != TRAIN_SENTENCES_PER_USER:
-            raise ValueError(f"user {user_id} 训练句子数不是 {TRAIN_SENTENCES_PER_USER}")
-        if len(holdout_rows) != HOLDOUT_SENTENCES_PER_USER:
-            raise ValueError(f"user {user_id} 校准句子数不是 {HOLDOUT_SENTENCES_PER_USER}")
-        user_mu, user_logvar, _ = estimate_distribution_from_sentence_distributions(train_rows)
-        user_distances = []
-        for holdout_row in holdout_rows:
-            kl_value = diagonal_gaussian_kl_numpy(
-                holdout_row["sentence_mu"],
-                holdout_row["sentence_logvar"],
-                user_mu,
-                user_logvar,
-            )
-            d_pos.append(kl_value)
-            user_distances.append(kl_value)
-        user_distance_array = np.array(user_distances, dtype=np.float64)
-        if len(user_distance_array) != HOLDOUT_SENTENCES_PER_USER:
-            raise ValueError(f"user {user_id} 的 unseen holdout KL 数量不正确")
-        thresholds_by_user[user_id] = float(np.quantile(user_distance_array, ABS_THRESHOLD_QUANTILE))
-    d_pos_array = np.array(d_pos, dtype=np.float64)
-    if len(d_pos_array) != len(user_ids) * HOLDOUT_SENTENCES_PER_USER:
-        raise ValueError("unseen holdout 校准样本数不正确")
-    return thresholds_by_user, d_pos_array
-
-
-def select_queries_with_user_distributions(
     encoder: SentenceEncoder,
-    training_info: dict,
+    user_table: UserDistributionTable,
     user_ids: list[str],
     dataset: dict,
-    user_distributions: dict,
-    thresholds_by_user: dict[str, float],
-) -> tuple[list[dict], list[dict]]:
+) -> dict[str, float]:
+    feature_tensor = torch.tensor(dataset["scaled_features"], dtype=torch.float32, device=DEVICE)
     encoder.eval()
-    scaler_mean = np.array(training_info["scaler_mean"], dtype=np.float32)
-    scaler_scale = np.array(training_info["scaler_scale"], dtype=np.float32)
-
-    selected = []
-    rejected = []
+    user_table.eval()
+    thresholds: dict[str, float] = {}
+    holdout_indices = np.flatnonzero(dataset["holdout_mask"])
+    with torch.no_grad():
+        sent_mu, sent_logvar, _ = encoder(feature_tensor)
+        user_mu_weight = user_table.user_mu.weight
+        user_logvar_weight = user_table.user_logvar.weight
+        grouped_holdout_scores: dict[str, list[float]] = defaultdict(list)
+        for idx in holdout_indices:
+            user_id = dataset["sentence_rows"][idx]["user_id"]
+            user_index = dataset["user_to_index"][user_id]
+            score = diagonal_gaussian_kl(
+                sent_mu[idx].unsqueeze(0),
+                sent_logvar[idx].unsqueeze(0),
+                user_mu_weight[user_index].unsqueeze(0),
+                user_logvar_weight[user_index].unsqueeze(0),
+            ).item()
+            grouped_holdout_scores[user_id].append(float(score))
     for user_id in user_ids:
-        candidate_rows = dataset["candidates_by_user"][user_id]
-        user_mu_np = user_distributions["user_mu"][user_id]
-        user_logvar_np = user_distributions["user_logvar"][user_id]
-        user_threshold = thresholds_by_user[user_id]
-        scored_candidates = []
-        for candidate in candidate_rows:
-            standardized = (candidate["feature_vector"] - scaler_mean) / scaler_scale
-            with torch.no_grad():
-                query_mu, query_logvar = encoder.encode(tensor_from_numpy(standardized.reshape(1, -1)))
-            user_mu = torch.from_numpy(user_mu_np).to(DEVICE).reshape(1, -1)
-            user_logvar = torch.from_numpy(user_logvar_np).to(DEVICE).reshape(1, -1)
-            range_score = float(diagonal_gaussian_kl(query_mu, query_logvar, user_mu, user_logvar).cpu().item())
-            scored = dict(candidate)
-            scored.pop("feature_vector", None)
-            scored["query_mu"] = query_mu.cpu().numpy()[0].tolist()
-            scored["query_logvar"] = query_logvar.cpu().numpy()[0].tolist()
-            scored["range_score"] = range_score
-            scored["user_abs_threshold"] = user_threshold
-            scored["passes_abs_threshold"] = bool(range_score <= user_threshold)
-            scored_candidates.append(scored)
-        scored_candidates.sort(key=lambda row: row["range_score"])
-        passed_candidates = [row for row in scored_candidates if row["passes_abs_threshold"]]
-        if passed_candidates:
-            best = dict(passed_candidates[0])
-            best["selection_status"] = "selected"
-            best["candidate_pass_count"] = len(passed_candidates)
-            selected.append(best)
-            continue
-        best = dict(scored_candidates[0])
-        best["selection_status"] = "rejected"
-        best["candidate_pass_count"] = 0
-        rejected.append(best)
-    return selected, rejected
+        values = grouped_holdout_scores.get(user_id)
+        if values is None:
+            raise ValueError(f"用户 {user_id} 缺少 holdout 句子得分")
+        thresholds[user_id] = float(np.quantile(np.asarray(values, dtype=np.float64), ABS_THRESHOLD_QUANTILE))
+    return thresholds
 
 
-def build_query_payload(selected_rows: list[dict]) -> list[dict]:
-    payload = []
-    for row in selected_rows:
-        payload.append({
-            "user_id": row["user_id"],
-            "asin": row["asin"],
-            "syntax_depth_query": {
-                "target_depth": row["target_depth"],
-                "actual_depth": "",
-                "user_avg_depth": row["user_avg_depth"],
-                "query": row["query"],
-                "word_count": row["word_count"],
-                "attrs_used": row["attrs_used"],
-                "accepted_candidate_index": row["candidate_index"],
-                "candidate_count": 10,
-            },
-        })
-    return payload
+def rank_and_select_queries(
+    encoder: SentenceEncoder,
+    user_table: UserDistributionTable,
+    dataset: dict,
+    candidate_rows: list[dict],
+    user_ids: list[str],
+    user_profile_rows: list[dict],
+    abs_thresholds: dict[str, float],
+) -> tuple[list[dict], list[dict], list[dict]]:
+    feature_names = dataset["feature_names"]
+    feature_scaler: StandardScaler = dataset["scaler"]
+
+    grouped_candidates: dict[str, list[dict]] = defaultdict(list)
+    for row in candidate_rows:
+        grouped_candidates[row["user_id"]].append(row)
+
+    user_profile_by_id = {row["user_id"]: row for row in user_profile_rows}
+    selected_rows: list[dict] = []
+    rejected_rows: list[dict] = []
+    query_output_rows: list[dict] = []
+
+    encoder.eval()
+    user_table.eval()
+    with torch.no_grad():
+        for user_id in user_ids:
+            candidates = grouped_candidates.get(user_id)
+            if not candidates:
+                raise ValueError(f"用户 {user_id} 没有候选 query")
+            user_profile = user_profile_by_id.get(user_id)
+            if user_profile is None:
+                raise ValueError(f"用户 {user_id} 缺少 user profile")
+            user_index = dataset["user_to_index"][user_id]
+            user_mu, user_logvar = user_table(torch.tensor([user_index], dtype=torch.long, device=DEVICE))
+
+            candidate_records: list[dict] = []
+            for candidate in candidates:
+                feature_vector = np.asarray(
+                    [float(candidate["features"][name]) for name in feature_names],
+                    dtype=np.float64,
+                ).reshape(1, -1)
+                scaled_vector = feature_scaler.transform(feature_vector)
+                feature_tensor = torch.tensor(scaled_vector, dtype=torch.float32, device=DEVICE)
+                query_mu, query_logvar, _ = encoder(feature_tensor)
+                range_score = diagonal_gaussian_kl(query_mu, query_logvar, user_mu, user_logvar).item()
+                passes_abs_threshold = range_score <= abs_thresholds[user_id]
+                candidate_records.append(
+                    {
+                        **candidate,
+                        "query_mu": query_mu.squeeze(0).detach().cpu().numpy().tolist(),
+                        "query_logvar": query_logvar.squeeze(0).detach().cpu().numpy().tolist(),
+                        "range_score": float(range_score),
+                        "passes_abs_threshold": bool(passes_abs_threshold),
+                    }
+                )
+
+            passed = [row for row in candidate_records if row["passes_abs_threshold"]]
+            if passed:
+                best = min(passed, key=lambda row: row["range_score"])
+                selected_rows.append(best)
+                query_output_rows.append(
+                    {
+                        "user_id": best["user_id"],
+                        "asin": best["asin"],
+                        "syntax_depth_query": {
+                            "query": best["query"],
+                            "word_count": int(best["word_count"]),
+                            "target_depth": best["target_depth"],
+                            "actual_depth": None,
+                            "user_avg_depth": best["user_avg_depth"],
+                            "attrs_used": best["attrs_used"],
+                            "accepted_candidate_index": int(best["candidate_index"]),
+                            "candidate_count": int(len(candidate_records)),
+                        },
+                    }
+                )
+            else:
+                best = min(candidate_records, key=lambda row: row["range_score"])
+                rejected_rows.append(best)
+    return selected_rows, rejected_rows, query_output_rows
+
+
+def build_summary(
+    user_ids: list[str],
+    sentence_rows: list[dict],
+    excluded_rows: list[dict],
+    feature_names: list[str],
+    training_info: dict,
+    user_profile_rows: list[dict],
+    selected_rows: list[dict],
+    rejected_rows: list[dict],
+    query_output_rows: list[dict],
+) -> dict:
+    kl_thresholds = [row["kl_score_summary"]["q75"] for row in user_profile_rows]
+    selected_scores = np.asarray([row["range_score"] for row in selected_rows], dtype=np.float64) if selected_rows else np.asarray([0.0])
+    rejected_scores = np.asarray([row["range_score"] for row in rejected_rows], dtype=np.float64) if rejected_rows else np.asarray([0.0])
+    return {
+        "category": CATEGORY,
+        "output_tag": OUTPUT_TAG,
+        "device": str(DEVICE),
+        "feature_names": feature_names,
+        "user_count_total": int(len(user_ids) + len(excluded_rows)),
+        "user_count_trained": int(len(user_ids)),
+        "user_count_excluded": int(len(excluded_rows)),
+        "sentence_count_total": int(len(sentence_rows)),
+        "train_sentences_per_user": TRAIN_SENTENCES_PER_USER,
+        "holdout_sentences_per_user": HOLDOUT_SENTENCES_PER_USER,
+        "candidate_count_total": int(len(selected_rows) + len(rejected_rows)),
+        "selected_query_count": int(len(selected_rows)),
+        "rejected_query_count": int(len(rejected_rows)),
+        "selected_user_count": int(len(query_output_rows)),
+        "training": {
+            "latent_dim": LATENT_DIM,
+            "hidden_dim": HIDDEN_DIM,
+            "epochs": EPOCHS,
+            "batch_size": BATCH_SIZE,
+            "learning_rate": LEARNING_RATE,
+            "weight_decay": WEIGHT_DECAY,
+            "user_match_weight": USER_MATCH_WEIGHT,
+            "style_recon_weight": STYLE_RECON_WEIGHT,
+            "sent_kl_weight": SENT_KL_WEIGHT,
+            "user_prior_kl_weight": USER_PRIOR_KL_WEIGHT,
+            "epoch_summaries": training_info["epochs"],
+        },
+        "holdout_abs_threshold_quantile": ABS_THRESHOLD_QUANTILE,
+        "user_kl_q75_summary": summarize_array(np.asarray(kl_thresholds, dtype=np.float64)),
+        "selected_range_score_summary": summarize_array(selected_scores),
+        "rejected_range_score_summary": summarize_array(rejected_scores),
+        "summary_file": str(SUMMARY_FILE),
+        "detail_file": str(DETAIL_FILE),
+        "user_profile_file": str(USER_PROFILE_FILE),
+        "sentence_file": str(SENTENCE_FILE),
+        "excluded_user_file": str(EXCLUDED_USER_FILE),
+        "selected_record_file": str(SELECTED_RECORD_FILE),
+        "rejected_record_file": str(REJECTED_RECORD_FILE),
+        "query_file": str(QUERY_FILE),
+    }
+
+
+def ensure_directories() -> None:
+    INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    QUERY_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 
 def main() -> None:
     global DEVICE
-    DEVICE = require_cuda_device()
+    DEVICE = infer_device()
     set_random_seed(SEED)
+    ensure_directories()
     log(f"运行设备: {DEVICE}")
     log(f"训练批大小: {BATCH_SIZE}")
     log("开始读取候选 query")
-    user_ids, candidate_rows, feature_names = load_candidate_rows()
-    log(f"候选用户数: {len(user_ids)}")
-
-    sentence_rows, excluded_rows = load_or_extract_sentence_rows(user_ids, feature_names)
-
-    log(f"开始构造 train {TRAIN_SENTENCES_PER_USER} + holdout {HOLDOUT_SENTENCES_PER_USER} 句子数据集")
-    user_ids, dataset = build_datasets(sentence_rows, excluded_rows, candidate_rows, feature_names)
-    log(
-        f"原始候选用户数={dataset['original_candidate_user_count']}，"
-        f"可用于本方法的用户数={len(user_ids)}，"
-        f"因句子不足 {TOTAL_SENTENCES_PER_USER} 被过滤用户数={len(excluded_rows)}"
-    )
-
-    log("开始训练论文式句子级 VADES")
+    candidate_rows = load_candidate_query_rows()
+    candidate_user_ids = {row["user_id"] for row in candidate_rows}
+    user_rows = load_filtered_user_reviews()
+    user_rows = [row for row in user_rows if row.get("user_id") in candidate_user_ids]
+    if MAX_USERS_OVERRIDE is not None:
+        max_users = int(MAX_USERS_OVERRIDE)
+        if max_users <= 0:
+            raise ValueError("VADES_MAX_USERS 必须是正整数")
+        user_rows = user_rows[:max_users]
+        log(f"启用用户数限制: {len(user_rows)}")
+    sentence_rows, excluded_rows = extract_first_twenty_sentences_for_users(user_rows)
+    enriched_sentence_rows, feature_names = build_sentence_feature_rows(sentence_rows)
+    user_ids, dataset = build_training_dataset(enriched_sentence_rows, feature_names)
     encoder, user_table, training_info = train_vades_user_distribution_model(user_ids, dataset, feature_names)
-
-    log("开始编码训练句子与未训练校准句子分布")
-    encoded_train_sentences_by_user, encoded_holdout_sentences_by_user = encode_sentence_distributions(
-        encoder, training_info, user_ids, dataset
+    sentence_output_rows, user_profile_rows = infer_user_sentence_distributions(encoder, user_table, user_ids, dataset)
+    abs_thresholds = calibrate_absolute_threshold_with_unseen_holdout(encoder, user_table, user_ids, dataset)
+    selected_rows, rejected_rows, query_output_rows = rank_and_select_queries(
+        encoder=encoder,
+        user_table=user_table,
+        dataset=dataset,
+        candidate_rows=candidate_rows,
+        user_ids=user_ids,
+        user_profile_rows=user_profile_rows,
+        abs_thresholds=abs_thresholds,
     )
 
-    log(f"开始基于前 {TRAIN_SENTENCES_PER_USER} 个训练句子估计用户分布")
-    user_distributions = build_full_sentence_estimated_user_distributions(user_ids, encoded_train_sentences_by_user)
+    write_jsonl(SENTENCE_FILE, sentence_output_rows)
+    write_jsonl(EXCLUDED_USER_FILE, excluded_rows)
+    write_jsonl(USER_PROFILE_FILE, user_profile_rows)
+    write_jsonl(SELECTED_RECORD_FILE, selected_rows)
+    write_jsonl(REJECTED_RECORD_FILE, rejected_rows)
+    QUERY_FILE.write_text(json.dumps(query_output_rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    log(f"开始使用后 {HOLDOUT_SENTENCES_PER_USER} 个未训练句子执行校准")
-    thresholds_by_user, d_pos_array = calibrate_absolute_threshold_with_unseen_holdout(
-        user_ids,
-        encoded_train_sentences_by_user,
-        encoded_holdout_sentences_by_user,
+    summary = build_summary(
+        user_ids=user_ids,
+        sentence_rows=sentence_output_rows,
+        excluded_rows=excluded_rows,
+        feature_names=feature_names,
+        training_info=training_info,
+        user_profile_rows=user_profile_rows,
+        selected_rows=selected_rows,
+        rejected_rows=rejected_rows,
+        query_output_rows=query_output_rows,
     )
-    threshold_values = np.array([thresholds_by_user[user_id] for user_id in user_ids], dtype=np.float64)
-    log(f"unseen-holdout per-user T_abs mean={float(np.mean(threshold_values)):.6f}")
-
-    log("开始基于阈值执行 range-aware query 排序选择")
-    selected_rows, rejected_rows = select_queries_with_user_distributions(
-        encoder, training_info, user_ids, dataset, user_distributions, thresholds_by_user
-    )
-
-    INPUT_DIR.mkdir(parents=True, exist_ok=True)
-    QUERY_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-    with DETAIL_FILE.open("w", encoding="utf-8") as handle:
-        for row in training_info["epoch_records"]:
-            handle.write(json.dumps(row, ensure_ascii=False))
-            handle.write("\n")
-
-    with USER_PROFILE_FILE.open("w", encoding="utf-8") as handle:
-        for user_id in user_ids:
-            handle.write(json.dumps({
-                "user_id": user_id,
-                "user_mu": user_distributions["user_mu"][user_id].tolist(),
-                "user_logvar": user_distributions["user_logvar"][user_id].tolist(),
-                "user_var": user_distributions["user_var"][user_id].tolist(),
-                "user_abs_threshold": thresholds_by_user[user_id],
-            }, ensure_ascii=False))
-            handle.write("\n")
-
-    with EXCLUDED_USER_FILE.open("w", encoding="utf-8") as handle:
-        for row in excluded_rows:
-            handle.write(json.dumps(row, ensure_ascii=False))
-            handle.write("\n")
-
-    with SELECTED_RECORD_FILE.open("w", encoding="utf-8") as handle:
-        for row in selected_rows:
-            handle.write(json.dumps(row, ensure_ascii=False))
-            handle.write("\n")
-
-    with REJECTED_RECORD_FILE.open("w", encoding="utf-8") as handle:
-        for row in rejected_rows:
-            handle.write(json.dumps(row, ensure_ascii=False))
-            handle.write("\n")
-
-    query_payload = build_query_payload(selected_rows)
-    QUERY_FILE.write_text(json.dumps(query_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-    log("开始对写回后的 query 执行 GMM 分类并回写 cluster 标记")
-    gmm_result = run_query_gmm_pipeline(
-        category=CATEGORY,
-        query_file=QUERY_FILE,
-        write_back_to_query_file=True,
-        attach_retrieval=False,
-    )
-
-    summary = {
-        "category": CATEGORY,
-        "method": "vades_sentence_user_distribution_range_aware_train10_holdout10_threshold",
-        "review_source_file": str(REVIEW_SOURCE_FILE),
-        "candidate_query_file": str(CANDIDATE_QUERY_FILE),
-        "train_sentences_per_user": TRAIN_SENTENCES_PER_USER,
-        "holdout_sentences_per_user": HOLDOUT_SENTENCES_PER_USER,
-        "total_required_sentences_per_user": TOTAL_SENTENCES_PER_USER,
-        "latent_dim": LATENT_DIM,
-        "hidden_dim": HIDDEN_DIM,
-        "epochs": EPOCHS,
-        "batch_size": BATCH_SIZE,
-        "loss_weights": {
-            "user_match": USER_MATCH_WEIGHT,
-            "style_recon": STYLE_RECON_WEIGHT,
-            "sent_kl": SENT_KL_WEIGHT,
-            "user_prior_kl": USER_PRIOR_KL_WEIGHT,
-        },
-        "abs_threshold_quantile": ABS_THRESHOLD_QUANTILE,
-        "abs_threshold_scope": "per_user_unseen_holdout",
-        "abs_threshold_per_user_summary": summarize_array(threshold_values),
-        "d_pos_summary": summarize_array(d_pos_array),
-        "original_candidate_user_count": dataset["original_candidate_user_count"],
-        "eligible_user_count": len(user_ids),
-        "excluded_user_count": len(excluded_rows),
-        "user_count": len(user_ids),
-        "selected_count": len(selected_rows),
-        "rejected_count": len(rejected_rows),
-        "selected_rate": float(len(selected_rows) / len(user_ids)),
-        "rejected_rate": float(len(rejected_rows) / len(user_ids)),
-        "selected_rate_over_original_candidates": float(len(selected_rows) / dataset["original_candidate_user_count"]),
-        "rejected_rate_over_original_candidates": float(len(rejected_rows) / dataset["original_candidate_user_count"]),
-        "selected_range_score_summary": summarize_array(np.array([row["range_score"] for row in selected_rows], dtype=float)),
-        "selected_candidate_index_summary": summarize_array(np.array([float(row["candidate_index"]) for row in selected_rows], dtype=float)),
-        "selected_candidate_pass_count_summary": summarize_array(np.array([float(row["candidate_pass_count"]) for row in selected_rows], dtype=float)),
-        "rejected_range_score_summary": None if not rejected_rows else summarize_array(np.array([row["range_score"] for row in rejected_rows], dtype=float)),
-        "train_loss_summary": summarize_array(np.array([row["total_loss"] for row in training_info["epoch_records"]], dtype=float)),
-        "last_epoch_record": training_info["epoch_records"][-1],
-        "sentence_file": str(SENTENCE_FILE),
-        "excluded_user_file": str(EXCLUDED_USER_FILE),
-        "user_profile_file": str(USER_PROFILE_FILE),
-        "selected_record_file": str(SELECTED_RECORD_FILE),
-        "rejected_record_file": str(REJECTED_RECORD_FILE),
-        "query_file": str(QUERY_FILE),
-        "query_gmm_summary_file": gmm_result["summary_file"],
-        "query_gmm_user_file": gmm_result["user_file"],
-        "query_gmm_feature_file": gmm_result["feature_file"],
-        "query_gmm_selected_k": gmm_result["selected_k"],
-        "query_gmm_cluster_counts": gmm_result["cluster_counts"],
-    }
-    SUMMARY_FILE.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-    print(json.dumps({
-        "summary_file": str(SUMMARY_FILE),
-        "selected_count": len(selected_rows),
-        "rejected_count": len(rejected_rows),
-        "query_file": str(QUERY_FILE),
-    }, ensure_ascii=False, indent=2))
+    SUMMARY_FILE.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_jsonl(DETAIL_FILE, training_info["epochs"])
+    if SKIP_POST_CLUSTERING:
+        log("按配置跳过训练后的 query GMM 聚类与 retrieval attach")
+    else:
+        run_query_gmm_pipeline(
+            category=CATEGORY,
+            query_file=QUERY_FILE,
+            write_back_to_query_file=False,
+            attach_retrieval=True,
+        )
+    log(f"已写入 summary: {SUMMARY_FILE}")
 
 
 if __name__ == "__main__":

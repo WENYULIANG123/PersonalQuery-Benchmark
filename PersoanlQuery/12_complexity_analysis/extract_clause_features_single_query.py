@@ -38,191 +38,177 @@ NOUNISH_POS = {
     "PRON",
 }
 
-LONG_DEPENDENCY_THRESHOLD = 5
-
-
-def _is_relative_marker_token(token) -> bool:
-    if token.text.lower() not in RELATIVE_MARKERS:
-        return False
-
-    current = token
-    visited = set()
-    while True:
-        if current.dep_ == "relcl":
-            return True
-        if current.head == current:
-            return False
-        if current.i in visited:
-            raise ValueError("检测到依存循环，无法判断 relative marker")
-        visited.add(current.i)
-        current = current.head
-
-
-def _dependency_depths(tokens) -> list[int]:
-    depth_cache: dict[int, int] = {}
-    depths = []
-    for token in tokens:
-        chain = []
-        current = token
-        while current.i not in depth_cache and current.head != current:
-            chain.append(current)
-            current = current.head
-
-        if current.i in depth_cache:
-            depth = depth_cache[current.i]
-        else:
-            depth = 1
-            depth_cache[current.i] = depth
-
-        for chain_token in reversed(chain):
-            depth += 1
-            depth_cache[chain_token.i] = depth
-
-        depths.append(depth_cache[token.i])
-    return depths
-
-
-def _clause_nesting_depth(tokens) -> int:
-    max_depth = 0
-    for token in tokens:
-        depth = 0
-        current = token
-        visited = set()
-        while True:
-            if current.dep_ in SUBORDINATE_DEP_TYPES:
-                depth += 1
-            if current.head == current:
-                break
-            if current.i in visited:
-                raise ValueError("检测到循环依存，无法计算 clause_nesting_depth")
-            visited.add(current.i)
-            current = current.head
-        if depth > max_depth:
-            max_depth = depth
-    return max_depth
-
-
-def _is_nmod_proxy(token) -> bool:
-    if token.dep_ == "poss":
-        return True
-    return token.dep_ == "prep" and token.head.pos_ in NOUNISH_POS
-
 
 @lru_cache(maxsize=1)
 def load_spacy_model():
-    nlp = spacy.load("en_core_web_sm")
-    for pipe_name in ("ner", "lemmatizer", "textcat", "textcat_multilabel", "senter", "sentencizer"):
-        if pipe_name in nlp.pipe_names:
-            nlp.remove_pipe(pipe_name)
-    return nlp
+    return spacy.load("en_core_web_sm")
+
+
+def build_child_map(doc):
+    child_map = {token.i: [] for token in doc}
+    for token in doc:
+        if token.head.i != token.i:
+            child_map[token.head.i].append(token.i)
+    return child_map
+
+
+def compute_depths(doc, child_map):
+    roots = [token for token in doc if token.head.i == token.i]
+    if not roots:
+        raise ValueError("spaCy parse produced no root")
+
+    depths = {}
+    stack = [(root.i, 1) for root in roots]
+    while stack:
+        node_i, depth = stack.pop()
+        depths[node_i] = depth
+        for child_i in child_map[node_i]:
+            stack.append((child_i, depth + 1))
+    return depths
+
+
+def compute_tree_height(node_i, child_map):
+    if not child_map[node_i]:
+        return 1
+    return 1 + max(compute_tree_height(child_i, child_map) for child_i in child_map[node_i])
+
+
+def compute_clause_nesting(doc, child_map):
+    roots = [token for token in doc if token.head.i == token.i]
+    max_nesting = 0
+    stack = [(root.i, 0) for root in roots]
+
+    while stack:
+        node_i, current_nesting = stack.pop()
+        token = doc[node_i]
+        next_nesting = current_nesting + 1 if token.dep_ in SUBORDINATE_DEP_TYPES else current_nesting
+        max_nesting = max(max_nesting, next_nesting)
+        for child_i in child_map[node_i]:
+            stack.append((child_i, next_nesting))
+    return max_nesting
+
+
+def compute_dependency_distances(doc):
+    distances = []
+    long_distance_count = 0
+    for token in doc:
+        if token.head.i == token.i:
+            continue
+        distance = abs(token.i - token.head.i)
+        distances.append(distance)
+        if distance >= 5:
+            long_distance_count += 1
+    if not distances:
+        return 0.0, 0, 0.0
+    return (
+        sum(distances) / len(distances),
+        max(distances),
+        long_distance_count / len(distances),
+    )
+
+
+def count_dep_types(doc, dep_type):
+    return sum(1 for token in doc if token.dep_ == dep_type)
+
+
+def count_compounds(doc):
+    return sum(1 for token in doc if token.dep_ == "compound")
+
+
+def count_modifiers(doc):
+    modifier_deps = {"amod", "advmod", "nmod", "compound"}
+    return sum(1 for token in doc if token.dep_ in modifier_deps)
+
+
+def count_coordination(doc):
+    return sum(1 for token in doc if token.dep_ == "conj" or token.dep_ == "cc")
+
+
+def compute_max_branching(child_map):
+    if not child_map:
+        return 0
+    return max(len(children) for children in child_map.values())
 
 
 def extract_clause_features_from_doc(doc, query_text: str) -> dict:
+    if not query_text.strip():
+        raise ValueError("query text is empty")
+
     tokens = [token for token in doc if not token.is_space]
     if not tokens:
-        raise ValueError("query 没有有效 token")
+        raise ValueError("query has no non-space tokens")
 
-    dependency_depths = _dependency_depths(tokens)
-    max_dependency_depth = max(dependency_depths)
-    mean_dependency_depth = float(sum(dependency_depths) / len(dependency_depths))
-    dependency_tree_height = max_dependency_depth - 1
-    depth_variance = float(
-        sum((depth - mean_dependency_depth) ** 2 for depth in dependency_depths) / len(dependency_depths)
-    )
+    child_map = build_child_map(doc)
+    depths = compute_depths(doc, child_map)
+    depth_values = [depths[token.i] for token in doc]
 
-    acl_count = sum(1 for token in tokens if token.dep_ == "acl")
-    relcl_count = sum(1 for token in tokens if token.dep_ == "relcl")
-    ccomp_count = sum(1 for token in tokens if token.dep_ == "ccomp")
-    xcomp_count = sum(1 for token in tokens if token.dep_ == "xcomp")
-    advcl_count = sum(1 for token in tokens if token.dep_ == "advcl")
-    clause_nesting_depth = _clause_nesting_depth(tokens)
-
-    dependency_distances = [
-        abs(token.i - token.head.i)
-        for token in tokens
-        if token.head != token
+    tree_heights = [
+        compute_tree_height(root.i, child_map)
+        for root in doc
+        if root.head.i == root.i
     ]
-    if not dependency_distances:
-        raise ValueError("没有可用于计算 dependency distance 的非根节点")
-    mean_dependency_distance = float(sum(dependency_distances) / len(dependency_distances))
-    max_dependency_distance = int(max(dependency_distances))
-    long_dependency_ratio = float(
-        sum(1 for distance in dependency_distances if distance >= LONG_DEPENDENCY_THRESHOLD) / len(dependency_distances)
-    )
+    dependency_tree_height = max(tree_heights)
 
-    amod_count = sum(1 for token in tokens if token.dep_ == "amod")
-    advmod_count = sum(1 for token in tokens if token.dep_ == "advmod")
-    nmod_count = sum(1 for token in tokens if _is_nmod_proxy(token))
-    compound_count = sum(1 for token in tokens if token.dep_ == "compound")
-    modifier_density = float((amod_count + advmod_count + nmod_count + compound_count) / len(tokens))
+    max_dependency_depth = max(depth_values)
+    mean_dependency_depth = sum(depth_values) / len(depth_values)
+    depth_variance = sum((depth - mean_dependency_depth) ** 2 for depth in depth_values) / len(depth_values)
 
-    coordination_count = sum(
-        1
-        for token in tokens
-        if token.dep_ == "cc" or (token.dep_ == "conj" and token.head != token)
-    )
-    max_branching_factor = max(
-        sum(1 for child in token.children if not child.is_space)
-        for token in tokens
-    )
+    clause_nesting_depth = compute_clause_nesting(doc, child_map)
+    mean_dependency_distance, max_dependency_distance, long_dependency_ratio = compute_dependency_distances(doc)
+
+    amod_count = count_dep_types(doc, "amod")
+    advmod_count = count_dep_types(doc, "advmod")
+    nmod_count = count_dep_types(doc, "nmod")
+    compound_count = count_compounds(doc)
+    modifier_density = count_modifiers(doc) / len(tokens)
+    coordination_count = count_coordination(doc)
+    max_branching_factor = compute_max_branching(child_map)
 
     return {
-        "query": query_text,
-        "word_count": len(tokens),
-        "features": {
-            "max_dependency_depth": int(max_dependency_depth),
-            "mean_dependency_depth": mean_dependency_depth,
-            "dependency_tree_height": int(dependency_tree_height),
-            "depth_variance": depth_variance,
-            "acl_count": int(acl_count),
-            "relcl_count": int(relcl_count),
-            "ccomp_count": int(ccomp_count),
-            "xcomp_count": int(xcomp_count),
-            "advcl_count": int(advcl_count),
-            "clause_nesting_depth": int(clause_nesting_depth),
-            "mean_dependency_distance": mean_dependency_distance,
-            "max_dependency_distance": max_dependency_distance,
-            "long_dependency_ratio": long_dependency_ratio,
-            "amod_count": int(amod_count),
-            "advmod_count": int(advmod_count),
-            "nmod_count": int(nmod_count),
-            "compound_count": int(compound_count),
-            "modifier_density": modifier_density,
-            "coordination_count": int(coordination_count),
-            "max_branching_factor": int(max_branching_factor),
-        },
-        "token_debug": [
-            {
-                "text": token.text,
-                "dep": token.dep_,
-                "head": token.head.text if token.head is not None else "",
-                "pos": token.pos_,
-            }
-            for token in tokens
-        ],
+        "max_dependency_depth": max_dependency_depth,
+        "mean_dependency_depth": mean_dependency_depth,
+        "dependency_tree_height": dependency_tree_height,
+        "depth_variance": depth_variance,
+        "acl_count": count_dep_types(doc, "acl"),
+        "relcl_count": count_dep_types(doc, "relcl"),
+        "ccomp_count": count_dep_types(doc, "ccomp"),
+        "xcomp_count": count_dep_types(doc, "xcomp"),
+        "advcl_count": count_dep_types(doc, "advcl"),
+        "clause_nesting_depth": clause_nesting_depth,
+        "mean_dependency_distance": mean_dependency_distance,
+        "max_dependency_distance": max_dependency_distance,
+        "long_dependency_ratio": long_dependency_ratio,
+        "amod_count": amod_count,
+        "advmod_count": advmod_count,
+        "nmod_count": nmod_count,
+        "compound_count": compound_count,
+        "modifier_density": modifier_density,
+        "coordination_count": coordination_count,
+        "max_branching_factor": max_branching_factor,
     }
 
 
 def extract_clause_features(query: str) -> dict:
-    if not isinstance(query, str) or not query.strip():
-        raise ValueError("query 必须是非空字符串")
-
-    query_text = query.strip()
     nlp = load_spacy_model()
-    doc = nlp(query_text)
-    return extract_clause_features_from_doc(doc, query_text)
+    doc = nlp(query)
+    return extract_clause_features_from_doc(doc, query)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Extract clause-related syntactic features for a single query.")
-    parser.add_argument("--query", type=str, required=True, help="要分析的单条 query")
-    return parser.parse_args()
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--query", required=True)
+    parser.add_argument("--output", default="")
+    args = parser.parse_args()
 
-
-def main() -> None:
-    args = parse_args()
     result = extract_clause_features(args.query)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    text = json.dumps(result, ensure_ascii=False, indent=2)
+
+    if args.output:
+        output_path = Path(args.output)
+        output_path.write_text(text, encoding="utf-8")
+        print(f"Wrote features to {output_path}")
+    else:
+        print(text)
 
 
 if __name__ == "__main__":
