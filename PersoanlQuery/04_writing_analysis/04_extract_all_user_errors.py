@@ -1,495 +1,335 @@
 #!/usr/bin/env python3
 """
-Stage 4: Extract Character-Level Errors for All Selected Users
+Stage 4: Extract Errors from User Reviews with Simple Error Filtering
 
-主脚本：自动处理所有选中用户的评论，提取拼写和语法错误。
-根据 selected_users.json 和 reviews_{USER_ID}.json 文件，批量提取所有用户的评论错误。
+从用户评论中提取写作错误，并过滤掉简单错误（词缀变化、编辑距离<=2等）。
 
-支持两种分析方法：
-  1. character_level (默认) - 传统字符级错误检测
-  2. p3_optimal - P3最优prompt模板 (基于MTSummit 2025论文 arXiv:2505.06004)
-
-Input: 
-  - /home/wlia0047/ar57/wenyu/result/personal_query/00_data_preparation/selected_users.json
-  - /home/wlia0047/ar57/wenyu/result/personal_query/00_data_preparation/reviews_{USER_ID}.json (per user)
-  - Product metadata file (for brand name extraction, character_level method only)
-
-Output: 
-  - /home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/writing_analysis_{user_id}.json (per user)
-  - /home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/p3_analysis_{user_id}.json (p3_optimal method)
-  - /home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/all_users_summary.json (summary)
+Input:
+  - stage1_filtered_users_reviews.json (from Stage 1)
+  
+Output:
+  - writing_error.json (过滤后的错误)
 
 Usage:
-  # Process all selected users with character-level method (default)
-  python 04_extract_all_user_errors.py
-  
-  # Process all selected users with P3 optimal template method
-  python 04_extract_all_user_errors.py --method p3_optimal
-  
-  # Process specific users only
-  python 04_extract_all_user_errors.py --user-ids A13OFOB1394G31 A2GJX2KCUSR0EI
-  
-  # Limit reviews per user
-  python 04_extract_all_user_errors.py --max-reviews 50
-  
-  # Use custom metadata file (character-level method only)
-  python 04_extract_all_user_errors.py --metadata-file /path/to/metadata.json
-  
-  # P3 method with specific users
-  python 04_extract_all_user_errors.py --method p3_optimal --user-ids A13OFOB1394G31 --max-reviews 20
+  python 04_extract_all_user_errors.py --category Baby_Products
 """
 
+from __future__ import annotations
+
+import argparse
 import json
 import os
 import sys
-import argparse
-import subprocess
+import time
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Set, Optional
+from typing import Dict, List, Tuple
 
-def log_with_timestamp(message: str):
-    """打印带时间戳的日志"""
+# 添加 common 模块路径
+_COMMON = Path(__file__).resolve().parent / "common"
+sys.path.insert(0, str(_COMMON))
+
+# LLM 客户端
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from llm_client import LLMClient
+
+
+# ============================================================================
+# 常量
+# ============================================================================
+
+WRITING_ANALYSIS_ROOT = Path("/fs04/ar57/wenyu/result/personal_query/04_writing_analysis")
+STAGE1_ROOT = Path("/fs04/ar57/wenyu/result/personal_query/01_preference_extraction")
+PROGRESS_INTERVAL_USERS = 100
+
+# 常见英语词缀
+COMMON_AFFIXES = ['s', 'es', 'ed', 'ing', 'er', 'est', 'ly', 'd', 'en', 'n']
+
+
+# ============================================================================
+# 工具函数
+# ============================================================================
+
+def log(message: str) -> None:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}", flush=True)
 
-def load_selected_users(selected_users_file: str) -> List[str]:
-    """
-    加载选中的用户列表
+
+def _edit_distance(s1: str, s2: str) -> int:
+    """计算编辑距离"""
+    if len(s1) > len(s2):
+        s1, s2 = s2, s1
+    distances = range(len(s1) + 1)
+    for i2, c2 in enumerate(s2):
+        distances_ = [i2 + 1]
+        for i1, c1 in enumerate(s1):
+            if c1 == c2:
+                distances_.append(distances[i1])
+            else:
+                distances_.append(1 + min((distances[i1], distances[i1 + 1], distances_[-1])))
+        distances = distances_
+    return distances[-1]
+
+
+def is_simple_error(original: str, corrected: str) -> Tuple[bool, str]:
+    """判断是否是简单错误（应被过滤）
     
-    Args:
-        selected_users_file: selected_users.json 文件路径
-        
     Returns:
-        用户ID列表
+        (is_simple, reason): (True, reason) 如果是简单错误
+                             (False, "") 如果不是简单错误
     """
-    log_with_timestamp(f"Loading selected users from {selected_users_file}...")
+    import string
     
-    with open(selected_users_file, 'r', encoding='utf-8') as f:
+    orig = original.lower().strip()
+    corr = corrected.lower().strip()
+
+    if not orig or not corr:
+        return False, "empty"
+    if orig == corr:
+        return False, "identity"
+    if len(orig.split()) != 1 or len(corr.split()) != 1:
+        return False, "multi_word"
+
+    # 过滤仅相差标点的错误（如 a. -> a）
+    PUNCT = set(string.punctuation)
+    orig_no_punct = ''.join(c for c in orig if c not in PUNCT)
+    corr_no_punct = ''.join(c for c in corr if c not in PUNCT)
+    if orig_no_punct == corr_no_punct and orig != corr:
+        return True, "punct_only"
+
+    # 过滤仅相差单引号的错误（如 dont -> don't）
+    orig_no_quote = orig.replace("'", "")
+    corr_no_quote = corr.replace("'", "")
+    if orig_no_quote == corr_no_quote and orig != corr:
+        return True, "quote_only"
+
+    # 过滤编辑距离 <= 2 的简单词汇错误（如 creat->create, an->a）
+    if len(orig) >= 2 and len(corr) >= 2:
+        dist = _edit_distance(orig, corr)
+        if dist <= 2:
+            return True, "edit_dist_le2"
+
+    # 过滤长度相差1且所有字符都在另一个词中的情况（如 a->an）
+    if abs(len(orig) - len(corr)) == 1:
+        shorter, longer = (orig, corr) if len(orig) < len(corr) else (corr, orig)
+        if all(c in longer for c in shorter):
+            return True, "char_subset"
+
+    # 过滤常见的主谓不一致/动词形式错误
+    COMMON_VERB_VARIATIONS = {
+        ('was', 'were'), ('is', 'are'), ('are', 'is'),
+        ('do', 'did'), ('does', 'did'),
+    }
+    if (orig, corr) in COMMON_VERB_VARIATIONS or (corr, orig) in COMMON_VERB_VARIATIONS:
+        return True, "verb_variation"
+
+    # 过滤人称代词变化
+    COMMON_PRONOUN_VARIATIONS = {
+        ('i', 'me'), ('me', 'i'),
+        ('he', 'him'), ('him', 'he'),
+        ('she', 'her'), ('her', 'she'),
+        ('we', 'us'), ('us', 'we'),
+        ('they', 'them'), ('them', 'they'),
+    }
+    if (orig, corr) in COMMON_PRONOUN_VARIATIONS or (corr, orig) in COMMON_PRONOUN_VARIATIONS:
+        return True, "pronoun_variation"
+
+    # 过滤词缀变化（如 dog->dogs, jump->jumped）
+    if len(orig) > len(corr):
+        orig, corr = corr, orig
+    if len(corr) - len(orig) >= 1 and len(orig) >= 3:
+        for affix in COMMON_AFFIXES:
+            if corr == orig + affix:
+                return True, "affix_variation"
+
+    return False, ""
+
+
+def format_elapsed(start_time: float) -> str:
+    """格式化耗时"""
+    elapsed = time.time() - start_time
+    minutes = int(elapsed // 60)
+    seconds = int(elapsed % 60)
+    return f"{minutes}m{seconds}s"
+
+
+# ============================================================================
+# P3 Error Extraction
+# ============================================================================
+
+class P3ErrorExtractor:
+    """使用 P3 最优模板提取错误"""
+    
+    P3_TEMPLATE = """Edit the following text for spelling and grammar mistakes, make minimal changes, and return only the corrected text. If the text is already correct, return it without any explanations:."""
+    
+    def __init__(self, llm_client: LLMClient):
+        self.llm_client = llm_client
+    
+    def create_p3_prompt(self, review_text: str) -> str:
+        return f"""<s>[INST] {self.P3_TEMPLATE}
+
+"{review_text}"
+
+Please return ONLY the corrected text. If no corrections are needed, return the original text exactly as it is.
+[/INST]"""
+    
+    def extract_errors(self, original_text: str, max_retries: int = 3) -> Dict:
+        prompt = self.create_p3_prompt(original_text)
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.llm_client.call(
+                    prompt=prompt,
+                    max_tokens=256
+                )
+                
+                corrected_text = response.strip()
+                
+                return {
+                    "status": "success",
+                    "original": original_text,
+                    "corrected": corrected_text,
+                    "has_errors": original_text != corrected_text
+                }
+            
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    continue
+                else:
+                    return {
+                        "status": "error",
+                        "original": original_text,
+                        "corrected": original_text,
+                        "error": str(e),
+                        "has_errors": False
+                    }
+
+
+# ============================================================================
+# 主处理函数
+# ============================================================================
+
+def extract_and_filter_errors(category: str, max_users: int = None) -> None:
+    """提取并过滤错误"""
+    start_time = time.time()
+    
+    # 路径
+    input_file = STAGE1_ROOT / category / "stage1_filtered_users_reviews.json"
+    output_file = WRITING_ANALYSIS_ROOT / category / "writing_error.json"
+    
+    log(f"=== Processing category: {category} ===")
+    log(f"Reading from: {input_file}")
+    
+    if not input_file.exists():
+        log(f"Error: File not found: {input_file}")
+        return
+    
+    # 加载数据
+    with input_file.open("r", encoding="utf-8") as f:
         data = json.load(f)
     
-    users = data.get('users', [])
-    log_with_timestamp(f"Found {len(users)} selected users: {', '.join(users)}")
+    users = data.get("users", [])
+    if max_users:
+        users = users[:max_users]
     
-    return users
-
-def validate_user_review_files(reviews_dir: str, user_ids: List[str]) -> Set[str]:
-    """
-    验证所有用户的 reviews_{USER_ID}.json 文件存在
+    log(f"Loaded {len(users)} users")
     
-    Args:
-        reviews_dir: 评论文件目录
-        user_ids: 要验证的用户ID列表
+    # 初始化 LLM 客户端
+    log("Initializing LLM client...")
+    llm_client = LLMClient()
+    extractor = P3ErrorExtractor(llm_client)
+    
+    # 处理每个用户
+    output_rows = []
+    total_errors = 0
+    total_filtered = 0
+    simple_counts_total: Counter = Counter()
+    
+    for idx, user in enumerate(users, 1):
+        user_id = user.get("user_id", "")
+        results = user.get("results", [])
         
-    Returns:
-        存在的用户ID集合
-    """
-    log_with_timestamp(f"Validating user review files in {reviews_dir}...")
-    
-    existing_users = set()
-    missing_users = []
-    
-    for user_id in user_ids:
-        review_file = os.path.join(reviews_dir, f"reviews_{user_id}.json")
+        user_errors = []
+        user_simple_counts: Counter = Counter()
         
-        if os.path.exists(review_file):
-            try:
-                with open(review_file, 'r', encoding='utf-8') as f:
-                    user_data = json.load(f)
+        # 遍历所有评论
+        for result in results:
+            reviews = result.get("target_reviews", [])
+            for review in reviews:
+                if not review or not isinstance(review, str):
+                    continue
                 
-                results = user_data.get('results', user_data.get('reviews', []))
-                target_count = 0
-                for product in results:
-                    target_count += len(product.get('target_reviews', []))
+                # 使用 LLM 提取错误
+                extraction = extractor.extract_errors(review)
                 
-                existing_users.add(user_id)
-                log_with_timestamp(f"  ✓ User {user_id}: {target_count} reviews (file: reviews_{user_id}.json)")
-            except Exception as e:
-                missing_users.append(user_id)
-                log_with_timestamp(f"  ✗ User {user_id}: ERROR reading file - {e}")
-        else:
-            missing_users.append(user_id)
-            log_with_timestamp(f"  ✗ User {user_id}: FILE NOT FOUND (reviews_{user_id}.json)")
-    
-    if missing_users:
-        log_with_timestamp(f"WARNING: {len(missing_users)} users missing or have invalid review files")
-    
-    return existing_users
-
-def run_p3_analysis(
-    user_ids: List[str],
-    reviews_dir: str,
-    output_dir: str,
-    max_reviews: Optional[int] = None,
-    max_workers: int = 20
-) -> Dict:
-    """Run P3 optimal template comprehensive analysis"""
-    script_path = os.path.join(os.path.dirname(__file__), "04_p3_comprehensive_analysis.py")
-    
-    if not os.path.exists(script_path):
-        raise FileNotFoundError(f"P3 analysis script not found: {script_path}")
-    
-    log_with_timestamp("="*80)
-    log_with_timestamp("Running P3 optimal template comprehensive error analysis...")
-    log_with_timestamp("(Method: MTSummit 2025 - arXiv:2505.06004)")
-    log_with_timestamp("="*80)
-    
-    cmd = [
-        sys.executable, 
-        script_path,
-        "--reviews-dir", reviews_dir,
-        "--analysis-dir", output_dir,
-        "--user-ids"] + user_ids + [
-        "--max-workers", str(max_workers)
-    ]
-    
-    if max_reviews:
-        cmd.extend(["--max-reviews", str(max_reviews)])
-    
-    try:
-        result = subprocess.run(
-            cmd,
-            check=True,
-            capture_output=False,
-            text=True
-        )
-        log_with_timestamp("All users completed P3 analysis successfully!")
-        return {"success": True, "failed_users": []}
+                if extraction.get("has_errors"):
+                    original = extraction.get("original", "")
+                    corrected = extraction.get("corrected", "")
+                    
+                    # 检查是否是简单错误
+                    is_simple, reason = is_simple_error(original, corrected)
+                    
+                    if is_simple:
+                        user_simple_counts[reason] += 1
+                    else:
+                        user_errors.append({
+                            "original": original,
+                            "corrected": corrected,
+                            "context": review[:200],  # 保留上下文
+                        })
         
-    except subprocess.CalledProcessError as e:
-        log_with_timestamp(f"P3 analysis FAILED with return code {e.returncode}")
-        return {"success": False, "failed_users": user_ids}
-
-def run_character_level_analysis(
-    user_ids: List[str],
-    reviews_dir: str,
-    metadata_file: str,
-    output_dir: str,
-    max_reviews: Optional[int] = None,
-    max_workers: int = 50
-) -> Dict:
-    script_path = os.path.join(os.path.dirname(__file__), "04_character_level_errors.py")
-    
-    if not os.path.exists(script_path):
-        raise FileNotFoundError(f"Character-level analysis script not found: {script_path}")
-    
-    log_with_timestamp("="*80)
-    log_with_timestamp("Running character-level error analysis...")
-    log_with_timestamp("="*80)
-    
-    failed_users = []
-    
-    for user_id in user_ids:
-        reviews_file = os.path.join(reviews_dir, f"reviews_{user_id}.json")
+        # 统计
+        total_errors += len(user_errors) + sum(user_simple_counts.values())
+        total_filtered += sum(user_simple_counts.values())
+        simple_counts_total.update(user_simple_counts)
         
-        log_with_timestamp(f"\n[{user_id}] Processing user...")
-        log_with_timestamp(f"[{user_id}] Reviews file: {reviews_file}")
-        
-        cmd = [
-            sys.executable, 
-            script_path,
-            "--reviews-file", reviews_file,
-            "--user-ids", user_id,
-            "--output-dir", output_dir,
-            "--metadata-file", metadata_file,
-            "--max-workers", str(max_workers)
-        ]
-        
-        if max_reviews:
-            cmd.extend(["--max-reviews", str(max_reviews)])
-        
-        try:
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=False,
-                text=True
-            )
-            log_with_timestamp(f"[{user_id}] ✓ Completed successfully")
-            
-        except subprocess.CalledProcessError as e:
-            log_with_timestamp(f"[{user_id}] ✗ FAILED with return code {e.returncode}")
-            failed_users.append(user_id)
-    
-    log_with_timestamp("="*80)
-    if failed_users:
-        log_with_timestamp(f"WARNING: {len(failed_users)} users failed: {', '.join(failed_users)}")
-        return {"success": False, "failed_users": failed_users}
-    else:
-        log_with_timestamp("All users completed successfully!")
-        return {"success": True, "failed_users": []}
-
-def generate_summary(output_dir: str, user_ids: List[str]) -> Dict:
-    """
-    生成所有用户的汇总统计
-    
-    Args:
-        output_dir: 输出目录
-        user_ids: 用户ID列表
-        
-    Returns:
-        汇总统计字典
-    """
-    log_with_timestamp("="*80)
-    log_with_timestamp("Generating summary statistics...")
-    log_with_timestamp("="*80)
-    
-    summary = {
-        "timestamp": datetime.now().isoformat(),
-        "total_users": len(user_ids),
-        "processed_users": 0,
-        "failed_users": [],
-        "user_summaries": {},
-        "aggregate_stats": {
-            "total_reviews_analyzed": 0,
-            "total_words_analyzed": 0,
-            "total_character_errors": 0,
-            "overall_error_rate": 0.0,
-            "error_type_distribution": {},
-            "severity_distribution": {
-                "low": 0,
-                "medium": 0,
-                "high": 0
-            }
-        }
-    }
-    
-    error_type_counter = {}
-    
-    for user_id in user_ids:
-        output_file = os.path.join(output_dir, f"writing_analysis_{user_id}.json")
-        
-        if not os.path.exists(output_file):
-            log_with_timestamp(f"  ✗ User {user_id}: output file not found")
-            summary["failed_users"].append(user_id)
-            continue
-        
-        try:
-            with open(output_file, 'r', encoding='utf-8') as f:
-                user_data = json.load(f)
-            
-            summary["processed_users"] += 1
-            
-            # 提取关键指标
-            user_summary = {
+        # 只保留有错误且过滤后仍有剩余的用户
+        if user_errors:
+            output_rows.append({
                 "user_id": user_id,
-                "reviews_analyzed": user_data.get("reviews_analyzed", 0),
-                "total_words": user_data.get("total_words", 0),
-                "total_character_errors": user_data.get("total_character_errors", 0),
-                "character_error_rate": user_data.get("character_error_rate", 0.0),
-                "average_severity": user_data.get("average_severity", 0.0),
-                "top_error_types": []
-            }
-            
-            # 汇总到总体统计
-            summary["aggregate_stats"]["total_reviews_analyzed"] += user_summary["reviews_analyzed"]
-            summary["aggregate_stats"]["total_words_analyzed"] += user_summary["total_words"]
-            summary["aggregate_stats"]["total_character_errors"] += user_summary["total_character_errors"]
-            
-            # 错误类型分布
-            error_types = user_data.get("error_type_distribution", {})
-            for error_type, count in error_types.items():
-                error_type_counter[error_type] = error_type_counter.get(error_type, 0) + count
-            
-            # Top 3 错误类型
-            top_types = sorted(error_types.items(), key=lambda x: x[1], reverse=True)[:3]
-            user_summary["top_error_types"] = [{"type": t, "count": c} for t, c in top_types]
-            
-            # 严重度分布
-            severity_dist = user_data.get("severity_distribution", {})
-            for severity, count in severity_dist.items():
-                if severity in summary["aggregate_stats"]["severity_distribution"]:
-                    summary["aggregate_stats"]["severity_distribution"][severity] += count
-            
-            summary["user_summaries"][user_id] = user_summary
-            
-            log_with_timestamp(
-                f"  ✓ User {user_id}: {user_summary['total_character_errors']} errors "
-                f"in {user_summary['reviews_analyzed']} reviews "
-                f"(rate: {user_summary['character_error_rate']:.2f}/100 words)"
+                "category": category,
+                "status": "success",
+                "total_errors": len(user_errors) + sum(user_simple_counts.values()),
+                "filtered_errors": len(user_errors),
+                "simple_error_counts": dict(user_simple_counts),
+                "error_details": user_errors,
+            })
+        
+        # 进度输出
+        if idx % PROGRESS_INTERVAL_USERS == 0 or idx == len(users):
+            elapsed = format_elapsed(start_time)
+            log(
+                f"[{category}] Processed {idx}/{len(users)} users; "
+                f"total_errors={total_errors}; filtered={total_filtered}; "
+                f"elapsed={elapsed}"
             )
-            
-        except Exception as e:
-            log_with_timestamp(f"  ✗ User {user_id}: error reading results - {e}")
-            summary["failed_users"].append(user_id)
     
-    # 计算总体错误率
-    if summary["aggregate_stats"]["total_words_analyzed"] > 0:
-        summary["aggregate_stats"]["overall_error_rate"] = round(
-            summary["aggregate_stats"]["total_character_errors"] / 
-            summary["aggregate_stats"]["total_words_analyzed"] * 100,
-            2
-        )
+    # 保存结果
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    log(f"Writing {len(output_rows)} users with errors to: {output_file}")
+    with output_file.open("w", encoding="utf-8") as f:
+        json.dump(output_rows, f, ensure_ascii=False, indent=2)
     
-    # 错误类型分布
-    summary["aggregate_stats"]["error_type_distribution"] = dict(
-        sorted(error_type_counter.items(), key=lambda x: x[1], reverse=True)
-    )
-    
-    # 保存汇总
-    summary_file = os.path.join(output_dir, "all_users_summary.json")
-    with open(summary_file, 'w', encoding='utf-8') as f:
-        json.dump(summary, f, indent=2, ensure_ascii=False)
-    
-    log_with_timestamp(f"Summary saved to {summary_file}")
-    
-    # 打印汇总统计
-    log_with_timestamp("="*80)
-    log_with_timestamp("AGGREGATE STATISTICS")
-    log_with_timestamp("="*80)
-    log_with_timestamp(f"Processed users: {summary['processed_users']}/{summary['total_users']}")
-    log_with_timestamp(f"Total reviews analyzed: {summary['aggregate_stats']['total_reviews_analyzed']}")
-    log_with_timestamp(f"Total words analyzed: {summary['aggregate_stats']['total_words_analyzed']}")
-    log_with_timestamp(f"Total character errors: {summary['aggregate_stats']['total_character_errors']}")
-    log_with_timestamp(f"Overall error rate: {summary['aggregate_stats']['overall_error_rate']}/100 words")
-    
-    log_with_timestamp("\nTop Error Types:")
-    top_error_types = list(summary['aggregate_stats']['error_type_distribution'].items())[:5]
-    for i, (error_type, count) in enumerate(top_error_types, 1):
-        log_with_timestamp(f"  {i}. {error_type}: {count}")
-    
-    log_with_timestamp("\nSeverity Distribution:")
-    for severity, count in summary['aggregate_stats']['severity_distribution'].items():
-        log_with_timestamp(f"  {severity}: {count}")
-    
-    if summary["failed_users"]:
-        log_with_timestamp(f"\nFailed users: {', '.join(summary['failed_users'])}")
-    
-    return summary
+    log(f"=== Finished: {category}; elapsed={format_elapsed(start_time)} ===")
+    log(f"Total: {len(users)} users, {total_errors} errors, {total_filtered} filtered")
+    log(f"Simple error breakdown: {dict(simple_counts_total)}")
+
+
+# ============================================================================
+# CLI
+# ============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Extract character-level errors for all selected users",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__
-    )
-    
-    # 输入文件
-    parser.add_argument(
-        "--selected-users-file",
-        default="/home/wlia0047/ar57/wenyu/result/personal_query/00_data_preparation/selected_users.json",
-        help="Path to selected_users.json (default: %(default)s)"
-    )
-    parser.add_argument(
-        "--reviews-dir",
-        default="/home/wlia0047/ar57/wenyu/result/personal_query/00_data_preparation",
-        help="Directory containing reviews_{USER_ID}.json files (default: %(default)s)"
-    )
-    parser.add_argument(
-        "--metadata-file",
-        default="/home/wlia0047/ar57/wenyu/data/Amazon-Reviews-2018/raw/meta_Arts_Crafts_and_Sewing.json",
-        help="Path to product metadata file (default: %(default)s)"
-    )
-    
-    # 输出目录
-    parser.add_argument(
-        "--output-dir",
-        default="/home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis",
-        help="Output directory (default: %(default)s)"
-    )
-    
-    # 用户选择
-    parser.add_argument(
-        "--user-ids",
-        nargs="+",
-        help="Specific user IDs to process (default: all users from selected_users.json)"
-    )
-    
-    parser.add_argument(
-        "--method",
-        choices=["character_level", "p3_optimal"],
-        default="character_level",
-        help="Analysis method: character_level (default) or p3_optimal (MTSummit 2025 template)"
-    )
-    parser.add_argument(
-        "--max-reviews",
-        type=int,
-        help="Maximum number of reviews to analyze per user (default: all)"
-    )
-    parser.add_argument(
-        "--max-workers",
-        type=int,
-        default=50,
-        help="Maximum concurrent workers (default: 50)"
-    )
-    
-    # 跳过汇总
-    parser.add_argument(
-        "--skip-summary",
-        action="store_true",
-        help="Skip generating summary statistics"
-    )
+    parser = argparse.ArgumentParser(description="Extract and filter writing errors from reviews")
+    parser.add_argument("--category", required=True, choices=[
+        "Baby_Products", "Grocery_and_Gourmet_Food", "Pet_Supplies"
+    ])
+    parser.add_argument("--max-users", type=int, default=None, help="Limit number of users to process")
     
     args = parser.parse_args()
-    
-    # 创建输出目录
-    os.makedirs(args.output_dir, exist_ok=True)
-    
-    log_with_timestamp("="*80)
-    log_with_timestamp("Stage 4: Extract Character-Level Errors for All Users")
-    log_with_timestamp("="*80)
-    
-    # 确定要处理的用户
-    if args.user_ids:
-        # 用户指定了具体用户ID
-        user_ids = args.user_ids
-        log_with_timestamp(f"Processing {len(user_ids)} user(s) specified by --user-ids")
-    else:
-        # 从 selected_users.json 读取
-        user_ids = load_selected_users(args.selected_users_file)
-    
-    if not user_ids:
-        log_with_timestamp("ERROR: No users to process!")
-        sys.exit(1)
-    
-    # 验证用户存在
-    existing_users = validate_user_review_files(args.reviews_dir, user_ids)
-    
-    if not existing_users:
-        log_with_timestamp("ERROR: No valid users found with review files!")
-        sys.exit(1)
-    
-    user_ids_to_process = sorted(list(existing_users))
-    
-    log_with_timestamp(f"Selected analysis method: {args.method}")
-    
-    if args.method == "p3_optimal":
-        result = run_p3_analysis(
-            user_ids=user_ids_to_process,
-            reviews_dir=args.reviews_dir,
-            output_dir=args.output_dir,
-            max_reviews=args.max_reviews,
-            max_workers=args.max_workers
-        )
-        
-        if not result["success"]:
-            log_with_timestamp("ERROR: P3 optimal template analysis failed!")
-            sys.exit(1)
-    else:
-        result = run_character_level_analysis(
-            user_ids=user_ids_to_process,
-            reviews_dir=args.reviews_dir,
-            metadata_file=args.metadata_file,
-            output_dir=args.output_dir,
-            max_reviews=args.max_reviews,
-            max_workers=args.max_workers
-        )
-        
-        if not result["success"]:
-            log_with_timestamp("ERROR: Character-level analysis failed!")
-            sys.exit(1)
-    
-    # 生成汇总统计
-    if not args.skip_summary:
-        summary = generate_summary(args.output_dir, user_ids_to_process)
-        
-        if summary["processed_users"] == 0:
-            log_with_timestamp("ERROR: No users were successfully processed!")
-            sys.exit(1)
-    
-    log_with_timestamp("="*80)
-    log_with_timestamp("ALL PROCESSING COMPLETE!")
-    log_with_timestamp("="*80)
+    extract_and_filter_errors(args.category, args.max_users)
+
 
 if __name__ == "__main__":
     main()
