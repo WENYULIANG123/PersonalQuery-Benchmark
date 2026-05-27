@@ -8,7 +8,7 @@ import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple
 
 from llm_client import LLMClient
 
@@ -23,6 +23,9 @@ PROGRESS_INTERVAL_USERS = 100
 
 # 常见英语词缀
 COMMON_AFFIXES = ['s', 'es', 'ed', 'ing', 'er', 'est', 'ly', 'd', 'en', 'n']
+
+# Prompt 文件路径
+PROMPT_FILE = Path(__file__).resolve().parent / "extract_prompts.json"
 
 
 # ============================================================================
@@ -134,27 +137,41 @@ def format_elapsed(start_time: float) -> str:
 class P3ErrorExtractor:
     """使用 P3 最优模板提取错误"""
     
-    P3_TEMPLATE = """Edit the following text for spelling and grammar mistakes, make minimal changes, and return only the corrected text. If the text is already correct, return it without any explanations:."""
-    
     def __init__(self, llm_client: LLMClient):
         self.llm_client = llm_client
+        self._load_prompts()
+    
+    def _load_prompts(self) -> None:
+        """从 JSON 文件加载 prompt"""
+        if not PROMPT_FILE.exists():
+            raise FileNotFoundError(f"Prompt file not found: {PROMPT_FILE}")
+        
+        with PROMPT_FILE.open("r", encoding="utf-8") as f:
+            prompts = json.load(f)
+        
+        self.template = prompts.get("p3_template", "")
+        self.max_tokens = prompts.get("max_tokens", 256)
+        self.max_retries = prompts.get("max_retries", 3)
+        
+        if not self.template:
+            raise ValueError("p3_template is empty in prompt file")
     
     def create_p3_prompt(self, review_text: str) -> str:
-        return f"""<s>[INST] {self.P3_TEMPLATE}
+        return f"""<s>[INST] {self.template}
 
 "{review_text}"
 
 Please return ONLY the corrected text. If no corrections are needed, return the original text exactly as it is.
 [/INST]"""
     
-    def extract_errors(self, original_text: str, max_retries: int = 3) -> Dict:
+    def extract_errors(self, original_text: str) -> Dict:
         prompt = self.create_p3_prompt(original_text)
         
-        for attempt in range(max_retries):
+        for attempt in range(self.max_retries):
             try:
                 response = self.llm_client.call(
                     prompt=prompt,
-                    max_tokens=256
+                    max_tokens=self.max_tokens
                 )
                 
                 corrected_text = response.strip()
@@ -167,7 +184,7 @@ Please return ONLY the corrected text. If no corrections are needed, return the 
                 }
             
             except Exception:
-                if attempt < max_retries - 1:
+                if attempt < self.max_retries - 1:
                     continue
                 else:
                     return {
@@ -191,6 +208,7 @@ def extract_and_filter_errors(category: str, max_users: int = None) -> None:
     
     log(f"=== Processing category: {category} ===")
     log(f"Reading from: {input_file}")
+    log(f"Using prompts from: {PROMPT_FILE}")
     
     if not input_file.exists():
         log(f"Error: File not found: {input_file}")
