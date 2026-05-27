@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run style_vector_probe task for Pet_Supplies."""
+"""Run style_vector_probe SVR 10-fold task for Pet_Supplies."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ os.environ["PQ_CATEGORY"] = "Pet_Supplies"
 _COMMON = Path(__file__).resolve().parent / "common"
 sys.path.insert(0, str(_COMMON))
 
-from evaluate_vades_style_vector_probe import main as probe_main
+from evaluate_vades_style_vector_probe_svr10fold import main as probe_main
 
 if __name__ == "__main__":
     probe_main()
