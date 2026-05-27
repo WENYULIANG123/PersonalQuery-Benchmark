@@ -45,14 +45,8 @@ def main() -> None:
         log(f"期望文件: {train_module.SENTENCE_FILE}")
         sys.exit(1)
     
-    # Step 1: 加载候选 query
-    log("Step 1: 加载候选 query")
-    candidate_rows = train_module.load_candidate_query_rows()
-    candidate_user_ids = {row["user_id"] for row in candidate_rows}
-    log(f"候选用户数: {len(candidate_user_ids)}")
-    
-    # Step 2: 加载解析结果
-    log("Step 2: 加载解析结果")
+    # Step 1: 加载解析结果
+    log("Step 1: 加载解析结果")
     with train_module.SENTENCE_FILE.open("r", encoding="utf-8") as f:
         enriched_sentence_rows = [json.loads(line) for line in f if line.strip()]
     log(f"已加载 {len(enriched_sentence_rows)} 条解析句子")
@@ -64,8 +58,8 @@ def main() -> None:
         log("错误: 没有解析句子")
         sys.exit(1)
     
-    # Step 3: 加载排除用户
-    log("Step 3: 加载排除用户")
+    # Step 2: 加载排除用户
+    log("Step 2: 加载排除用户")
     if train_module.EXCLUDED_USER_FILE.exists():
         with train_module.EXCLUDED_USER_FILE.open("r", encoding="utf-8") as f:
             excluded_rows = [json.loads(line) for line in f if line.strip()]
@@ -73,80 +67,53 @@ def main() -> None:
         excluded_rows = []
     log(f"排除用户数: {len(excluded_rows)}")
     
-    # 获取用户 ID 列表
-    user_ids = list({row["user_id"] for row in enriched_sentence_rows})
-    log(f"用户数: {len(user_ids)}")
-    
-    # Step 4: 构建训练数据集
-    log("Step 4: 构建训练数据集")
+    # Step 3: 构建训练数据集
+    log("Step 3: 构建训练数据集")
     user_ids_filtered, dataset = train_module.build_training_dataset(enriched_sentence_rows, feature_names)
     log(f"训练数据集构建完成: {len(user_ids_filtered)} 用户")
     
-    # Step 5: 训练模型
-    log("Step 5: 训练 VADES 模型")
+    # Step 4: 训练模型
+    log("Step 4: 训练 VADES 模型")
     train_module.DEVICE = train_module.infer_device()
     train_module.set_random_seed(train_module.SEED)
     log(f"运行设备: {train_module.DEVICE}")
     encoder, user_table, training_info = train_module.train_vades_user_distribution_model(user_ids_filtered, dataset, feature_names)
     log("模型训练完成")
     
-    # Step 6: 推理用户分布
-    log("Step 6: 推理用户句子分布")
-    sentence_output_rows, user_profile_rows = train_module.infer_user_sentence_distributions(
-        encoder, user_table, user_ids_filtered, dataset
-    )
-    log(f"推理完成: {len(sentence_output_rows)} 句子, {len(user_profile_rows)} 用户")
+    # Step 5: 保存模型
+    log("Step 5: 保存模型")
+    encoder_path = train_module.INPUT_DIR / "vades_encoder.pt"
+    user_table_path = train_module.INPUT_DIR / "vades_user_table.pt"
+    torch = sys.modules.get("torch")
+    if torch is None:
+        import torch
+    torch.save({"model_state_dict": encoder.state_dict(), "input_dim": encoder.input_dim, "hidden_dim": encoder.hidden_dim, "latent_dim": encoder.latent_dim}, encoder_path)
+    torch.save({"model_state_dict": user_table.state_dict(), "num_users": user_table.num_users, "latent_dim": user_table.latent_dim}, user_table_path)
+    log(f"模型已保存: {encoder_path}, {user_table_path}")
     
-    # Step 7: 校准阈值
-    log("Step 7: 校准绝对阈值")
-    abs_thresholds = train_module.calibrate_absolute_threshold_with_unseen_holdout(
-        encoder, user_table, user_ids_filtered, dataset
-    )
-    log("阈值校准完成")
-    
-    # Step 8: 排序和选择 query
-    log("Step 8: 排序和选择 query")
-    selected_rows, rejected_rows, query_output_rows = train_module.rank_and_select_queries(
-        encoder=encoder,
-        user_table=user_table,
-        dataset=dataset,
-        candidate_rows=candidate_rows,
-        user_ids=user_ids_filtered,
-        user_profile_rows=user_profile_rows,
-        abs_thresholds=abs_thresholds,
-    )
-    log(f"Query 选择完成: {len(selected_rows)} 选中, {len(rejected_rows)} 拒绝")
-    
-    # Step 9: 保存结果
-    log("Step 9: 保存训练结果")
-    train_module.write_jsonl(train_module.SENTENCE_FILE, sentence_output_rows)
-    train_module.write_jsonl(train_module.USER_PROFILE_FILE, user_profile_rows)
-    train_module.write_jsonl(train_module.SELECTED_RECORD_FILE, selected_rows)
-    train_module.write_jsonl(train_module.REJECTED_RECORD_FILE, rejected_rows)
-    train_module.QUERY_FILE.write_text(json.dumps(query_output_rows, ensure_ascii=False, indent=2), encoding="utf-8")
-    
-    # Step 10: 保存摘要
-    log("Step 10: 保存训练摘要")
-    summary = train_module.build_summary(
-        user_ids=user_ids_filtered,
-        sentence_rows=sentence_output_rows,
-        excluded_rows=excluded_rows,
-        feature_names=feature_names,
-        training_info=training_info,
-        user_profile_rows=user_profile_rows,
-        selected_rows=selected_rows,
-        rejected_rows=rejected_rows,
-        query_output_rows=query_output_rows,
-    )
+    # Step 6: 保存训练摘要
+    log("Step 6: 保存训练摘要")
+    summary = {
+        "category": CATEGORY,
+        "num_users": len(user_ids_filtered),
+        "num_sentences": len(enriched_sentence_rows),
+        "num_excluded_users": len(excluded_rows),
+        "feature_names": feature_names,
+        "training_epochs": training_info["epochs"],
+        "model_files": {
+            "encoder": str(encoder_path),
+            "user_table": str(user_table_path),
+        }
+    }
     train_module.SUMMARY_FILE.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     train_module.write_jsonl(train_module.DETAIL_FILE, training_info["epochs"])
     
     log("训练阶段完成！")
-    log(f"结果文件:")
-    log(f"  - 句子: {train_module.SENTENCE_FILE}")
-    log(f"  - 用户画像: {train_module.USER_PROFILE_FILE}")
-    log(f"  - 选中 query: {train_module.SELECTED_RECORD_FILE}")
+    log(f"模型文件:")
+    log(f"  - Encoder: {encoder_path}")
+    log(f"  - User Table: {user_table_path}")
     log(f"  - 摘要: {train_module.SUMMARY_FILE}")
+    log(f"下一步: 运行 12_query_selection_{CATEGORY}.py 进行推理和查询选择")
 
 
 if __name__ == "__main__":

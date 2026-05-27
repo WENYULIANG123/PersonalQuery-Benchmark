@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Query selection for Pet_Supplies (load trained model and select queries)."""
+"""Query selection for Pet_Supplies (load trained model, infer, and select queries)."""
 
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ def main() -> None:
     
     if not encoder_path.exists():
         log(f"错误: 模型不存在: {encoder_path}")
+        log(f"请先运行 12_train_only_{CATEGORY}.py 训练模型")
         sys.exit(1)
     
     # Step 1: 加载候选 query
@@ -100,11 +101,12 @@ def main() -> None:
     user_table.eval()
     log("模型加载完成")
     
-    # Step 6: 加载用户画像
-    log("Step 6: 加载用户画像")
-    with user_profile_file.open("r", encoding="utf-8") as f:
-        user_profile_rows = [json.loads(line) for line in f if line.strip()]
-    log(f"用户画像数: {len(user_profile_rows)}")
+    # Step 6: 推理用户分布
+    log("Step 6: 推理用户句子分布")
+    sentence_output_rows, user_profile_rows = train_module.infer_user_sentence_distributions(
+        encoder, user_table, user_ids_filtered, dataset
+    )
+    log(f"推理完成: {len(sentence_output_rows)} 句子, {len(user_profile_rows)} 用户")
     
     # Step 7: 过滤用户（只保留有候选 query、user profile 和 holdout 句子的用户）
     log("Step 7: 过滤用户")
@@ -114,6 +116,21 @@ def main() -> None:
     for idx in holdout_indices:
         uid = dataset["sentence_rows"][idx]["user_id"]
         holdout_user_ids.add(uid)
+    
+    # 调试：输出每个条件的数量
+    log(f"  - 有候选query的用户: {len(candidate_user_ids)}")
+    log(f"  - 有用户画像的用户: {len(user_profile_user_ids)}")
+    log(f"  - 通过数据集构建的用户: {len(user_ids_filtered)}")
+    log(f"  - holdout集中有句子的用户: {len(holdout_user_ids)}")
+    
+    # 逐步计算交集
+    intermediate_1 = candidate_user_ids & user_profile_user_ids
+    log(f"  - candidate & user_profile: {len(intermediate_1)}")
+    intermediate_2 = intermediate_1 & set(user_ids_filtered)
+    log(f"  - & user_ids_filtered: {len(intermediate_2)}")
+    valid_user_ids = intermediate_2 & holdout_user_ids
+    log(f"  - & holdout_user_ids: {len(valid_user_ids)}")
+    
     valid_user_ids = candidate_user_ids & user_profile_user_ids & set(user_ids_filtered) & holdout_user_ids
     candidate_rows = [row for row in candidate_rows if row["user_id"] in valid_user_ids]
     user_profile_rows = [row for row in user_profile_rows if row["user_id"] in valid_user_ids]
@@ -138,11 +155,14 @@ def main() -> None:
     
     # Step 10: 保存结果
     log("Step 10: 保存结果")
+    train_module.write_jsonl(sentence_file, sentence_output_rows)
+    train_module.write_jsonl(user_profile_file, user_profile_rows)
     train_module.write_jsonl(selected_record_file, selected_rows)
     train_module.write_jsonl(rejected_record_file, rejected_rows)
     query_output_file.parent.mkdir(parents=True, exist_ok=True)
     query_output_file.write_text(json.dumps(query_output_rows, ensure_ascii=False, indent=2), encoding="utf-8")
     
+    log(f"用户画像已保存: {user_profile_file}")
     log(f"结果已保存: {selected_record_file}")
     log(f"{CATEGORY} Query 选择完成！")
 
