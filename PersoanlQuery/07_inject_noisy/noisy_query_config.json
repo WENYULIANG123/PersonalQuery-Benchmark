@@ -1,7 +1,7 @@
 {
-  "num_users_to_test": 10000,
+  "num_users_to_test": 100000,
   "max_workers": 50,
-  "use_minimaxio": false,
+  "use_minimaxio": true,
   "inject_error_count": 3,
   "error_injection_rate": 0.8,
   "prompt_file": "/home/wlia0047/ar57/wenyu/PersoanlQuery/07_inject_noisy/noisy_query_prompts.json",

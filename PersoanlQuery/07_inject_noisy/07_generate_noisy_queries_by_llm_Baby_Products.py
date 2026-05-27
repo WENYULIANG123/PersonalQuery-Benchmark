@@ -58,12 +58,13 @@ USER_ERROR_FILE = get_required_config_value(_CATEGORY_CONFIG, 'user_error_file')
 NOISY_OUTPUT_FILE = get_required_config_value(_CATEGORY_CONFIG, 'noisy_output_file')
 NOISY_PROMPT_FILE = get_required_config_value(_NOISY_CONFIG, 'prompt_file')
 SYNTAX_DEPTH_QUERY_FILE = (
-    f'/home/wlia0047/ar57/wenyu/result/personal_query/06_query/{CATEGORY}/query_by_syntax_depth.json'
+    f'/home/wlia0047/ar57/wenyu/result/personal_query/06_query/{CATEGORY}/'
+    'query_by_syntax_depth_vades_lite_sentence_user_distribution_train10_holdout10.json'
 )
 USER_REVIEW_DEPTH_FILE = (
     f'/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/{CATEGORY}/user_average_syntax_depth.json'
 )
-INJECTION_SOURCE = 'syntax_depth_preserve_depth'
+INJECTION_SOURCE = 'final_strict_query_no_depth_constraint'
 
 # 加载噪声 prompt 模板
 with open(NOISY_PROMPT_FILE, 'r', encoding='utf-8') as f:
@@ -359,17 +360,17 @@ def call_llm(prompt: str, system_base: str = None) -> str:
             user_content=prompt,
             max_tokens=LLM_MAX_OUTPUT_TOKENS,
             temperature=1.0,
-            max_retries=1,
+            max_retries=3,
             stream=True,
-            retry_on_empty_response=False,
+            retry_on_empty_response=True,
         )
     else:
-        response = _minimax_client.call(prompt=prompt, max_tokens=LLM_MAX_OUTPUT_TOKENS, temperature=1.0, max_retries=1)
+        response = _minimax_client.call(prompt=prompt, max_tokens=LLM_MAX_OUTPUT_TOKENS, temperature=1.0, max_retries=3)
 
     log(f"[Cache] {cache_info}")
     log(f"[Response] response:\n{response}")
     if not response:
-        log("[ERROR] LLM response empty, marked failed without retry")
+        log("[ERROR] LLM response empty after max 3 retries")
     return response
 
 
@@ -1174,20 +1175,6 @@ def find_token_info_at_span(doc, token_depths: dict[int, int], start: int, end: 
     return None
 
 
-def validate_depth_only_syntax(query: str, expected_depth: int) -> str | None:
-    if not isinstance(query, str) or not query:
-        raise ValueError("query 必须是非空字符串")
-    if not isinstance(expected_depth, int) or expected_depth <= 0:
-        raise ValueError("expected_depth 必须是正整数")
-    doc = _parse_spacy_doc(query)
-    _, actual_depth = compute_doc_token_depths(doc)
-    if actual_depth != expected_depth:
-        if actual_depth < expected_depth:
-            return 'syntax_depth_too_shallow_after_injection'
-        return 'syntax_depth_too_deep_after_injection'
-    return None
-
-
 def build_anchor_rewrite_result(
     original_query: str,
     candidate_noisy_query: str,
@@ -1210,10 +1197,6 @@ def build_anchor_rewrite_result(
 
     noisy_doc = _parse_spacy_doc(candidate_noisy_query)
     noisy_token_depths, noisy_max_depth = compute_doc_token_depths(noisy_doc)
-    if noisy_max_depth != expected_depth:
-        if noisy_max_depth < expected_depth:
-            return None, 'syntax_depth_too_shallow_after_rewrite'
-        return None, 'syntax_depth_too_deep_after_rewrite'
 
     selected_anchor_spec = None
     for pattern in patterns:
@@ -1248,9 +1231,6 @@ def build_anchor_rewrite_result(
     error_start = selected_anchor_spec['source_start']
     error_end = selected_anchor_spec['source_end']
     revised_correct_query = replace_span(candidate_noisy_query, error_start, error_end, pattern['corrected'])
-    correct_depth_status = validate_depth_only_syntax(revised_correct_query, expected_depth)
-    if correct_depth_status is not None:
-        return None, correct_depth_status.replace('_after_injection', '_after_correcting_error')
     if not attributes_appear_once_non_overlapping(revised_correct_query, query_info):
         return None, 'corrected_query_attribute_count_invalid'
 
@@ -1284,10 +1264,6 @@ def build_candidate_correct_anchor_result(
 
     candidate_doc = _parse_spacy_doc(candidate_correct_query)
     candidate_token_depths, candidate_max_depth = compute_doc_token_depths(candidate_doc)
-    if candidate_max_depth != expected_depth:
-        if candidate_max_depth < expected_depth:
-            return None, 'syntax_depth_too_shallow_after_rewrite'
-        return None, 'syntax_depth_too_deep_after_rewrite'
 
     anchor_specs = []
     seen_spans = set()
@@ -1576,18 +1552,6 @@ def evaluate_candidate_query_for_feedback(
 
     candidate_doc = _parse_spacy_doc(candidate_query)
     _, candidate_depth = compute_doc_token_depths(candidate_doc)
-    if candidate_depth != expected_depth:
-        if candidate_depth < expected_depth:
-            failure_status = 'syntax_depth_too_shallow_after_rewrite'
-        else:
-            failure_status = 'syntax_depth_too_deep_after_rewrite'
-        return {
-            'candidate_query': candidate_query.strip(),
-            'candidate_depth': candidate_depth,
-            'depth_delta': abs(candidate_depth - expected_depth),
-            'candidate_result': None,
-            'failure_status': failure_status,
-        }
     candidate_result, failure_status = build_candidate_correct_anchor_result(
         original_query,
         candidate_query,
@@ -1613,18 +1577,14 @@ def select_best_failed_candidate(evaluations: list[dict], expected_depth: int) -
         return None
 
     status_priority = {
-        'syntax_depth_too_shallow_after_rewrite': 0,
-        'syntax_depth_too_deep_after_rewrite': 0,
-        'syntax_depth_too_shallow_after_correcting_error': 1,
-        'syntax_depth_too_deep_after_correcting_error': 1,
-        'llm_error_not_inserted': 2,
-        'llm_correct_anchor_not_found': 2,
-        'llm_correct_anchor_not_unique': 2,
-        'llm_error_token_not_found': 3,
-        'llm_correct_anchor_token_not_found': 3,
-        'llm_rewrite_attribute_count_invalid': 4,
-        'corrected_query_attribute_count_invalid': 4,
-        'no_anchor': 5,
+        'llm_error_not_inserted': 0,
+        'llm_correct_anchor_not_found': 0,
+        'llm_correct_anchor_not_unique': 0,
+        'llm_error_token_not_found': 1,
+        'llm_correct_anchor_token_not_found': 1,
+        'llm_rewrite_attribute_count_invalid': 2,
+        'corrected_query_attribute_count_invalid': 2,
+        'no_anchor': 3,
     }
 
     def score(item: dict) -> tuple[int, int]:
@@ -1795,8 +1755,6 @@ def select_anchor_insertion_locally(
 ) -> tuple[dict | None, str | None, str | None]:
     selected_patterns = normalize_selected_anchor_patterns(error_patterns)
     query_tokens, computed_depth = extract_query_tokens(doc)
-    if computed_depth != expected_depth:
-        raise ValueError(f"computed_depth 不一致: expected={expected_depth}, actual={computed_depth}")
     try:
         candidate_queries = generate_llm_local_fragments(query, query_info, query_tokens, selected_patterns)
     except Exception as exc:
@@ -1953,8 +1911,6 @@ def select_anchor_insertion_with_llm(
     if not selected_patterns:
         return None, 'no_token_error_pattern'
     query_tokens, computed_depth = extract_query_tokens(doc)
-    if computed_depth != expected_depth:
-        raise ValueError(f"computed_depth 不一致: expected={expected_depth}, actual={computed_depth}")
     system_base, user_content = build_llm_anchor_insertion_prompt(query, query_info, query_tokens, selected_patterns)
     response = call_llm(user_content, system_base=system_base)
     if not response or not response.strip():
@@ -2116,11 +2072,6 @@ def validate_post_injection_syntax_multi(noisy_query: str, anchor_entries: list,
         raise ValueError("expected_max_depth 必须是正整数")
 
     noisy_doc = _parse_spacy_doc(noisy_query)
-    noisy_token_depths, noisy_max_depth = compute_doc_token_depths(noisy_doc)
-    if noisy_max_depth != expected_max_depth:
-        if noisy_max_depth < expected_max_depth:
-            return 'syntax_depth_too_shallow_after_injection'
-        return 'syntax_depth_too_deep_after_injection'
 
     for idx, entry in enumerate(anchor_entries):
         if not isinstance(entry, dict):
@@ -2185,11 +2136,6 @@ def validate_post_injection_syntax(
 
     expected_end = expected_start + len(error_text)
     noisy_doc = _parse_spacy_doc(noisy_query)
-    noisy_token_depths, noisy_max_depth = compute_doc_token_depths(noisy_doc)
-    if noisy_max_depth != expected_max_depth:
-        if noisy_max_depth < expected_max_depth:
-            return 'syntax_depth_too_shallow_after_injection'
-        return 'syntax_depth_too_deep_after_injection'
     for token in noisy_doc:
         if (
             token.text == error_text
@@ -2211,8 +2157,6 @@ def inject_by_observed_error_depth(
     if not injectable_patterns:
         return {'status': 'no_token_error_pattern'}
     query_tokens, computed_depth = extract_query_tokens(doc)
-    if computed_depth != expected_depth:
-        raise ValueError(f"computed_depth 不一致: expected={expected_depth}, actual={computed_depth}")
     if not query_tokens:
         return {'status': 'no_token_available'}
 
@@ -2403,6 +2347,104 @@ def write_noisy_result_incremental(result_item: dict, output_file: str):
         f.write('\n')
 
 
+def load_query_records_by_key(records: list) -> dict:
+    record_by_key = {}
+    for idx, record in enumerate(records):
+        validate_syntax_depth_query_record(record, idx)
+        key = completed_key_from_record(record)
+        if key in record_by_key:
+            raise ValueError(f"query 文件存在重复 user_id/asin: {key}")
+        record_by_key[key] = record
+    return record_by_key
+
+
+def noisy_record_is_completed(record: dict) -> bool:
+    if not isinstance(record, dict):
+        raise TypeError("record 必须是对象")
+    noisy_info = record.get('noisy_injection')
+    if not isinstance(noisy_info, dict):
+        return False
+    injection_source = noisy_info.get('injection_source')
+    if injection_source != INJECTION_SOURCE:
+        return False
+    ground_truth_query = noisy_info.get('ground_truth_query')
+    noisy_query = noisy_info.get('noisy_query')
+    if not isinstance(ground_truth_query, str) or not ground_truth_query.strip():
+        return False
+    if not isinstance(noisy_query, str) or not noisy_query.strip():
+        return False
+    return True
+
+
+def load_completed_query_keys_from_records(records: list) -> set:
+    completed = set()
+    for record in records:
+        if noisy_record_is_completed(record):
+            completed.add(completed_key_from_record(record))
+    return completed
+
+
+def update_query_record_in_place(record: dict, result_item: dict) -> None:
+    if not isinstance(record, dict):
+        raise TypeError("record 必须是对象")
+    if not isinstance(result_item, dict):
+        raise TypeError("result_item 必须是对象")
+    if result_item.get('status') != 'success':
+        return
+    if 'ground_truth_query' not in result_item or 'noisy_query' not in result_item:
+        raise KeyError("成功结果缺少 ground_truth_query 或 noisy_query")
+    if 'injected_errors' not in result_item:
+        raise KeyError("成功结果缺少 injected_errors")
+    if 'anchor_entries' not in result_item:
+        raise KeyError("成功结果缺少 anchor_entries")
+    if 'query_info' not in result_item or not isinstance(result_item['query_info'], dict):
+        raise KeyError("成功结果缺少 query_info")
+
+    noisy_doc = _parse_spacy_doc(result_item['noisy_query'])
+    noisy_token_depths, _ = compute_doc_token_depths(noisy_doc)
+    injection_target_depth = []
+    for idx, anchor_entry in enumerate(result_item['anchor_entries']):
+        matched_token = None
+        for token in noisy_doc:
+            if (
+                token.text == anchor_entry['replacement']
+                and token.idx == anchor_entry['final_start']
+                and token.idx + len(token.text) == anchor_entry['final_end']
+            ):
+                matched_token = token
+                break
+        if matched_token is None:
+            raise ValueError(f"anchor_entries[{idx}] 在 noisy_query 中未找到对应 token")
+        actual_depth = noisy_token_depths.get(matched_token.i)
+        if actual_depth is None:
+            raise ValueError(f"anchor_entries[{idx}] 的 token depth 缺失")
+        injection_target_depth.append(actual_depth)
+
+    syntax_depth_query = record.get('syntax_depth_query')
+    if not isinstance(syntax_depth_query, dict):
+        raise TypeError("record.syntax_depth_query 必须是对象")
+    syntax_depth_query['query'] = result_item['ground_truth_query']
+    syntax_depth_query['word_count'] = int(len(result_item['ground_truth_query'].split()))
+
+    record['noisy_injection'] = {
+        'noisy_query': result_item['noisy_query'],
+        'noise_type': [item['error_type'] for item in result_item['injected_errors']],
+        'correct_text': [item['correct'] for item in result_item['injected_errors']],
+        'noisy_text': [item['error'] for item in result_item['injected_errors']],
+        'anchor_replaced_text': [entry['token_info']['text'] for entry in result_item['anchor_entries']],
+        'injection_target_depth': injection_target_depth,
+        'injection_source': INJECTION_SOURCE,
+        'query_rewritten': bool(result_item['query_rewritten']),
+        'injection_mode': result_item['injection_mode'],
+    }
+
+
+def write_query_records_back(records: list, file_path: str) -> None:
+    output_path = file_path
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(records, f, indent=2, ensure_ascii=False)
+
+
 # ========================================
 # 主函数
 # ========================================
@@ -2554,15 +2596,13 @@ def validate_syntax_depth_query_record(record: dict, idx: int) -> None:
     query_info = record['syntax_depth_query']
     if not isinstance(query_info, dict):
         raise TypeError(f"records[{idx}].syntax_depth_query 必须是对象")
-    for required_key in ('query', 'word_count', 'actual_depth', 'attrs_used'):
+    for required_key in ('query', 'word_count', 'attrs_used'):
         if required_key not in query_info:
             raise KeyError(f"records[{idx}].syntax_depth_query 缺少字段: {required_key}")
     if not isinstance(query_info['query'], str) or not query_info['query'].strip():
         raise ValueError(f"records[{idx}].syntax_depth_query.query 必须是非空字符串")
     if not isinstance(query_info['word_count'], int):
         raise TypeError(f"records[{idx}].syntax_depth_query.word_count 必须是整数")
-    if not isinstance(query_info['actual_depth'], int):
-        raise TypeError(f"records[{idx}].syntax_depth_query.actual_depth 必须是整数")
     attrs_used = query_info['attrs_used']
     if not isinstance(attrs_used, dict) or len(attrs_used) != 5:
         raise ValueError(f"records[{idx}].syntax_depth_query.attrs_used 必须是包含 5 个属性值的对象")
@@ -2590,7 +2630,6 @@ def build_syntax_depth_query_tasks(records: list, user_errors: dict, completed_k
             continue
 
         query_info = record['syntax_depth_query']
-        actual_depth = query_info['actual_depth']
         completed_key = completed_key_from_record(record)
         if completed_key in completed_keys:
             stats['already_completed'] += 1
@@ -2603,7 +2642,7 @@ def build_syntax_depth_query_tasks(records: list, user_errors: dict, completed_k
             'source_query_type': 'syntax_depth_query',
             'source_query': query_info['query'].strip(),
             'source_word_count': query_info['word_count'],
-            'source_syntax_tree_depth': actual_depth,
+            'source_syntax_tree_depth': query_info.get('actual_depth'),
             'target_syntax_tree_depth': query_info.get('target_depth'),
             'level': query_info.get('target_depth'),
             'errors': errors,
@@ -2679,10 +2718,11 @@ def process_one_query_task(task: dict, doc) -> dict:
 
 
 def main():
-    log(f"=== 基于目标查询深度保持的噪声注入开始 (Category: {CATEGORY}) ===")
+    log(f"=== 基于最终严格版查询的噪声注入开始 (Category: {CATEGORY}) ===")
     log(f"加载 syntax-depth query from {SYNTAX_DEPTH_QUERY_FILE}...")
     syntax_depth_records = load_syntax_depth_query_records(SYNTAX_DEPTH_QUERY_FILE)
     log(f"加载了 {len(syntax_depth_records)} 个用户级 syntax-depth query 记录")
+    query_record_by_key = load_query_records_by_key(syntax_depth_records)
 
     log(f"加载用户评论深度 from {USER_REVIEW_DEPTH_FILE}...")
     user_review_depths = load_user_review_depths(USER_REVIEW_DEPTH_FILE)
@@ -2693,7 +2733,7 @@ def main():
     user_errors = merge_filtered_user_errors(raw_user_errors)
     log(f"过滤并合并 ACL/CCOMP 后，有错误模式的用户数: {len(user_errors)}")
 
-    completed_keys = load_completed_query_keys(NOISY_OUTPUT_FILE)
+    completed_keys = load_completed_query_keys_from_records(syntax_depth_records)
     log(f"已有 {INJECTION_SOURCE} 完成记录数: {len(completed_keys)}")
 
     tasks, build_stats = build_syntax_depth_query_tasks(syntax_depth_records, user_errors, completed_keys)
@@ -2705,7 +2745,7 @@ def main():
         raise ValueError("没有可处理的 query_by_syntax_depth 任务")
 
     log("开始加载 spaCy 模型并批量预解析源 query 文档")
-    log("LLM token 候选已启用：LLM 基于原句 token 生成候选 noisy query，本地校验注入前后整体深度保持不变")
+    log("LLM token 候选已启用：LLM 基于原句 token 生成候选 noisy query，本地校验属性完整性与真实 typo 对齐，不再要求注入前后整体句法树深度一致")
     with ThreadPoolExecutor(max_workers=2) as warmup_executor:
         cache_future = warmup_executor.submit(prewarm_noisy_cache, LOCAL_INSERTION_FRAGMENT_SYSTEM_BASE)
         nlp = _load_spacy_model()
@@ -2749,10 +2789,14 @@ def main():
                     'error': f'{type(exc).__name__}: {exc}',
                 }
             try:
-                write_noisy_result_incremental(result, NOISY_OUTPUT_FILE)
+                if result['status'] == 'success':
+                    record_key = completed_key_from_fields(result['uid'], result['asin'])
+                    if record_key not in query_record_by_key:
+                        raise KeyError(f"原始 query 记录不存在: {record_key}")
+                    update_query_record_in_place(query_record_by_key[record_key], result)
             except Exception as exc:
                 log(
-                    f"[ERROR] 结果写盘失败，已降级为失败: "
+                    f"[ERROR] 结果写回 query 文件失败，已降级为失败: "
                     f"user={task['uid'][:20]} err={type(exc).__name__}: {exc}"
                 )
                 result = {
@@ -2785,6 +2829,7 @@ def main():
             )
 
     elapsed = time.time() - total_start
+    write_query_records_back(syntax_depth_records, SYNTAX_DEPTH_QUERY_FILE)
     log(f"\n{'='*60}")
     log("==================== 统计结果 ====================")
     log(f"总任务数: {len(tasks)}")
@@ -2795,7 +2840,7 @@ def main():
     for status in sorted(status_counts):
         log(f"  - {status}: {status_counts[status]}")
     log(f"耗时: {elapsed:.1f}s")
-    log(f"结果保存到: {NOISY_OUTPUT_FILE}")
+    log(f"结果已回写到: {SYNTAX_DEPTH_QUERY_FILE}")
 
 
 if __name__ == '__main__':

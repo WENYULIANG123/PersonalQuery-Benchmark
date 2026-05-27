@@ -45,32 +45,15 @@ from config import get_category_config, get_global_paths
 SYNTAX_DEPTH_QUERY_CATEGORY = "syntax_depth"
 CORRECT_QUERY_TYPE = "correct"
 NOISY_QUERY_TYPE = "noisy"
-NOISY_INJECTION_SOURCE = "syntax_depth_preserve_depth"
-CORRECT_QUERY_SOURCE_FIELD = "original_query"
+NOISY_INJECTION_SOURCE = "final_strict_query_no_depth_constraint"
+CORRECT_QUERY_SOURCE_FIELD = "syntax_depth_query.query"
+SYNTAX_DEPTH_QUERY_FILENAME = "query_by_syntax_depth_vades_lite_sentence_user_distribution_train10_holdout10.json"
 SUMMARY_EXCLUDE_METRIC = "P@10"
 
 DENSE_RETRIEVERS = ["bge", "e5", "minilm", "star", "ance"]
 COLBERTV2_RETRIEVERS = ["colbertv2"]
 SPARSE_RETRIEVERS = ["splade"]
 RETRIEVERS = DENSE_RETRIEVERS + COLBERTV2_RETRIEVERS + SPARSE_RETRIEVERS + ["bm25"]
-
-DEPTH_GROUPS = [
-    ("low_complexity", 1, 3, "低复杂度(1-3)"),
-    ("medium_complexity", 4, 6, "中复杂度(4-6)"),
-]
-DEPTH_GROUP_ORDER = [name for name, _, _, _ in DEPTH_GROUPS]
-DEPTH_GROUP_DISPLAY = {name: label for name, _, _, label in DEPTH_GROUPS}
-
-INJECTION_DEPTH_GROUPS = [
-    ("low_complexity", 1, 3, "低(1-3)"),
-    ("medium_complexity", 4, 6, "中(4-6)"),
-]
-INJECTION_DEPTH_GROUP_ORDER = [name for name, _, _, _ in INJECTION_DEPTH_GROUPS]
-INJECTION_DEPTH_GROUP_DISPLAY = {name: label for name, _, _, label in INJECTION_DEPTH_GROUPS}
-INJECTION_DEPTH_GROUP_SHORT_DISPLAY = {
-    "low_complexity": "低",
-    "medium_complexity": "中",
-}
 
 
 class NumpyCoreCompatUnpickler(pickle.Unpickler):
@@ -147,64 +130,6 @@ def require_str_or_str_list(item: Dict, field: str, context: str):
     return value
 
 
-def require_depth_value(item: Dict, field: str, context: str) -> Tuple[int, List[int]]:
-    value = require_field(item, field, context)
-    if isinstance(value, int):
-        return value, [value]
-    if not isinstance(value, list):
-        raise TypeError(f"{context} field '{field}' must be int or list[int], got {type(value).__name__}")
-    if not value:
-        raise ValueError(f"{context} field '{field}' must not be an empty list")
-    depths = []
-    for depth_index, depth in enumerate(value):
-        if not isinstance(depth, int):
-            raise TypeError(
-                f"{context} field '{field}' item {depth_index} must be int, got {type(depth).__name__}"
-            )
-        depths.append(depth)
-    return max(depths), depths
-
-
-def depth_to_complexity_group(depth: int) -> str:
-    for group_name, low, high, _ in DEPTH_GROUPS:
-        if low <= depth <= high:
-            return group_name
-    raise ValueError(f"Unsupported syntax depth for configured groups: {depth}")
-
-
-def injection_depth_to_complexity_group(depth: int) -> Optional[str]:
-    for group_name, low, high, _ in INJECTION_DEPTH_GROUPS:
-        if low <= depth <= high:
-            return group_name
-    return None
-
-
-def require_single_injection_depth(item: Dict, context: str) -> Tuple[List[Dict], int, Optional[str], Optional[str]]:
-    injected_errors = require_list(item, "injected_errors", context)
-    if len(injected_errors) != 1:
-        raise ValueError(
-            f"{context} expected exactly one injected error for injection-depth grouping, "
-            f"got {len(injected_errors)}"
-        )
-    error_context = f"{context} injected_errors[0]"
-    injected_error = injected_errors[0]
-    if not isinstance(injected_error, dict):
-        raise TypeError(f"{error_context} must be dict, got {type(injected_error).__name__}")
-    injection_depth = require_int(injected_error, "target_token_depth", error_context)
-    injection_depth_group = injection_depth_to_complexity_group(injection_depth)
-    injection_depth_group_display = (
-        INJECTION_DEPTH_GROUP_DISPLAY[injection_depth_group]
-        if injection_depth_group is not None
-        else None
-    )
-    return (
-        injected_errors,
-        injection_depth,
-        injection_depth_group,
-        injection_depth_group_display,
-    )
-
-
 def load_appended_json_objects(file_path: str) -> List[Dict]:
     with open(file_path, "r", encoding="utf-8") as f:
         content = f.read().strip()
@@ -243,7 +168,12 @@ def load_appended_json_objects(file_path: str) -> List[Dict]:
 
 
 def load_syntax_depth_metadata(syntax_depth_query_file: str) -> Dict[Tuple[str, str, str], Dict]:
-    data = load_appended_json_objects(syntax_depth_query_file)
+    with open(syntax_depth_query_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise TypeError(
+            f"syntax-depth query file must contain a list, got {type(data).__name__}: {syntax_depth_query_file}"
+        )
 
     metadata = {}
     for row_index, item in enumerate(data):
@@ -255,10 +185,7 @@ def load_syntax_depth_metadata(syntax_depth_query_file: str) -> Dict[Tuple[str, 
         syntax_query = require_dict(item, "syntax_depth_query", context)
 
         query_text = require_str(syntax_query, "query", context)
-        actual_depth = require_int(syntax_query, "actual_depth", context)
-        target_depth = require_int(syntax_query, "target_depth", context)
         word_count = require_int(syntax_query, "word_count", context)
-        user_avg_depth = require_number(syntax_query, "user_avg_depth", context)
 
         attrs_used = syntax_query.get("attrs_used")
         if attrs_used is not None and not isinstance(attrs_used, dict):
@@ -271,10 +198,7 @@ def load_syntax_depth_metadata(syntax_depth_query_file: str) -> Dict[Tuple[str, 
             "user_id": user_id,
             "asin": asin,
             "source_query": query_text,
-            "syntax_depth": actual_depth,
-            "target_depth": target_depth,
             "word_count": word_count,
-            "user_avg_depth": user_avg_depth,
             "attrs_used": attrs_used,
             "syntax_depth_row_index": row_index,
         }
@@ -283,37 +207,51 @@ def load_syntax_depth_metadata(syntax_depth_query_file: str) -> Dict[Tuple[str, 
 
 
 def load_noisy_pairs(category_name: str, noisy_query_file: str, syntax_depth_query_file: str) -> List[Dict]:
-    data = load_appended_json_objects(noisy_query_file)
+    with open(syntax_depth_query_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise TypeError(
+            f"syntax-depth query file must contain a list, got {type(data).__name__}: {syntax_depth_query_file}"
+        )
 
     pairs = []
-    skipped_non_syntax_depth = 0
-    skipped_out_of_group = 0
+    skipped_without_noisy_injection = 0
+    skipped_non_target_injection_source = 0
     for row_index, item in enumerate(data):
         if not isinstance(item, dict):
-            raise TypeError(f"noisy row {row_index} must be dict, got {type(item).__name__}")
-        context = f"noisy syntax-depth row {row_index}"
-        injection_source = require_str(item, "injection_source", context)
-        if injection_source != NOISY_INJECTION_SOURCE:
-            skipped_non_syntax_depth += 1
-            continue
-
+            raise TypeError(f"syntax-depth row {row_index} must be dict, got {type(item).__name__}")
+        context = f"syntax-depth noisy row {row_index}"
         user_id = require_str(item, "user_id", context)
         asin = require_str(item, "asin", context)
-        original_query = require_str(item, "original_query", context)
-        noisy_query = require_str(item, "noisy_query", context)
-        injection_depth, injection_depths = require_depth_value(item, "injection_target_depth", context)
-        injection_depth_group = injection_depth_to_complexity_group(injection_depth)
-        if injection_depth_group is None:
-            skipped_out_of_group += 1
+        syntax_query = require_dict(item, "syntax_depth_query", context)
+        original_query = require_str(syntax_query, "query", context)
+
+        noisy_injection = item.get("noisy_injection")
+        if noisy_injection is None:
+            skipped_without_noisy_injection += 1
             continue
-        injection_depth_group_display = INJECTION_DEPTH_GROUP_DISPLAY[injection_depth_group]
-        syntax_depth_group = depth_to_complexity_group(injection_depth)
+        if not isinstance(noisy_injection, dict):
+            raise TypeError(f"{context} noisy_injection must be dict, got {type(noisy_injection).__name__}")
+
+        injection_source = require_str(noisy_injection, "injection_source", context)
+        if injection_source != NOISY_INJECTION_SOURCE:
+            skipped_non_target_injection_source += 1
+            continue
+
+        noisy_query = require_str(noisy_injection, "noisy_query", context)
         attrs_used = {
-            "noise_type": require_str_or_str_list(item, "noise_type", context),
-            "correct_text": require_str_or_str_list(item, "correct_text", context),
-            "noisy_text": require_str_or_str_list(item, "noisy_text", context),
-            "anchor_replaced_text": require_str_or_str_list(item, "anchor_replaced_text", context),
+            "query_attrs_used": syntax_query.get("attrs_used"),
+            "noise_type": require_str_or_str_list(noisy_injection, "noise_type", context),
+            "correct_text": require_str_or_str_list(noisy_injection, "correct_text", context),
+            "noisy_text": require_str_or_str_list(noisy_injection, "noisy_text", context),
+            "anchor_replaced_text": require_str_or_str_list(noisy_injection, "anchor_replaced_text", context),
         }
+        query_rewritten = noisy_injection.get("query_rewritten")
+        if not isinstance(query_rewritten, bool):
+            raise TypeError(f"{context} noisy_injection.query_rewritten must be bool, got {type(query_rewritten).__name__}")
+        injection_mode = noisy_injection.get("injection_mode")
+        if not isinstance(injection_mode, str) or not injection_mode:
+            raise ValueError(f"{context} noisy_injection.injection_mode must be non-empty string")
 
         pair = {
             "pair_id": len(pairs),
@@ -328,37 +266,27 @@ def load_noisy_pairs(category_name: str, noisy_query_file: str, syntax_depth_que
             "ground_truth_query": original_query,
             "noisy_query": noisy_query,
             "original_query": original_query,
-            "query_rewritten": noisy_query != original_query,
-            "injection_mode": injection_source,
+            "query_rewritten": query_rewritten,
+            "injection_mode": injection_mode,
             "injection_source": injection_source,
-            "injected_errors": [{"target_token_depth": injection_depth}],
-            "injection_depth": injection_depth,
-            "injection_depths": injection_depths,
-            "injection_depth_group": injection_depth_group,
-            "injection_depth_group_display": injection_depth_group_display,
-            "syntax_depth": injection_depth,
-            "target_depth": injection_depth,
             "word_count": len(original_query.split()),
-            "user_avg_depth": float(injection_depth),
-            "syntax_depth_group": syntax_depth_group,
-            "syntax_depth_group_display": DEPTH_GROUP_DISPLAY[syntax_depth_group],
             "attrs_used": attrs_used,
         }
         pairs.append(pair)
 
     if not pairs:
         raise ValueError(
-            f"No noisy records found with injection_source={NOISY_INJECTION_SOURCE} in {noisy_query_file}"
+            f"No noisy records found with injection_source={NOISY_INJECTION_SOURCE} in {syntax_depth_query_file}"
         )
 
     rewritten_count = sum(1 for pair in pairs if pair["query_rewritten"] is True)
     log(
         f"加载 noisy syntax-depth 配对: {len(pairs)} 条，"
-        f"跳过非 syntax-depth 记录 {skipped_non_syntax_depth} 条，"
-        f"跳过不在当前分组范围内的记录 {skipped_out_of_group} 条，"
+        f"跳过缺少 noisy_injection 的记录 {skipped_without_noisy_injection} 条，"
+        f"跳过 injection_source 不匹配的记录 {skipped_non_target_injection_source} 条，"
         f"其中 query_rewritten=True 为 {rewritten_count} 条"
     )
-    log("Correct 侧使用 07 noisy_query.json 的 original_query；Noisy 侧使用 noisy_query；深度字段来自 07 injection_target_depth")
+    log("Correct 侧使用 07 query_by_syntax_depth.syntax_depth_query.query；Noisy 侧使用 noisy_injection.noisy_query")
     return pairs
 
 
@@ -448,79 +376,6 @@ def compute_average_metrics(all_metrics: List[Dict], k_values: List[int]) -> Dic
     return avg_metrics
 
 
-def compute_group_metrics(all_metrics: List[Dict], records: List[Dict], k_values: List[int]) -> Dict:
-    if len(all_metrics) != len(records):
-        raise ValueError(f"Metric/record length mismatch: {len(all_metrics)} vs {len(records)}")
-
-    grouped = defaultdict(list)
-    for metric, record in zip(all_metrics, records):
-        grouped[record["syntax_depth_group"]].append(metric)
-
-    result = {}
-    for group_name in DEPTH_GROUP_ORDER:
-        metrics = grouped[group_name]
-        result[group_name] = {
-            "display": DEPTH_GROUP_DISPLAY[group_name],
-            "num_queries": len(metrics),
-            "metrics": compute_average_metrics(metrics, k_values) if metrics else {},
-        }
-    return result
-
-
-def compute_injection_depth_group_metrics(all_metrics: List[Dict], records: List[Dict], k_values: List[int]) -> Dict:
-    if len(all_metrics) != len(records):
-        raise ValueError(f"Metric/record length mismatch: {len(all_metrics)} vs {len(records)}")
-
-    grouped = defaultdict(list)
-    for metric, record in zip(all_metrics, records):
-        group_name = record["injection_depth_group"]
-        if group_name is None:
-            raise ValueError("Encountered ungrouped record while computing injection depth metrics")
-        if group_name not in INJECTION_DEPTH_GROUP_DISPLAY:
-            raise ValueError(f"Unsupported injection depth group: {group_name}")
-        grouped[group_name].append(metric)
-
-    result = {}
-    for group_name in INJECTION_DEPTH_GROUP_ORDER:
-        metrics = grouped[group_name]
-        result[group_name] = {
-            "display": INJECTION_DEPTH_GROUP_DISPLAY[group_name],
-            "num_queries": len(metrics),
-            "metrics": compute_average_metrics(metrics, k_values) if metrics else {},
-        }
-    return result
-
-
-def compute_exact_depth_metrics(all_metrics: List[Dict], records: List[Dict], k_values: List[int]) -> Dict:
-    grouped = defaultdict(list)
-    for metric, record in zip(all_metrics, records):
-        grouped[record["syntax_depth"]].append(metric)
-
-    result = {}
-    for depth in sorted(grouped.keys()):
-        metrics = grouped[depth]
-        result[str(depth)] = {
-            "num_queries": len(metrics),
-            "metrics": compute_average_metrics(metrics, k_values),
-        }
-    return result
-
-
-def compute_exact_injection_depth_metrics(all_metrics: List[Dict], records: List[Dict], k_values: List[int]) -> Dict:
-    grouped = defaultdict(list)
-    for metric, record in zip(all_metrics, records):
-        grouped[record["injection_depth"]].append(metric)
-
-    result = {}
-    for depth in sorted(grouped.keys()):
-        metrics = grouped[depth]
-        result[str(depth)] = {
-            "num_queries": len(metrics),
-            "metrics": compute_average_metrics(metrics, k_values),
-        }
-    return result
-
-
 def query_record_for_output(pair: Dict, query_type: str, metric: Dict) -> Dict:
     if query_type == CORRECT_QUERY_TYPE:
         query_text = pair["correct_query"]
@@ -543,16 +398,7 @@ def query_record_for_output(pair: Dict, query_type: str, metric: Dict) -> Dict:
         "noisy_query": pair["noisy_query"],
         "query_rewritten": pair["query_rewritten"],
         "injection_mode": pair["injection_mode"],
-        "injected_errors": pair["injected_errors"],
-        "injection_depth": pair["injection_depth"],
-        "injection_depth_group": pair["injection_depth_group"],
-        "injection_depth_group_display": pair["injection_depth_group_display"],
-        "syntax_depth": pair["syntax_depth"],
-        "target_depth": pair["target_depth"],
-        "syntax_depth_group": pair["syntax_depth_group"],
-        "syntax_depth_group_display": pair["syntax_depth_group_display"],
         "word_count": pair["word_count"],
-        "user_avg_depth": pair["user_avg_depth"],
         "attrs_used": pair["attrs_used"],
         "p_at10": metric.get("P@10", 0.0),
         "metrics": dict(metric),
@@ -586,10 +432,6 @@ def build_retriever_result_from_query_records(
         "query_category": SYNTAX_DEPTH_QUERY_CATEGORY,
         "num_queries": len(query_records),
         "metrics": compute_average_metrics(all_metrics, k_values),
-        "metrics_by_depth_group": compute_group_metrics(all_metrics, query_records, k_values),
-        "metrics_by_exact_depth": compute_exact_depth_metrics(all_metrics, query_records, k_values),
-        "metrics_by_injection_depth_group": compute_injection_depth_group_metrics(all_metrics, query_records, k_values),
-        "metrics_by_exact_injection_depth": compute_exact_injection_depth_metrics(all_metrics, query_records, k_values),
         "cache_summary": cache_summary,
         "all_query_records": query_records,
     }
@@ -663,8 +505,6 @@ def filter_retriever_pair_results(
                     "pair_id": correct_record["pair_id"],
                     "user_id": correct_record["user_id"],
                     "asin": correct_record["asin"],
-                    "injection_depth": correct_record["injection_depth"],
-                    "injection_depth_group": correct_record["injection_depth_group"],
                     "query": noisy_record["query"],
                     "correct_query": correct_record["query"],
                     "noisy_query": noisy_record["query"],
@@ -1201,87 +1041,10 @@ def metric_diff(correct_result: Dict, noisy_result: Dict) -> Dict:
     for metric_name, correct_value in correct_result["metrics"].items():
         metrics[metric_name] = float(noisy_result["metrics"][metric_name] - correct_value)
 
-    by_group = {}
-    for group_name in DEPTH_GROUP_ORDER:
-        correct_group = correct_result["metrics_by_depth_group"][group_name]
-        noisy_group = noisy_result["metrics_by_depth_group"][group_name]
-        if correct_group["num_queries"] != noisy_group["num_queries"]:
-            raise ValueError(
-                f"Depth group query count mismatch for {correct_result['retriever']} {group_name}: "
-                f"{correct_group['num_queries']} vs {noisy_group['num_queries']}"
-            )
-        if correct_group["num_queries"] == 0:
-            by_group[group_name] = {
-                "display": DEPTH_GROUP_DISPLAY[group_name],
-                "num_queries": 0,
-                "metrics": {},
-            }
-        else:
-            by_group[group_name] = {
-                "display": DEPTH_GROUP_DISPLAY[group_name],
-                "num_queries": correct_group["num_queries"],
-                "metrics": {
-                    metric_name: float(noisy_group["metrics"][metric_name] - correct_group["metrics"][metric_name])
-                    for metric_name in correct_group["metrics"]
-                },
-            }
-
-    injection_by_group = {}
-    for group_name in INJECTION_DEPTH_GROUP_ORDER:
-        correct_group = correct_result["metrics_by_injection_depth_group"][group_name]
-        noisy_group = noisy_result["metrics_by_injection_depth_group"][group_name]
-        if correct_group["num_queries"] != noisy_group["num_queries"]:
-            raise ValueError(
-                f"Injection depth group query count mismatch for {correct_result['retriever']} {group_name}: "
-                f"{correct_group['num_queries']} vs {noisy_group['num_queries']}"
-            )
-        if correct_group["num_queries"] == 0:
-            injection_by_group[group_name] = {
-                "display": INJECTION_DEPTH_GROUP_DISPLAY[group_name],
-                "num_queries": 0,
-                "metrics": {},
-            }
-        else:
-            injection_by_group[group_name] = {
-                "display": INJECTION_DEPTH_GROUP_DISPLAY[group_name],
-                "num_queries": correct_group["num_queries"],
-                "metrics": {
-                    metric_name: float(noisy_group["metrics"][metric_name] - correct_group["metrics"][metric_name])
-                    for metric_name in correct_group["metrics"]
-                },
-            }
-
-    correct_exact_injection = correct_result["metrics_by_exact_injection_depth"]
-    noisy_exact_injection = noisy_result["metrics_by_exact_injection_depth"]
-    if set(correct_exact_injection) != set(noisy_exact_injection):
-        raise ValueError(
-            f"Exact injection depth keys mismatch for {correct_result['retriever']}: "
-            f"{sorted(correct_exact_injection)} vs {sorted(noisy_exact_injection)}"
-        )
-    injection_by_exact_depth = {}
-    for depth_key in sorted(correct_exact_injection, key=int):
-        correct_depth = correct_exact_injection[depth_key]
-        noisy_depth = noisy_exact_injection[depth_key]
-        if correct_depth["num_queries"] != noisy_depth["num_queries"]:
-            raise ValueError(
-                f"Exact injection depth query count mismatch for {correct_result['retriever']} depth={depth_key}: "
-                f"{correct_depth['num_queries']} vs {noisy_depth['num_queries']}"
-            )
-        injection_by_exact_depth[depth_key] = {
-            "num_queries": correct_depth["num_queries"],
-            "metrics": {
-                metric_name: float(noisy_depth["metrics"][metric_name] - correct_depth["metrics"][metric_name])
-                for metric_name in correct_depth["metrics"]
-            },
-        }
-
     return {
         "retriever": correct_result["retriever"],
         "num_queries": correct_result["num_queries"],
         "metrics_noisy_minus_correct": metrics,
-        "metrics_by_depth_group_noisy_minus_correct": by_group,
-        "metrics_by_injection_depth_group_noisy_minus_correct": injection_by_group,
-        "metrics_by_exact_injection_depth_noisy_minus_correct": injection_by_exact_depth,
     }
 
 
@@ -1321,399 +1084,6 @@ def print_difference_table(differences: List[Dict]) -> None:
             row += f" {sign:>1}{value:>9.4f}"
         log(row)
     log("-" * 120)
-
-
-def get_injection_depths(pairs: List[Dict]) -> List[int]:
-    depths = sorted({pair["injection_depth"] for pair in pairs})
-    if not depths:
-        raise ValueError("No injection depths found in noisy pairs")
-    return depths
-
-
-def log_injection_depth_distribution(pairs: List[Dict]) -> None:
-    exact_counts = defaultdict(int)
-    group_counts = defaultdict(int)
-    ungrouped_count = 0
-    for pair in pairs:
-        exact_counts[pair["injection_depth"]] += 1
-        group_name = pair["injection_depth_group"]
-        if group_name is None:
-            ungrouped_count += 1
-        else:
-            group_counts[group_name] += 1
-
-    exact_summary = ", ".join(
-        f"深度{depth}: {exact_counts[depth]}"
-        for depth in sorted(exact_counts)
-    )
-    group_summary = ", ".join(
-        f"{INJECTION_DEPTH_GROUP_DISPLAY[group_name]}: {group_counts[group_name]}"
-        for group_name in INJECTION_DEPTH_GROUP_ORDER
-        if group_counts[group_name] > 0
-    )
-    if ungrouped_count > 0:
-        group_summary = f"{group_summary}, 未纳入当前分组: {ungrouped_count}" if group_summary else f"未纳入当前分组: {ungrouped_count}"
-    log(f"注入精确深度分布: {exact_summary}")
-    log(f"注入分组分布: {group_summary}")
-
-
-def print_injection_depth_group_table(
-    results: List[Dict],
-    title: str,
-    group_metrics_key: str,
-    overall_metrics_key: str,
-    signed: bool = False,
-) -> None:
-    log(f"\n{'=' * 140}")
-    log(title)
-    log("=" * 140)
-    metrics_to_show = ["P@1", "P@3", "P@5", "P@10", "N@10", "MR@10", "H@10"]
-    col_w = 12
-    header = f"{'检索器':<12}"
-    for group_name in INJECTION_DEPTH_GROUP_ORDER:
-        group_label = INJECTION_DEPTH_GROUP_SHORT_DISPLAY[group_name]
-        header += f" {f'N_{group_label}':>{col_w}}"
-    header += f" {'N_ALL':>{col_w}}"
-    for metric_name in metrics_to_show:
-        for group_name in INJECTION_DEPTH_GROUP_ORDER:
-            group_label = INJECTION_DEPTH_GROUP_SHORT_DISPLAY[group_name]
-            header += f" {f'{metric_name}_{group_label}':>{col_w}}"
-        header += f" {f'{metric_name}_ALL':>{col_w}}"
-    log(header)
-    log("-" * 140)
-
-    for result in results:
-        row = f"{result['retriever']:<12}"
-        group_metrics = result[group_metrics_key]
-        overall_metrics = result[overall_metrics_key]
-        for group_name in INJECTION_DEPTH_GROUP_ORDER:
-            if group_name not in group_metrics:
-                raise KeyError(f"{result['retriever']} missing injection depth group {group_name} in {group_metrics_key}")
-            row += f" {group_metrics[group_name]['num_queries']:>{col_w}}"
-        row += f" {result['num_queries']:>{col_w}}"
-        for metric_name in metrics_to_show:
-            for group_name in INJECTION_DEPTH_GROUP_ORDER:
-                group_data = group_metrics[group_name]
-                if group_data["num_queries"] == 0:
-                    row += f" {'NA':>{col_w}}"
-                    continue
-                value = group_data["metrics"][metric_name]
-                if signed and value > 0:
-                    row += f" {'+' + format(value, '.4f'):>{col_w}}"
-                else:
-                    row += f" {value:>{col_w}.4f}"
-            overall_value = overall_metrics[metric_name]
-            if signed and overall_value > 0:
-                row += f" {'+' + format(overall_value, '.4f'):>{col_w}}"
-            else:
-                row += f" {overall_value:>{col_w}.4f}"
-        log(row)
-    log("-" * 140)
-
-
-def print_hit10_injection_depth_group_table(
-    correct_results: List[Dict],
-    noisy_results: List[Dict],
-    differences: List[Dict],
-) -> None:
-    print_hit10_group_trend_table(
-        correct_results,
-        "CORRECT H@10 注入深度分组趋势表",
-    )
-    print_hit10_group_trend_table(
-        noisy_results,
-        "NOISY H@10 注入深度分组趋势表",
-    )
-    print_hit10_correct_vs_noisy_group_table(correct_results, noisy_results, differences)
-
-
-def pct_change(previous_value: Optional[float], next_value: Optional[float]) -> Optional[float]:
-    if previous_value is None or next_value is None:
-        return None
-    if previous_value == 0.0:
-        return None
-    return float((next_value - previous_value) / previous_value * 100.0)
-
-
-def format_pct(value: Optional[float]) -> str:
-    if value is None:
-        return "NA"
-    sign = "+" if value > 0 else ""
-    return f"{sign}{value:.2f}%"
-
-
-def format_metric(value: Optional[float]) -> str:
-    if value is None:
-        return "NA"
-    return f"{value:.4f}"
-
-
-def diff_value(correct_value: Optional[float], noisy_value: Optional[float]) -> Optional[float]:
-    if correct_value is None or noisy_value is None:
-        return None
-    return float(noisy_value - correct_value)
-
-
-def format_signed_metric(value: Optional[float]) -> str:
-    if value is None:
-        return "NA"
-    sign = "+" if value > 0 else ""
-    return f"{sign}{value:.4f}"
-
-
-def mean_required(values: List[float], context: str) -> float:
-    if not values:
-        raise ValueError(f"Cannot compute mean percentage for empty values: {context}")
-    return float(np.mean(values))
-
-
-def mean_optional(values: List[float]) -> Optional[float]:
-    if not values:
-        return None
-    return float(np.mean(values))
-
-
-def print_hit10_group_trend_table(results: List[Dict], title: str) -> None:
-    log(f"\n{'=' * 140}")
-    log(title)
-    log("=" * 140)
-    col_w = 12
-    group_names = INJECTION_DEPTH_GROUP_ORDER
-    group_labels = [INJECTION_DEPTH_GROUP_SHORT_DISPLAY[group_name] for group_name in group_names]
-    transition_labels = [
-        f"{group_labels[index]}->{group_labels[index + 1]}Δ"
-        for index in range(len(group_labels) - 1)
-    ]
-    header = f"{'检索器':<12}"
-    for group_label in group_labels:
-        header += f" {f'N_{group_label}':>{col_w}}"
-    for group_label in group_labels:
-        header += f" {f'H@10_{group_label}':>{col_w}}"
-    for transition_label in transition_labels:
-        header += f" {transition_label:>{col_w}}"
-    header += f" {'均值Δ':>{col_w}}"
-    log(header)
-    log("-" * 140)
-
-    transition_delta_values = [[] for _ in range(len(group_names) - 1)]
-    mean_values = []
-    for result in results:
-        group_metrics = result["metrics_by_injection_depth_group"]
-        for group_name in group_names:
-            if group_name not in group_metrics:
-                raise KeyError(f"{result['retriever']} missing injection depth group {group_name}")
-        h10_values = []
-        row = f"{result['retriever']:<12}"
-        for group_name in group_names:
-            group_data = group_metrics[group_name]
-            row += f" {group_data['num_queries']:>{col_w}}"
-            h10_value = (
-                group_data["metrics"]["H@10"]
-                if group_data["num_queries"] > 0
-                else None
-            )
-            h10_values.append(h10_value)
-        for h10_value in h10_values:
-            row += f" {format_metric(h10_value):>{col_w}}"
-
-        valid_pct_values = []
-        transition_deltas = []
-        for index in range(len(group_names) - 1):
-            transition_delta = diff_value(h10_values[index], h10_values[index + 1])
-            transition_deltas.append(transition_delta)
-            if transition_delta is not None:
-                transition_delta_values[index].append(transition_delta)
-                valid_pct_values.append(transition_delta)
-        two_step_mean = mean_optional(valid_pct_values)
-        if two_step_mean is not None:
-            mean_values.append(two_step_mean)
-
-        for transition_delta in transition_deltas:
-            row += f" {format_signed_metric(transition_delta):>{col_w}}"
-        row += f" {format_signed_metric(two_step_mean):>{col_w}}"
-        log(row)
-
-    mean_row = f"{'MEAN':<12}"
-    for _ in group_names:
-        mean_row += f" {'':>{col_w}}"
-    for _ in group_names:
-        mean_row += f" {'':>{col_w}}"
-    for index in range(len(group_names) - 1):
-        mean_row += f" {format_signed_metric(mean_optional(transition_delta_values[index])):>{col_w}}"
-    mean_row += f" {format_signed_metric(mean_optional(mean_values)):>{col_w}}"
-    log(mean_row)
-    log("-" * 140)
-
-
-def print_hit10_correct_vs_noisy_group_table(
-    correct_results: List[Dict],
-    noisy_results: List[Dict],
-    differences: List[Dict],
-) -> None:
-    del differences
-    log(f"\n{'=' * 180}")
-    log("CORRECT vs NOISY H@10 注入深度分组对比表（NOISY - CORRECT）")
-    log("=" * 180)
-    col_w = 10
-    header = f"{'检索器':<12}"
-    for group_name in INJECTION_DEPTH_GROUP_ORDER:
-        group_label = INJECTION_DEPTH_GROUP_SHORT_DISPLAY[group_name]
-        header += (
-            f" {f'N_{group_label}':>{col_w}}"
-            f" {f'{group_label}_C':>{col_w}}"
-            f" {f'{group_label}_N':>{col_w}}"
-            f" {f'{group_label}_Δ':>{col_w}}"
-        )
-    log(header)
-    log("-" * 180)
-
-    correct_by_retriever = {result["retriever"]: result for result in correct_results}
-    noisy_by_retriever = {result["retriever"]: result for result in noisy_results}
-    group_delta_values = {group_name: [] for group_name in INJECTION_DEPTH_GROUP_ORDER}
-
-    for retriever in correct_by_retriever:
-        if retriever not in noisy_by_retriever:
-            raise KeyError(f"Missing noisy result for retriever={retriever}")
-        correct_group_metrics = correct_by_retriever[retriever]["metrics_by_injection_depth_group"]
-        noisy_group_metrics = noisy_by_retriever[retriever]["metrics_by_injection_depth_group"]
-        row = f"{retriever:<12}"
-        for group_name in INJECTION_DEPTH_GROUP_ORDER:
-            if group_name not in correct_group_metrics or group_name not in noisy_group_metrics:
-                raise KeyError(f"{retriever} missing injection depth group {group_name}")
-            correct_group = correct_group_metrics[group_name]
-            noisy_group = noisy_group_metrics[group_name]
-            if correct_group["num_queries"] != noisy_group["num_queries"]:
-                raise ValueError(
-                    f"H@10 group query count mismatch for {retriever} {group_name}: "
-                    f"{correct_group['num_queries']} vs {noisy_group['num_queries']}"
-                )
-            if correct_group["num_queries"] == 0:
-                correct_value = None
-                noisy_value = None
-            else:
-                correct_value = correct_group["metrics"]["H@10"]
-                noisy_value = noisy_group["metrics"]["H@10"]
-            delta = diff_value(correct_value, noisy_value)
-            if delta is not None:
-                group_delta_values[group_name].append(delta)
-            row += (
-                f" {correct_group['num_queries']:>{col_w}}"
-                f" {format_metric(correct_value):>{col_w}}"
-                f" {format_metric(noisy_value):>{col_w}}"
-                f" {format_signed_metric(delta):>{col_w}}"
-            )
-        log(row)
-
-    mean_row = f"{'MEAN':<12}"
-    for group_name in INJECTION_DEPTH_GROUP_ORDER:
-        mean_delta = mean_optional(group_delta_values[group_name])
-        mean_row += (
-            f" {'':>{col_w}}"
-            f" {'':>{col_w}}"
-            f" {'':>{col_w}}"
-            f" {format_signed_metric(mean_delta):>{col_w}}"
-        )
-    log(mean_row)
-    log("-" * 180)
-
-
-def print_exact_injection_depth_table(
-    results: List[Dict],
-    title: str,
-    depth_metrics_key: str,
-    overall_metrics_key: str,
-    injection_depths: List[int],
-    signed: bool = False,
-) -> None:
-    log(f"\n{'=' * 140}")
-    log(title)
-    log("=" * 140)
-    metrics_to_show = ["P@1", "P@3", "P@5", "P@10", "N@10", "MR@10", "H@10"]
-    col_w = 12
-    header = f"{'检索器':<12} {'N':>8}"
-    for metric_name in metrics_to_show:
-        for depth in injection_depths:
-            header += f" {f'{metric_name}_D{depth}':>{col_w}}"
-        header += f" {f'{metric_name}_ALL':>{col_w}}"
-    log(header)
-    log("-" * 140)
-
-    for result in results:
-        row = f"{result['retriever']:<12} {result['num_queries']:>8}"
-        depth_metrics = result[depth_metrics_key]
-        overall_metrics = result[overall_metrics_key]
-        for metric_name in metrics_to_show:
-            for depth in injection_depths:
-                depth_key = str(depth)
-                if depth_key not in depth_metrics:
-                    raise KeyError(
-                        f"{result['retriever']} missing exact injection depth {depth_key} in {depth_metrics_key}"
-                    )
-                value = depth_metrics[depth_key]["metrics"][metric_name]
-                if signed and value > 0:
-                    row += f" {'+' + format(value, '.4f'):>{col_w}}"
-                else:
-                    row += f" {value:>{col_w}.4f}"
-            overall_value = overall_metrics[metric_name]
-            if signed and overall_value > 0:
-                row += f" {'+' + format(overall_value, '.4f'):>{col_w}}"
-            else:
-                row += f" {overall_value:>{col_w}.4f}"
-        log(row)
-    log("-" * 140)
-
-
-def print_hit10_exact_injection_depth_table(
-    correct_results: List[Dict],
-    noisy_results: List[Dict],
-    differences: List[Dict],
-    injection_depths: List[int],
-) -> None:
-    log(f"\n{'=' * 140}")
-    log("H@10 注入精确深度对比表")
-    log("=" * 140)
-    col_w = 12
-    header = f"{'检索器':<12}"
-    for depth in injection_depths:
-        header += f" {f'D{depth}_C':>{col_w}} {f'D{depth}_N':>{col_w}} {f'D{depth}_Δ':>{col_w}}"
-    header += f" {'ALL_C':>{col_w}} {'ALL_N':>{col_w}} {'ALL_Δ':>{col_w}}"
-    log(header)
-    log("-" * 140)
-
-    correct_by_retriever = {result["retriever"]: result for result in correct_results}
-    noisy_by_retriever = {result["retriever"]: result for result in noisy_results}
-    diff_by_retriever = {result["retriever"]: result for result in differences}
-    for retriever in sorted(correct_by_retriever):
-        if retriever not in noisy_by_retriever or retriever not in diff_by_retriever:
-            raise KeyError(f"Missing paired H@10 table result for retriever={retriever}")
-        correct_result = correct_by_retriever[retriever]
-        noisy_result = noisy_by_retriever[retriever]
-        diff_result = diff_by_retriever[retriever]
-        row = f"{retriever:<12}"
-        for depth in injection_depths:
-            depth_key = str(depth)
-            correct_depth = correct_result["metrics_by_exact_injection_depth"]
-            noisy_depth = noisy_result["metrics_by_exact_injection_depth"]
-            diff_depth = diff_result["metrics_by_exact_injection_depth_noisy_minus_correct"]
-            for source_name, source in (
-                ("correct", correct_depth),
-                ("noisy", noisy_depth),
-                ("diff", diff_depth),
-            ):
-                if depth_key not in source:
-                    raise KeyError(f"{retriever} missing {source_name} H@10 value for injection depth {depth_key}")
-            correct_value = correct_depth[depth_key]["metrics"]["H@10"]
-            noisy_value = noisy_depth[depth_key]["metrics"]["H@10"]
-            diff_value = diff_depth[depth_key]["metrics"]["H@10"]
-            diff_text = f"+{diff_value:.4f}" if diff_value > 0 else f"{diff_value:.4f}"
-            row += f" {correct_value:>{col_w}.4f} {noisy_value:>{col_w}.4f} {diff_text:>{col_w}}"
-        overall_correct = correct_result["metrics"]["H@10"]
-        overall_noisy = noisy_result["metrics"]["H@10"]
-        overall_diff = diff_result["metrics_noisy_minus_correct"]["H@10"]
-        overall_diff_text = f"+{overall_diff:.4f}" if overall_diff > 0 else f"{overall_diff:.4f}"
-        row += f" {overall_correct:>{col_w}.4f} {overall_noisy:>{col_w}.4f} {overall_diff_text:>{col_w}}"
-        log(row)
-    log("-" * 140)
 
 
 def sanitize_for_json(obj):
@@ -1770,11 +1140,13 @@ def run_category_eval(category_name: str) -> None:
             raise KeyError(f"Category config for {category_name} missing required key: {required_key}")
 
     global_paths = get_global_paths()
-    for required_key in ("stage6_query", "inject_noisy"):
-        if required_key not in global_paths:
-            raise KeyError(f"Global paths missing required key: {required_key}")
+    if "inject_noisy" not in global_paths:
+        raise KeyError("Global paths missing required key: inject_noisy")
 
-    syntax_depth_query_file = os.path.join(global_paths["stage6_query"], category_name, "query_by_syntax_depth.json")
+    syntax_depth_query_file = (
+        f"/home/wlia0047/ar57/wenyu/result/personal_query/06_query/{category_name}/"
+        f"{SYNTAX_DEPTH_QUERY_FILENAME}"
+    )
     noisy_query_file = os.path.join(global_paths["inject_noisy"], category_name, "noisy_query.json")
     output_root = os.path.join(str(Path(global_paths["inject_noisy"]).parent), "09_noisy_retrieval", category_name)
     os.makedirs(output_root, exist_ok=True)
@@ -1783,7 +1155,7 @@ def run_category_eval(category_name: str) -> None:
     log(f"Syntax-depth noisy query evaluation - {category_name}")
     log("=" * 80)
     log(f"06 syntax-depth query file: {syntax_depth_query_file}")
-    log(f"07 noisy query file: {noisy_query_file}")
+    log(f"07 noisy query file (legacy reference only): {noisy_query_file}")
     log(f"Query cache dir: {category_config['query_cache_dir']}")
     log(f"Retriever cache dir: {category_config['retriever_cache_dir']}")
     log(f"Retrievers: {', '.join(args.retrievers)}")
@@ -1792,8 +1164,6 @@ def run_category_eval(category_name: str) -> None:
 
     k_values = [1, 3, 5, 10]
     pairs = load_noisy_pairs(category_name, noisy_query_file, syntax_depth_query_file)
-    injection_depths = get_injection_depths(pairs)
-    log_injection_depth_distribution(pairs)
 
     correct_results = []
     noisy_results = []
@@ -1829,7 +1199,9 @@ def run_category_eval(category_name: str) -> None:
             f"{filter_summary['excluded_count']} 条，保留 {filter_summary['kept_count']} 条"
         )
 
-    print_hit10_injection_depth_group_table(filtered_correct_results, filtered_noisy_results, filtered_differences)
+    print_results_table(filtered_correct_results, "CORRECT 检索结果")
+    print_results_table(filtered_noisy_results, "NOISY 检索结果")
+    print_difference_table(filtered_differences)
 
     output_file = os.path.join(output_root, "syntax_depth_correct_vs_noisy_results.json")
     results_to_save = {
@@ -1845,25 +1217,6 @@ def run_category_eval(category_name: str) -> None:
         "retrievers": args.retrievers,
         "k_values": k_values,
         "num_noisy_pairs_loaded": len(pairs),
-        "injection_depths": injection_depths,
-        "depth_groups": [
-            {
-                "name": name,
-                "low": low,
-                "high": high,
-                "display": display,
-            }
-            for name, low, high, display in DEPTH_GROUPS
-        ],
-        "injection_depth_groups": [
-            {
-                "name": name,
-                "low": low,
-                "high": high,
-                "display": display,
-            }
-            for name, low, high, display in INJECTION_DEPTH_GROUPS
-        ],
         "raw_correct_results": correct_results,
         "raw_noisy_results": noisy_results,
         "raw_differences": differences,

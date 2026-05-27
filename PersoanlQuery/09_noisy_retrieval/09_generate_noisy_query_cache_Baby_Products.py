@@ -3,8 +3,8 @@
 生成并预存储检索器的 noisy 查询缓存
 
 这个脚本将：
-1. 从 07_inject_noisy 的 noisy_query.json 加载 syntax-depth 查询对
-2. 将 original_query 作为 clean query，将 noisy_query 作为 noisy query
+1. 从 07_inject_noisy 维护的 query_by_syntax_depth 统一文件加载 syntax-depth 查询对
+2. 将 syntax_depth_query.query 作为 clean query，将 noisy_injection.noisy_query 作为 noisy query
 3. 为每个检索器编码 clean/noisy 两套查询
 4. 保存缓存到磁盘以加速后续评估
 
@@ -67,11 +67,14 @@ CATEGORY_NAME = "Baby_Products"
 CAT_CONFIG = get_category_config(CATEGORY_NAME)
 GLOBAL_PATHS = get_global_paths()
 
-# syntax-depth 查询文件（07 生成的统一文件）
-NOISY_QUERY_FILE = f"{GLOBAL_PATHS['inject_noisy']}/{CATEGORY_NAME}/noisy_query.json"
+# syntax-depth 查询文件（07 生成并持续回写 noisy_injection 的统一文件）
+SYNTAX_DEPTH_QUERY_FILE = (
+    f"/home/wlia0047/ar57/wenyu/result/personal_query/06_query/{CATEGORY_NAME}/"
+    "query_by_syntax_depth_vades_lite_sentence_user_distribution_train10_holdout10.json"
+)
 CLEAN_MODE = "syntax_depth_correct"
 NOISY_MODE = "syntax_depth_noisy"
-SYNTAX_DEPTH_INJECTION_SOURCE = "syntax_depth_preserve_depth"
+SYNTAX_DEPTH_INJECTION_SOURCE = "final_strict_query_no_depth_constraint"
 
 # 缓存目录 - 使用与 08 相同的目录结构
 CACHE_DIR = CAT_CONFIG['query_cache_dir']
@@ -283,57 +286,47 @@ def generate_colbertv2_cache_from_query_types(query_types: List[Tuple[str, List[
     }
 
 
-def load_appended_json_objects(file_path: str) -> List[Dict]:
-    """读取 pretty-printed 追加 JSON 对象或 JSON array。"""
+def load_syntax_depth_query_records(file_path: str) -> List[Dict]:
+    """读取 07 维护的 query_by_syntax_depth 统一记录文件。"""
     if not os.path.exists(file_path):
-        raise FileNotFoundError(f"noisy query 文件不存在: {file_path}")
+        raise FileNotFoundError(f"syntax-depth query 文件不存在: {file_path}")
 
     with open(file_path, 'r', encoding='utf-8') as f:
-        content = f.read().strip()
-    if not content:
-        raise ValueError(f"noisy query 文件为空: {file_path}")
-
-    decoder = json.JSONDecoder()
-    objects: List[Dict] = []
-    index = 0
-    while index < len(content):
-        while index < len(content) and content[index].isspace():
-            index += 1
-        if index >= len(content):
-            break
-        decoded, end = decoder.raw_decode(content, index)
-        if isinstance(decoded, list):
-            if objects:
-                raise ValueError(f"{file_path} 中 JSON array 前存在其他 JSON 对象")
-            tail = content[end:].strip()
-            if tail:
-                raise ValueError(f"{file_path} 中 JSON array 后存在额外内容")
-            return decoded
-        if not isinstance(decoded, dict):
-            raise TypeError(f"{file_path} 中追加 JSON 记录必须是对象")
-        objects.append(decoded)
-        index = end
-
-    return objects
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise TypeError(f"syntax-depth query 文件顶层必须是 list，实际为 {type(data).__name__}: {file_path}")
+    if not data:
+        raise ValueError(f"syntax-depth query 文件为空: {file_path}")
+    return data
 
 
-def _build_query_entry(item: Dict, query_field: str, query_type: str) -> Dict:
-    user_id = item['user_id']
-    asin = item['asin']
-    original_query = item['original_query']
-    noisy_query = item['noisy_query']
-    query_text = item[query_field]
+def _build_query_entry(
+    *,
+    user_id: str,
+    asin: str,
+    clean_query: str,
+    noisy_query: str,
+    query_text: str,
+    query_type: str,
+    source_query_field: str,
+    injection_source: str,
+) -> Dict:
+    original_query = clean_query
 
     if not isinstance(user_id, str) or not user_id:
-        raise ValueError(f"query item has invalid user_id: {item}")
+        raise ValueError(f"query item has invalid user_id: {user_id!r}")
     if not isinstance(asin, str) or not asin:
-        raise ValueError(f"query item has invalid asin for user={user_id}: {item}")
+        raise ValueError(f"query item has invalid asin for user={user_id}: {asin!r}")
     if not isinstance(original_query, str) or not original_query:
-        raise ValueError(f"query item has invalid original_query for user={user_id}, asin={asin}: {item}")
+        raise ValueError(f"query item has invalid original_query for user={user_id}, asin={asin}: {original_query!r}")
     if not isinstance(noisy_query, str) or not noisy_query:
-        raise ValueError(f"query item has invalid noisy_query for user={user_id}, asin={asin}: {item}")
+        raise ValueError(f"query item has invalid noisy_query for user={user_id}, asin={asin}: {noisy_query!r}")
     if not isinstance(query_text, str) or not query_text:
-        raise ValueError(f"query item has invalid {query_field} for user={user_id}, asin={asin}: {item}")
+        raise ValueError(
+            f"query item has invalid {source_query_field} for user={user_id}, asin={asin}: {query_text!r}"
+        )
+    if not isinstance(injection_source, str) or not injection_source:
+        raise ValueError(f"query item has invalid injection_source for user={user_id}, asin={asin}: {injection_source!r}")
 
     return {
         'user_id': user_id,
@@ -343,35 +336,95 @@ def _build_query_entry(item: Dict, query_field: str, query_type: str) -> Dict:
         'noisy_query': noisy_query,
         'source': 'syntax_depth',
         'query_type': query_type,
-        'source_query_field': query_field,
-        'injection_source': item['injection_source'],
+        'source_query_field': source_query_field,
+        'injection_source': injection_source,
     }
 
 
 def load_syntax_depth_query_pairs() -> Dict[str, List[Dict]]:
-    """从 noisy_query.json 加载 syntax-depth clean/noisy 查询对。"""
-    data = load_appended_json_objects(NOISY_QUERY_FILE)
+    """从 query_by_syntax_depth 统一文件加载 syntax-depth clean/noisy 查询对。"""
+    data = load_syntax_depth_query_records(SYNTAX_DEPTH_QUERY_FILE)
     clean_queries = []
     noisy_queries = []
-    skipped_non_syntax_depth = 0
+    skipped_without_noisy_injection = 0
+    skipped_non_target_injection_source = 0
 
     for index, item in enumerate(data):
-        injection_source = item.get('injection_source')
+        if not isinstance(item, dict):
+            raise TypeError(f"syntax-depth query row must be dict at index {index}, got {type(item).__name__}")
+
+        for field in ('user_id', 'asin', 'syntax_depth_query'):
+            if field not in item:
+                raise ValueError(f"syntax-depth row missing required field '{field}' at index {index}: {item}")
+
+        user_id = item['user_id']
+        asin = item['asin']
+        query_block = item['syntax_depth_query']
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError(f"syntax-depth row has invalid user_id at index {index}: {item}")
+        if not isinstance(asin, str) or not asin.strip():
+            raise ValueError(f"syntax-depth row has invalid asin for user={user_id} at index {index}: {item}")
+        if not isinstance(query_block, dict):
+            raise TypeError(
+                f"syntax_depth_query must be dict for user={user_id}, asin={asin}, index={index}, "
+                f"got {type(query_block).__name__}"
+            )
+
+        clean_query = query_block.get('query')
+        if not isinstance(clean_query, str) or not clean_query.strip():
+            raise ValueError(
+                f"syntax_depth_query.query must be non-empty for user={user_id}, asin={asin}, index={index}: {item}"
+            )
+        clean_query = clean_query.strip()
+
+        noisy_info = item.get('noisy_injection')
+        if noisy_info is None:
+            skipped_without_noisy_injection += 1
+            continue
+        if not isinstance(noisy_info, dict):
+            raise TypeError(
+                f"noisy_injection must be dict for user={user_id}, asin={asin}, index={index}, "
+                f"got {type(noisy_info).__name__}"
+            )
+
+        injection_source = noisy_info.get('injection_source')
         if injection_source != SYNTAX_DEPTH_INJECTION_SOURCE:
-            skipped_non_syntax_depth += 1
+            skipped_non_target_injection_source += 1
             continue
 
-        for field in ('user_id', 'asin', 'original_query', 'noisy_query'):
-            if field not in item:
-                raise ValueError(f"query item missing required field '{field}' at index {index}: {item}")
+        noisy_query = noisy_info.get('noisy_query')
+        if not isinstance(noisy_query, str) or not noisy_query.strip():
+            raise ValueError(
+                f"noisy_injection.noisy_query must be non-empty for user={user_id}, asin={asin}, index={index}: {item}"
+            )
+        noisy_query = noisy_query.strip()
 
-        clean_queries.append(_build_query_entry(item, 'original_query', 'clean'))
-        noisy_queries.append(_build_query_entry(item, 'noisy_query', 'noisy'))
+        clean_queries.append(_build_query_entry(
+            user_id=user_id,
+            asin=asin,
+            clean_query=clean_query,
+            noisy_query=noisy_query,
+            query_text=clean_query,
+            query_type='clean',
+            source_query_field='syntax_depth_query.query',
+            injection_source=injection_source,
+        ))
+        noisy_queries.append(_build_query_entry(
+            user_id=user_id,
+            asin=asin,
+            clean_query=clean_query,
+            noisy_query=noisy_query,
+            query_text=noisy_query,
+            query_type='noisy',
+            source_query_field='noisy_injection.noisy_query',
+            injection_source=injection_source,
+        ))
 
     log_with_timestamp(
-        f"✓ 从 {NOISY_QUERY_FILE} 加载了 {len(clean_queries)} 条 syntax-depth clean 查询和 "
+        f"✓ 从 {SYNTAX_DEPTH_QUERY_FILE} 加载了 {len(clean_queries)} 条 syntax-depth clean 查询和 "
         f"{len(noisy_queries)} 条 noisy 查询，"
-        f"跳过非 syntax-depth 记录 {skipped_non_syntax_depth} 条"
+        f"跳过缺少 noisy_injection 的记录 {skipped_without_noisy_injection} 条，"
+        f"跳过 injection_source 不匹配的记录 {skipped_non_target_injection_source} 条"
     )
     return {
         'clean_queries': clean_queries,
@@ -662,7 +715,7 @@ def main():
     log_with_timestamp("🚀 生成 syntax-depth clean/noisy 查询缓存")
     log_with_timestamp("=" * 80)
     log_with_timestamp(f"类别: {CATEGORY_NAME}")
-    log_with_timestamp(f"Noisy 文件: {NOISY_QUERY_FILE}")
+    log_with_timestamp(f"Syntax-depth query 文件: {SYNTAX_DEPTH_QUERY_FILE}")
     log_with_timestamp(f"缓存目录: {CACHE_DIR}")
     log_with_timestamp(f"检索器: {', '.join(retriever_names)}")
     log_with_timestamp(
@@ -692,9 +745,10 @@ def main():
 
     log_with_timestamp("")
     log_with_timestamp(f"📋 任务配置:")
-    log_with_timestamp(f"  • 数据源: {NOISY_QUERY_FILE}")
+    log_with_timestamp(f"  • 数据源: {SYNTAX_DEPTH_QUERY_FILE}")
     log_with_timestamp(f"  • clean 模式: {CLEAN_MODE}")
     log_with_timestamp(f"  • noisy 模式: {NOISY_MODE}")
+    log_with_timestamp(f"  • 目标 injection_source: {SYNTAX_DEPTH_INJECTION_SOURCE}")
     log_with_timestamp(f"  • clean 用户: {len(clean_queries_by_user)} 个, 查询: {clean_query_count} 条")
     log_with_timestamp(f"  • noisy 用户: {len(noisy_queries_by_user)} 个, 查询: {noisy_query_count} 条")
     log_with_timestamp(f"  • clean 缓存目录: {get_cache_subdir(CLEAN_MODE)}")

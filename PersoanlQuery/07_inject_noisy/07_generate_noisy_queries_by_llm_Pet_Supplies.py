@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-基于目标查询深度保持的查询语句噪声注入 - Pet_Supplies
+基于最终严格版查询的查询语句噪声注入 - Pet_Supplies
 """
 
 import sys
@@ -50,20 +50,21 @@ INJECT_ERROR_COUNT = get_required_config_value(_NOISY_CONFIG, 'inject_error_coun
 if not isinstance(MAX_WORKERS, int) or MAX_WORKERS <= 0:
     raise ValueError(f"配置 max_workers 必须是正整数: {MAX_WORKERS!r}")
 EFFECTIVE_MAX_WORKERS = MAX_WORKERS
-LLM_MAX_RETRIES = 6
 LLM_MAX_OUTPUT_TOKENS = 32768
+SPACY_PIPE_BATCH_SIZE = 256
 
 QUERY_FILE = get_required_config_value(_CATEGORY_CONFIG, 'query_file')
 USER_ERROR_FILE = get_required_config_value(_CATEGORY_CONFIG, 'user_error_file')
 NOISY_OUTPUT_FILE = get_required_config_value(_CATEGORY_CONFIG, 'noisy_output_file')
 NOISY_PROMPT_FILE = get_required_config_value(_NOISY_CONFIG, 'prompt_file')
 SYNTAX_DEPTH_QUERY_FILE = (
-    f'/home/wlia0047/ar57/wenyu/result/personal_query/06_query/{CATEGORY}/query_by_syntax_depth.json'
+    f'/home/wlia0047/ar57/wenyu/result/personal_query/06_query/{CATEGORY}/'
+    'query_by_syntax_depth_vades_lite_sentence_user_distribution_train10_holdout10.json'
 )
-INJECTION_SOURCE = 'syntax_depth_preserve_depth'
-BATCH_SIZE = 256
-JSON_READ_MAX_ATTEMPTS = 120
-JSON_READ_RETRY_SECONDS = 5
+USER_REVIEW_DEPTH_FILE = (
+    f'/home/wlia0047/ar57/wenyu/result/personal_query/05_syntactic_analysis/{CATEGORY}/user_average_syntax_depth.json'
+)
+INJECTION_SOURCE = 'final_strict_query_no_depth_constraint'
 
 # 加载噪声 prompt 模板
 with open(NOISY_PROMPT_FILE, 'r', encoding='utf-8') as f:
@@ -79,6 +80,15 @@ LAST_TWO_LAYER_ANCHOR_INSERTION_TEMPLATE = get_required_config_value(
 )
 LAST_TWO_LAYER_ANCHOR_INSERTION_SYSTEM_BASE = (
     f"{NOISY_SYSTEM_BASE}\n\n{LAST_TWO_LAYER_ANCHOR_INSERTION_SYSTEM_CONTENT}"
+)
+LOCAL_INSERTION_FRAGMENT_SYSTEM_CONTENT = get_required_config_value(
+    _NOISY_PROMPTS, "local_insertion_fragment_system_content"
+)
+LOCAL_INSERTION_FRAGMENT_TEMPLATE = get_required_config_value(
+    _NOISY_PROMPTS, "local_insertion_fragment_user_content"
+)
+LOCAL_INSERTION_FRAGMENT_SYSTEM_BASE = (
+    f"{NOISY_SYSTEM_BASE}\n\n{LOCAL_INSERTION_FRAGMENT_SYSTEM_CONTENT}"
 )
 CACHE_PREWARM_USER_CONTENT = get_required_config_value(_NOISY_PROMPTS, "cache_prewarm_user_content")
 ATTRIBUTE_TYPE_LABELS = {
@@ -113,7 +123,47 @@ def log(msg):
 # ========================================
 # 加载用户错误数据
 # ========================================
-def load_user_errors(error_file: str) -> dict:
+def load_user_review_depths(depth_file: str) -> dict:
+    if not os.path.exists(depth_file):
+        raise FileNotFoundError(f"用户评论深度文件不存在: {depth_file}")
+
+    with open(depth_file, 'r', encoding='utf-8') as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise TypeError("用户评论深度文件顶层必须是 dict")
+    users = payload.get('users')
+    if not isinstance(users, list):
+        raise TypeError("用户评论深度文件缺少 users 列表")
+
+    user_depths = {}
+    for idx, user in enumerate(users):
+        if not isinstance(user, dict):
+            raise TypeError(f"depth users[{idx}] 必须是 dict")
+        uid = user.get('user_id')
+        depths = user.get('depths')
+        if not isinstance(uid, str) or not uid.strip():
+            raise ValueError(f"depth users[{idx}].user_id 必须是非空字符串")
+        if not isinstance(depths, list) or not depths:
+            raise ValueError(f"depth users[{idx}].depths 必须是非空列表")
+        for depth_idx, depth in enumerate(depths):
+            if not isinstance(depth, int) or depth <= 0:
+                raise ValueError(f"depth users[{idx}].depths[{depth_idx}] 必须是正整数")
+        user_depths[uid] = depths
+    return user_depths
+
+
+def get_review_depth(user_depths: dict, uid: str, review_index: int) -> int:
+    if uid not in user_depths:
+        raise KeyError(f"用户 {uid} 缺少评论深度记录")
+    depths = user_depths[uid]
+    if not isinstance(review_index, int) or review_index < 0:
+        raise ValueError(f"用户 {uid} 的 review_index 无效: {review_index!r}")
+    if review_index >= len(depths):
+        raise IndexError(f"用户 {uid} 的 review_index={review_index} 超出 depths 长度 {len(depths)}")
+    return depths[review_index]
+
+
+def load_user_errors(error_file: str, user_depths: dict) -> dict:
     if not os.path.exists(error_file):
         raise FileNotFoundError(f"错误文件不存在: {error_file}")
 
@@ -139,19 +189,25 @@ def load_user_errors(error_file: str) -> dict:
             error_category = detail.get('error_category', '')
             if error_category not in ('acl', 'ccomp'):
                 continue
+            if 'review_index' not in detail:
+                raise KeyError(f"用户 {uid} 的错误 detail 缺少 review_index")
+            if 'error_type' not in detail or not isinstance(detail['error_type'], str) or not detail['error_type'].strip():
+                raise ValueError(f"用户 {uid} 的错误 detail 缺少有效 error_type")
+            source_error_depth = get_review_depth(user_depths, uid, detail['review_index'])
 
             seen = set()
             patterns = []
             for err in detail.get('errors', []):
                 orig = err.get('original', '')
                 corr = err.get('corrected', '')
-                key = (orig, corr)
+                key = (orig, corr, detail['error_type'], source_error_depth)
                 if key not in seen:
                     seen.add(key)
                     patterns.append({
                         'original': orig,
                         'corrected': corr,
-                        'error_type': err.get('error_type', 'unknown'),
+                        'error_type': detail['error_type'],
+                        'source_error_depth': source_error_depth,
                     })
 
             if error_category == 'acl':
@@ -277,7 +333,7 @@ def prewarm_noisy_cache(system_base: str) -> None:
         user_content=CACHE_PREWARM_USER_CONTENT,
         max_tokens=256,
         temperature=0.0,
-        max_retries=LLM_MAX_RETRIES,
+        max_retries=1,
         retry_on_empty_response=False,
     )
     log(f"[CachePrewarm Cache] {cache_info}")
@@ -304,17 +360,17 @@ def call_llm(prompt: str, system_base: str = None) -> str:
             user_content=prompt,
             max_tokens=LLM_MAX_OUTPUT_TOKENS,
             temperature=1.0,
-            max_retries=LLM_MAX_RETRIES,
+            max_retries=3,
             stream=True,
-            retry_on_empty_response=False,
+            retry_on_empty_response=True,
         )
     else:
-        response = _minimax_client.call(prompt=prompt, max_tokens=LLM_MAX_OUTPUT_TOKENS, temperature=1.0, max_retries=LLM_MAX_RETRIES)
+        response = _minimax_client.call(prompt=prompt, max_tokens=LLM_MAX_OUTPUT_TOKENS, temperature=1.0, max_retries=3)
 
     log(f"[Cache] {cache_info}")
     log(f"[Response] response:\n{response}")
     if not response:
-        log("[ERROR] LLM response empty, marked failed without retry")
+        log("[ERROR] LLM response empty after max 3 retries")
     return response
 
 
@@ -534,6 +590,91 @@ def query_count_exact_anchor(query: str, correct_text: str) -> int:
     return sum(1 for _ in pattern.finditer(query))
 
 
+def find_exact_anchor_matches(query: str, anchor_text: str) -> list[dict]:
+    if not isinstance(query, str):
+        raise TypeError("query 必须是字符串")
+    if not isinstance(anchor_text, str) or not anchor_text:
+        raise ValueError("anchor_text 必须是非空字符串")
+    escaped = re.escape(anchor_text)
+    if re.fullmatch(r"[A-Za-z0-9']+", anchor_text):
+        pattern = re.compile(rf"\b{escaped}\b", flags=re.IGNORECASE)
+    else:
+        pattern = re.compile(escaped, flags=re.IGNORECASE)
+    return [
+        {
+            'start': match.start(),
+            'end': match.end(),
+            'text': match.group(0),
+        }
+        for match in pattern.finditer(query)
+    ]
+
+
+def spans_overlap(left_start: int, left_end: int, right_start: int, right_end: int) -> bool:
+    for value_name, value in (
+        ('left_start', left_start),
+        ('left_end', left_end),
+        ('right_start', right_start),
+        ('right_end', right_end),
+    ):
+        if not isinstance(value, int) or value < 0:
+            raise ValueError(f"{value_name} 必须是非负整数")
+    if left_end < left_start or right_end < right_start:
+        raise ValueError("span end 不能小于 start")
+    return max(left_start, right_start) < min(left_end, right_end)
+
+
+def count_attributes_non_overlapping(query: str, query_info: dict) -> dict:
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query 必须是非空字符串")
+    ordered_attrs = extract_ordered_query_attributes(query_info)
+    attrs_by_match_priority = sorted(
+        enumerate(ordered_attrs),
+        key=lambda item: (-len(item[1]['attr_value']), item[0]),
+    )
+    occupied_spans = []
+    attr_counts = {
+        attr_item['attr_key']: {
+            'attr_key': attr_item['attr_key'],
+            'attr_type': attr_item['attr_type'],
+            'attr_value': attr_item['attr_value'],
+            'count': 0,
+            'spans': [],
+        }
+        for attr_item in ordered_attrs
+    }
+
+    for _, attr_item in attrs_by_match_priority:
+        matches = find_exact_anchor_matches(query, attr_item['attr_value'])
+        available_matches = []
+        for match in matches:
+            overlaps_existing = any(
+                spans_overlap(match['start'], match['end'], span['start'], span['end'])
+                for span in occupied_spans
+            )
+            if overlaps_existing:
+                continue
+            available_matches.append(match)
+
+        attr_counts[attr_item['attr_key']]['count'] = len(available_matches)
+        attr_counts[attr_item['attr_key']]['spans'] = available_matches
+        for match in available_matches:
+            occupied_spans.append({
+                'start': match['start'],
+                'end': match['end'],
+                'attr_key': attr_item['attr_key'],
+                'attr_type': attr_item['attr_type'],
+                'attr_value': attr_item['attr_value'],
+            })
+
+    return attr_counts
+
+
+def attributes_appear_once_non_overlapping(query: str, query_info: dict) -> bool:
+    attr_counts = count_attributes_non_overlapping(query, query_info)
+    return all(attr_count['count'] == 1 for attr_count in attr_counts.values())
+
+
 def query_has_any_real_anchor(query: str, error_patterns: list) -> bool:
     for idx, pattern in enumerate(error_patterns):
         if not isinstance(pattern, dict):
@@ -588,6 +729,15 @@ def _load_spacy_model():
         if pipe_name in nlp.pipe_names:
             nlp.remove_pipe(pipe_name)
     return nlp
+
+
+@lru_cache(maxsize=32768)
+def _parse_spacy_doc(text: str):
+    if not isinstance(text, str):
+        raise TypeError("text 必须是字符串")
+    if not text:
+        raise ValueError("text 必须是非空字符串")
+    return _load_spacy_model()(text)
 
 
 def compute_doc_token_depths(doc) -> tuple[dict[int, int], int]:
@@ -671,6 +821,74 @@ def extract_query_tokens(doc) -> tuple[list[dict], int]:
     if not query_tokens:
         raise ValueError("query tokens 不能为空")
     return query_tokens, max_depth
+
+
+def get_last_two_layer_depths(max_depth: int) -> set[int]:
+    if not isinstance(max_depth, int) or max_depth <= 0:
+        raise ValueError("max_depth 必须是正整数")
+    if max_depth == 1:
+        return {1}
+    return {max_depth - 1, max_depth}
+
+
+def depth_in_last_two_layers(depth: int, max_depth: int) -> bool:
+    if not isinstance(depth, int) or depth <= 0:
+        raise ValueError("depth 必须是正整数")
+    return depth in get_last_two_layer_depths(max_depth)
+
+
+def format_last_two_layer_depths(max_depth: int) -> str:
+    depths = sorted(get_last_two_layer_depths(max_depth))
+    return ", ".join(str(depth) for depth in depths)
+
+
+def extract_tokens_at_depth(doc, target_depth: int) -> tuple[list[dict], int]:
+    if not isinstance(target_depth, int) or target_depth <= 0:
+        raise ValueError("target_depth 必须是正整数")
+    token_depths, max_depth = compute_doc_token_depths(doc)
+    target_tokens = []
+    for token in doc:
+        if token.i not in token_depths:
+            continue
+        depth = token_depths[token.i]
+        if depth != target_depth:
+            continue
+        target_tokens.append({
+            'text': token.text,
+            'index': token.i,
+            'start': token.idx,
+            'end': token.idx + len(token.text),
+            'depth': depth,
+            'dep': token.dep_,
+            'pos': token.pos_,
+        })
+    return target_tokens, max_depth
+
+
+def extract_tokens_for_error_depths(doc, target_depths: set[int]) -> tuple[list[dict], int]:
+    if not isinstance(target_depths, set) or not target_depths:
+        raise ValueError("target_depths 必须是非空 set")
+    for target_depth in target_depths:
+        if not isinstance(target_depth, int) or target_depth <= 0:
+            raise ValueError(f"target_depths 包含非法深度: {target_depth!r}")
+    token_depths, max_depth = compute_doc_token_depths(doc)
+    target_tokens = []
+    for token in doc:
+        if token.i not in token_depths:
+            continue
+        depth = token_depths[token.i]
+        if depth not in target_depths:
+            continue
+        target_tokens.append({
+            'text': token.text,
+            'index': token.i,
+            'start': token.idx,
+            'end': token.idx + len(token.text),
+            'depth': depth,
+            'dep': token.dep_,
+            'pos': token.pos_,
+        })
+    return target_tokens, max_depth
 
 
 def replace_span(text: str, start: int, end: int, replacement: str) -> str:
@@ -780,35 +998,28 @@ def build_anchor_insertion_pattern_candidates(error_patterns: list) -> list:
     return candidates
 
 
-def normalize_selected_anchor_patterns(error_patterns: list) -> list[dict]:
-    if not isinstance(error_patterns, list) or not error_patterns:
-        raise ValueError("selected anchor patterns 必须是非空列表")
-
+def normalize_selected_anchor_patterns(error_patterns: list) -> list:
+    if not isinstance(error_patterns, list):
+        raise TypeError("selected anchor patterns 必须是列表")
     normalized = []
-    seen_exact = set()
     seen_corrected = set()
     for idx, pattern in enumerate(error_patterns):
         if not isinstance(pattern, dict):
-            raise TypeError(f"selected_patterns[{idx}] 必须是 dict")
+            raise TypeError(f"selected anchor patterns[{idx}] 必须是 dict")
         for required_key in ('corrected', 'original', 'error_type'):
             if required_key not in pattern:
-                raise KeyError(f"selected_patterns[{idx}] 缺少字段: {required_key}")
-            if not isinstance(pattern[required_key], str) or not pattern[required_key].strip():
-                raise ValueError(f"selected_patterns[{idx}].{required_key} 必须是非空字符串")
+                raise KeyError(f"selected anchor patterns[{idx}] 缺少字段: {required_key}")
+        for string_key in ('corrected', 'original', 'error_type'):
+            if not isinstance(pattern[string_key], str) or not pattern[string_key].strip():
+                raise ValueError(f"selected anchor patterns[{idx}].{string_key} 必须是非空字符串")
         corrected = pattern['corrected'].strip()
-        original = pattern['original'].strip()
-        error_type = pattern['error_type'].strip()
-        exact_key = (corrected, original, error_type)
-        if exact_key in seen_exact:
-            continue
         if corrected in seen_corrected:
-            raise ValueError(f"selected_patterns 中 correct_text 不能重复: {corrected}")
-        seen_exact.add(exact_key)
+            raise ValueError(f"selected anchor patterns 中 correct_text 不能重复: {corrected}")
         seen_corrected.add(corrected)
         normalized.append({
             'corrected': corrected,
-            'original': original,
-            'error_type': error_type,
+            'original': pattern['original'].strip(),
+            'error_type': pattern['error_type'].strip(),
         })
     if not normalized:
         raise ValueError("selected anchor patterns 不能为空")
@@ -964,227 +1175,626 @@ def find_token_info_at_span(doc, token_depths: dict[int, int], start: int, end: 
     return None
 
 
-def validate_depth_only_syntax(query: str, expected_depth: int) -> str | None:
-    if not isinstance(query, str) or not query:
-        raise ValueError("query 必须是非空字符串")
-    if not isinstance(expected_depth, int) or expected_depth <= 0:
-        raise ValueError("expected_depth 必须是正整数")
-    doc = _load_spacy_model()(query)
-    _, actual_depth = compute_doc_token_depths(doc)
-    if actual_depth != expected_depth:
-        return 'syntax_depth_changed_after_injection'
-    return None
-
-
 def build_anchor_rewrite_result(
     original_query: str,
-    revised_correct_query: str,
+    candidate_noisy_query: str,
     patterns: list,
     expected_depth: int,
     query_info: dict,
 ) -> tuple[dict | None, str | None]:
     if not isinstance(original_query, str) or not original_query.strip():
         raise ValueError("original_query 必须是非空字符串")
-    if not isinstance(revised_correct_query, str) or not revised_correct_query.strip():
-        raise ValueError("revised_correct_query 必须是非空字符串")
-    if revised_correct_query.strip() == original_query.strip():
+    if not isinstance(candidate_noisy_query, str) or not candidate_noisy_query.strip():
+        raise ValueError("candidate_noisy_query 必须是非空字符串")
+    if candidate_noisy_query.strip() == original_query.strip():
         return None, 'llm_rewrite_not_new'
 
     patterns = normalize_selected_anchor_patterns(patterns)
 
     ordered_attrs = extract_ordered_query_attributes(query_info)
-    for attr_item in ordered_attrs:
-        if query_count_exact_anchor(revised_correct_query, attr_item['attr_value']) != 1:
-            return None, 'llm_rewrite_attribute_count_invalid'
+    if not attributes_appear_once_non_overlapping(candidate_noisy_query, query_info):
+        return None, 'llm_rewrite_attribute_count_invalid'
 
-    revised_doc = _load_spacy_model()(revised_correct_query)
-    revised_token_depths, revised_max_depth = compute_doc_token_depths(revised_doc)
-    if revised_max_depth != expected_depth:
-        return None, 'syntax_depth_changed_after_rewrite'
+    noisy_doc = _parse_spacy_doc(candidate_noisy_query)
+    noisy_token_depths, noisy_max_depth = compute_doc_token_depths(noisy_doc)
 
     selected_anchor_spec = None
     for pattern in patterns:
-        anchor_text = pattern['corrected']
-        escaped = re.escape(anchor_text)
-        if re.fullmatch(r"[A-Za-z0-9']+", anchor_text):
+        error_text = pattern['original']
+        escaped = re.escape(error_text)
+        if re.fullmatch(r"[A-Za-z0-9']+", error_text):
             anchor_pattern = re.compile(rf"\b{escaped}\b", flags=re.IGNORECASE)
         else:
             anchor_pattern = re.compile(escaped, flags=re.IGNORECASE)
-        anchor_match = next(anchor_pattern.finditer(revised_correct_query), None)
-        if anchor_match is None:
+        anchor_matches = list(anchor_pattern.finditer(candidate_noisy_query))
+        if not anchor_matches:
             continue
-        anchor_start, anchor_end = anchor_match.start(), anchor_match.end()
-        token_info = find_token_info_at_span(revised_doc, revised_token_depths, anchor_start, anchor_end)
-        if token_info is None:
-            return None, 'llm_correct_anchor_token_not_found'
-        selected_anchor_spec = {
-            'pattern': pattern,
-            'source_start': anchor_start,
-            'source_end': anchor_end,
-            'token_info': token_info,
-        }
-        break
+        for anchor_match in anchor_matches:
+            anchor_start, anchor_end = anchor_match.start(), anchor_match.end()
+            token_info = find_token_info_at_span(noisy_doc, noisy_token_depths, anchor_start, anchor_end)
+            if token_info is None:
+                return None, 'llm_error_token_not_found'
+            selected_anchor_spec = {
+                'pattern': pattern,
+                'source_start': anchor_start,
+                'source_end': anchor_end,
+                'token_info': token_info,
+            }
+            break
+        if selected_anchor_spec is not None:
+            break
 
     if selected_anchor_spec is None:
-        return None, 'llm_correct_anchor_not_inserted'
+        return None, 'llm_error_not_inserted'
 
-    return build_multi_anchor_result_from_specs(
-        revised_correct_query,
-        [selected_anchor_spec],
+    pattern = selected_anchor_spec['pattern']
+    error_start = selected_anchor_spec['source_start']
+    error_end = selected_anchor_spec['source_end']
+    revised_correct_query = replace_span(candidate_noisy_query, error_start, error_end, pattern['corrected'])
+    if not attributes_appear_once_non_overlapping(revised_correct_query, query_info):
+        return None, 'corrected_query_attribute_count_invalid'
+
+    selected_anchor_spec['replacement'] = pattern['original']
+    selected_anchor_spec['final_start'] = error_start
+    selected_anchor_spec['final_end'] = error_end
+    return {
+        'revised_correct_query': revised_correct_query,
+        'noisy_query': candidate_noisy_query,
+        'anchor_entries': [selected_anchor_spec],
+    }, None
+
+
+def build_candidate_correct_anchor_result(
+    original_query: str,
+    candidate_correct_query: str,
+    patterns: list,
+    expected_depth: int,
+    query_info: dict,
+) -> tuple[dict | None, str | None]:
+    if not isinstance(original_query, str) or not original_query.strip():
+        raise ValueError("original_query 必须是非空字符串")
+    if not isinstance(candidate_correct_query, str) or not candidate_correct_query.strip():
+        raise ValueError("candidate_correct_query 必须是非空字符串")
+    if candidate_correct_query.strip() == original_query.strip():
+        return None, 'llm_rewrite_not_new'
+
+    patterns = normalize_selected_anchor_patterns(patterns)
+    if not attributes_appear_once_non_overlapping(candidate_correct_query, query_info):
+        return None, 'llm_rewrite_attribute_count_invalid'
+
+    candidate_doc = _parse_spacy_doc(candidate_correct_query)
+    candidate_token_depths, candidate_max_depth = compute_doc_token_depths(candidate_doc)
+
+    anchor_specs = []
+    seen_spans = set()
+    for pattern in patterns:
+        matches = find_exact_anchor_matches(candidate_correct_query, pattern['corrected'])
+        if not matches:
+            return None, 'llm_correct_anchor_not_found'
+        if len(matches) > 1:
+            return None, 'llm_correct_anchor_not_unique'
+        match = matches[0]
+        span_key = (match['start'], match['end'])
+        if span_key in seen_spans:
+            return None, 'llm_correct_anchor_not_unique'
+
+        token_info = find_token_info_at_span(candidate_doc, candidate_token_depths, match['start'], match['end'])
+        if token_info is None:
+            return None, 'llm_correct_anchor_token_not_found'
+
+        anchor_specs.append({
+            'pattern': pattern,
+            'source_start': match['start'],
+            'source_end': match['end'],
+            'token_info': token_info,
+        })
+        seen_spans.add(span_key)
+
+    candidate_result, failure_status = build_multi_anchor_result_from_specs(
+        candidate_correct_query,
+        anchor_specs,
         expected_depth,
     )
+    if candidate_result is None:
+        return None, failure_status
+    if not attributes_appear_once_non_overlapping(candidate_result['noisy_query'], query_info):
+        return None, 'corrected_query_attribute_count_invalid'
+    return candidate_result, None
 
 
-def select_direct_anchor_matches(last_two_tokens: list, error_patterns: list) -> list[dict] | None:
-    if not isinstance(last_two_tokens, list) or not last_two_tokens:
-        raise ValueError("last_two_tokens 必须是非空列表")
-    ordered_tokens = sorted(last_two_tokens, key=lambda item: (-item['depth'], item['index']))
-    selected = []
-    used_token_indices = set()
-    seen_corrected = set()
+def build_local_insertion_positions(query: str, doc) -> list[int]:
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query 必须是非空字符串")
+    positions = []
+    for token in doc:
+        if token.is_space:
+            continue
+        positions.append(token.idx)
+        positions.append(token.idx + len(token.text))
+    stripped_query = query.rstrip()
+    if stripped_query and stripped_query[-1] in ".!?":
+        positions.append(len(stripped_query) - 1)
+    positions.append(len(query))
+    return sorted({position for position in positions if 0 <= position <= len(query)})
 
-    for idx, pattern in enumerate(error_patterns):
-        if not isinstance(pattern, dict):
-            raise TypeError(f"error_patterns[{idx}] 必须是 dict")
-        corrected = pattern.get('corrected')
-        if not isinstance(corrected, str) or not corrected.strip():
-            raise ValueError(f"error_patterns[{idx}].corrected 必须是非空字符串")
-        corrected = corrected.strip()
-        if corrected in seen_corrected:
-            raise ValueError(f"selected_patterns 中 correct_text 不能重复: {corrected}")
-        seen_corrected.add(corrected)
 
-        matched_token = None
-        for token_info in ordered_tokens:
-            if token_info['index'] in used_token_indices:
+def insert_local_fragment(query: str, position: int, fragment: str) -> str:
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query 必须是非空字符串")
+    if not isinstance(position, int) or position < 0 or position > len(query):
+        raise ValueError(f"position 无效: {position}")
+    if not isinstance(fragment, str) or not fragment.strip():
+        raise ValueError("fragment 必须是非空字符串")
+    left = query[:position].rstrip()
+    right = query[position:].lstrip()
+    if left and right:
+        candidate = f"{left} {fragment.strip()} {right}"
+    elif left:
+        candidate = f"{left} {fragment.strip()}"
+    elif right:
+        candidate = f"{fragment.strip()} {right}"
+    else:
+        candidate = fragment.strip()
+    candidate = re.sub(r"\s+([.,;:!?])", r"\1", candidate)
+    candidate = re.sub(r"\s+", " ", candidate).strip()
+    return candidate
+
+
+def find_exact_substring_end_positions(query: str, anchor_text: str) -> list[int]:
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query 必须是非空字符串")
+    if not isinstance(anchor_text, str) or not anchor_text.strip():
+        raise ValueError("anchor_text 必须是非空字符串")
+    positions = []
+    start = 0
+    while True:
+        index = query.find(anchor_text, start)
+        if index < 0:
+            break
+        positions.append(index + len(anchor_text))
+        start = index + 1
+    return positions
+
+
+def find_unique_exact_substring_end_position(query: str, anchor_text: str):
+    positions = find_exact_substring_end_positions(query, anchor_text)
+    if not positions:
+        return None
+    if len(positions) > 1:
+        return 'multiple'
+    return positions[0]
+
+
+def find_attribute_spans_in_query(query: str, query_info: dict) -> list[dict]:
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query 必须是非空字符串")
+    spans = []
+    attr_counts = count_attributes_non_overlapping(query, query_info)
+    for attr_count in attr_counts.values():
+        for span in attr_count['spans']:
+            spans.append({
+                'attr_type': attr_count['attr_type'],
+                'attr_value': attr_count['attr_value'],
+                'start': span['start'],
+                'end': span['end'],
+            })
+    return spans
+
+
+def insertion_position_preserves_attributes(position: int, attribute_spans: list[dict]) -> bool:
+    if not isinstance(position, int) or position < 0:
+        raise ValueError("position 必须是非负整数")
+    if not isinstance(attribute_spans, list):
+        raise TypeError("attribute_spans 必须是列表")
+    for span in attribute_spans:
+        if not isinstance(span, dict):
+            raise TypeError("attribute_spans item 必须是 dict")
+        for required_key in ('start', 'end'):
+            if required_key not in span:
+                raise KeyError(f"attribute span 缺少字段: {required_key}")
+        if span['start'] < position < span['end']:
+            return False
+    return True
+
+
+def exact_word_occurs(text: str, word: str) -> bool:
+    if not isinstance(text, str):
+        raise TypeError("text 必须是字符串")
+    if not isinstance(word, str) or not word:
+        raise ValueError("word 必须是非空字符串")
+    return re.search(rf"\b{re.escape(word)}\b", text, flags=re.IGNORECASE) is not None
+
+
+def fragment_preserves_attributes(fragment: str, query_info: dict, target_error_text: str) -> bool:
+    if not isinstance(fragment, str) or not fragment.strip():
+        raise ValueError("fragment 必须是非空字符串")
+    if not isinstance(target_error_text, str) or not target_error_text.strip():
+        raise ValueError("target_error_text 必须是非空字符串")
+    target_error_text = target_error_text.strip().lower()
+    for attr_item in extract_ordered_query_attributes(query_info):
+        attr_value = attr_item['attr_value']
+        if attr_value.lower() != target_error_text and query_count_exact_anchor(fragment, attr_value) > 0:
+            return False
+        for attr_word in re.findall(r"[A-Za-z0-9']+", attr_value):
+            if attr_word.lower() == target_error_text:
                 continue
-            if token_info['text'].lower() == corrected.lower():
-                matched_token = token_info
-                break
-        if matched_token is None:
-            return None
-        used_token_indices.add(matched_token['index'])
-        selected.append({
-            'pattern': pattern,
-            'source_start': matched_token['start'],
-            'source_end': matched_token['end'],
-            'token_info': matched_token,
-        })
-
-    return selected
+            if exact_word_occurs(fragment, attr_word):
+                return False
+    return True
 
 
-def apply_span_replacements(text: str, anchor_specs: list) -> tuple[str, list[dict]]:
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("text 必须是非空字符串")
-    if not isinstance(anchor_specs, list) or not anchor_specs:
-        raise ValueError("anchor_specs 必须是非空列表")
-
-    ordered_specs = sorted(anchor_specs, key=lambda item: item['source_start'])
-    last_end = -1
-    for idx, spec in enumerate(ordered_specs):
-        if not isinstance(spec, dict):
-            raise TypeError(f"anchor_specs[{idx}] 必须是 dict")
-        for required_key in ('pattern', 'source_start', 'source_end', 'token_info'):
-            if required_key not in spec:
-                raise KeyError(f"anchor_specs[{idx}] 缺少字段: {required_key}")
-        if not isinstance(spec['source_start'], int) or not isinstance(spec['source_end'], int):
-            raise TypeError(f"anchor_specs[{idx}].source_start/source_end 必须是整数")
-        if spec['source_start'] < 0 or spec['source_end'] < spec['source_start'] or spec['source_end'] > len(text):
-            raise ValueError(
-                f"anchor_specs[{idx}] 的 source span 无效: start={spec['source_start']}, end={spec['source_end']}, text_len={len(text)}"
-            )
-        if spec['source_start'] < last_end:
-            raise ValueError("anchor_specs 中的替换 span 不能重叠")
-        if not isinstance(spec['pattern'], dict):
-            raise TypeError(f"anchor_specs[{idx}].pattern 必须是 dict")
-        if 'original' not in spec['pattern'] or 'corrected' not in spec['pattern']:
-            raise KeyError(f"anchor_specs[{idx}].pattern 缺少 original/corrected")
-        if not isinstance(spec['pattern']['original'], str) or not spec['pattern']['original'].strip():
-            raise ValueError(f"anchor_specs[{idx}].pattern.original 必须是非空字符串")
-        if not isinstance(spec['pattern']['corrected'], str) or not spec['pattern']['corrected'].strip():
-            raise ValueError(f"anchor_specs[{idx}].pattern.corrected 必须是非空字符串")
-        last_end = spec['source_end']
-
-    current_text = text
-    offset = 0
-    applied_specs = []
-    for spec in ordered_specs:
-        start = spec['source_start'] + offset
-        end = spec['source_end'] + offset
-        replacement = spec['pattern']['original']
-        current_text = current_text[:start] + replacement + current_text[end:]
-        applied_spec = dict(spec)
-        applied_spec['replacement'] = replacement
-        applied_spec['final_start'] = start
-        applied_spec['final_end'] = start + len(replacement)
-        applied_specs.append(applied_spec)
-        offset += len(replacement) - (spec['source_end'] - spec['source_start'])
-
-    return current_text, applied_specs
+def build_llm_local_fragment_prompt(
+    query: str,
+    query_info: dict,
+    query_tokens: list,
+    selected_patterns: list,
+) -> tuple[str, str]:
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query 必须是非空字符串")
+    if not isinstance(query_info, dict):
+        raise TypeError("query_info 必须是对象")
+    if not isinstance(query_tokens, list) or not query_tokens:
+        raise ValueError("query_tokens 必须是非空列表")
+    selected_patterns = normalize_selected_anchor_patterns(selected_patterns)
+    target_errors = [
+        {
+            'correct_text': pattern['corrected'],
+        }
+        for pattern in selected_patterns
+    ]
+    user_content = LOCAL_INSERTION_FRAGMENT_TEMPLATE.format(
+        query=query.strip(),
+        product_attributes_json=json.dumps(build_public_attribute_values(query_info), ensure_ascii=False, indent=2),
+        query_tokens_json=json.dumps(build_public_query_tokens(query_tokens), ensure_ascii=False, indent=2),
+        correct_texts_json=json.dumps(target_errors, ensure_ascii=False, indent=2),
+    )
+    return LOCAL_INSERTION_FRAGMENT_SYSTEM_BASE, user_content
 
 
-def validate_post_injection_syntax_multi(noisy_query: str, anchor_entries: list, expected_max_depth: int) -> str | None:
-    if not isinstance(noisy_query, str) or not noisy_query:
-        raise ValueError("noisy_query 必须是非空字符串")
-    if not isinstance(anchor_entries, list) or not anchor_entries:
-        raise ValueError("anchor_entries 必须是非空列表")
-    if not isinstance(expected_max_depth, int) or expected_max_depth <= 0:
-        raise ValueError("expected_max_depth 必须是正整数")
+def parse_llm_local_fragment_response(text_content: str, selected_patterns: list) -> list[str] | None:
+    if not isinstance(text_content, str) or not text_content.strip():
+        raise ValueError("LLM local fragment response 不能为空")
+    raw_text = text_content.strip()
+    if raw_text.startswith("```"):
+        fence_match = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", raw_text)
+        if not fence_match:
+            raise ValueError("LLM local fragment response 的代码围栏格式不合法")
+        raw_text = fence_match.group(1).strip()
+    data = json.loads(raw_text)
+    if not isinstance(data, dict):
+        raise TypeError("LLM local fragment response 必须是 JSON object")
+    if not isinstance(data, dict):
+        raise TypeError("LLM local fragment response 必须是 JSON object")
+    if data.get('status') == 'IMPOSSIBLE':
+        reason = data.get('reason', '')
+        if not isinstance(reason, str):
+            raise TypeError("IMPOSSIBLE.reason 必须是字符串")
+        return None
+    candidates = data.get('candidates')
+    if not isinstance(candidates, list):
+        raise TypeError("candidates 必须是列表")
+    if len(candidates) != 10:
+        raise ValueError(f"候选句子数量必须正好为 10 个，当前为 {len(candidates)}")
 
-    noisy_doc = _load_spacy_model()(noisy_query)
-    noisy_token_depths, noisy_max_depth = compute_doc_token_depths(noisy_doc)
-    if noisy_max_depth != expected_max_depth:
-        if noisy_max_depth < expected_max_depth:
-            return 'syntax_depth_too_shallow_after_injection'
-        return 'syntax_depth_too_deep_after_injection'
-
-    for idx, entry in enumerate(anchor_entries):
-        if not isinstance(entry, dict):
-            raise TypeError(f"anchor_entries[{idx}] 必须是 dict")
-        for required_key in ('replacement', 'final_start', 'final_end'):
-            if required_key not in entry:
-                raise KeyError(f"anchor_entries[{idx}] 缺少字段: {required_key}")
-        if not isinstance(entry['replacement'], str) or not entry['replacement']:
-            raise ValueError(f"anchor_entries[{idx}].replacement 必须是非空字符串")
-        if not isinstance(entry['final_start'], int) or not isinstance(entry['final_end'], int):
-            raise TypeError(f"anchor_entries[{idx}].final_start/final_end 必须是整数")
-        if 'token_info' not in entry or not isinstance(entry['token_info'], dict):
-            raise KeyError(f"anchor_entries[{idx}] 缺少 token_info")
-        found = False
-        for token in noisy_doc:
-            if (
-                token.text == entry['replacement']
-                and token.idx == entry['final_start']
-                and token.idx + len(token.text) == entry['final_end']
-            ):
-                if noisy_token_depths.get(token.i) is None:
-                    raise ValueError(f"anchor_entries[{idx}] 的 token depth 缺失")
-                found = True
-                break
-        if not found:
-            return 'injected_error_token_not_found_after_injection'
-    return None
+    valid_correct_texts = {pattern['corrected'] for pattern in normalize_selected_anchor_patterns(selected_patterns)}
+    candidate_queries = []
+    seen = set()
+    for candidate_idx, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            log(f"[CandidateSkip] candidates[{candidate_idx}] 不是 dict")
+            continue
+        query_text = candidate.get('query')
+        if not isinstance(query_text, str) or not query_text.strip():
+            log(f"[CandidateSkip] candidates[{candidate_idx}].query 非法")
+            continue
+        normalized_query = query_text.strip()
+        if normalized_query in seen:
+            continue
+        if not any(query_count_exact_anchor(normalized_query, correct_text) > 0 for correct_text in valid_correct_texts):
+            log(f"[CandidateSkip] candidates[{candidate_idx}] 未包含任何 correct_text")
+            continue
+        seen.add(normalized_query)
+        candidate_queries.append(normalized_query)
+    return candidate_queries
 
 
-def build_multi_anchor_result_from_specs(base_query: str, anchor_specs: list, expected_max_depth: int) -> tuple[dict | None, str | None]:
-    if not isinstance(base_query, str) or not base_query.strip():
-        raise ValueError("base_query 必须是非空字符串")
-    if not isinstance(anchor_specs, list) or not anchor_specs:
-        raise ValueError("anchor_specs 必须是非空列表")
-    if not isinstance(expected_max_depth, int) or expected_max_depth <= 0:
-        raise ValueError("expected_max_depth 必须是正整数")
+def generate_llm_local_fragments(
+    query: str,
+    query_info: dict,
+    query_tokens: list,
+    selected_patterns: list,
+) -> list[str] | None:
+    system_base, user_content = build_llm_local_fragment_prompt(query, query_info, query_tokens, selected_patterns)
+    response = call_llm(user_content, system_base=system_base)
+    if not response or not response.strip():
+        return None
+    return parse_llm_local_fragment_response(response, selected_patterns)
 
-    noisy_query, applied_specs = apply_span_replacements(base_query, anchor_specs)
-    depth_status = validate_post_injection_syntax_multi(noisy_query, applied_specs, expected_max_depth)
-    if depth_status is not None:
-        return None, depth_status
 
+def evaluate_candidate_query_for_feedback(
+    original_query: str,
+    candidate_query: str,
+    query_info: dict,
+    selected_patterns: list,
+    expected_depth: int,
+) -> dict:
+    if not isinstance(original_query, str) or not original_query.strip():
+        raise ValueError("original_query 必须是非空字符串")
+    if not isinstance(candidate_query, str) or not candidate_query.strip():
+        raise ValueError("candidate_query 必须是非空字符串")
+    if not isinstance(expected_depth, int) or expected_depth <= 0:
+        raise ValueError("expected_depth 必须是正整数")
+
+    if candidate_query.strip() == original_query.strip():
+        return {
+            'candidate_query': candidate_query.strip(),
+            'candidate_depth': None,
+            'depth_delta': 10**9,
+            'candidate_result': None,
+            'failure_status': 'llm_rewrite_not_new',
+        }
+    if not attributes_appear_once_non_overlapping(candidate_query, query_info):
+        return {
+            'candidate_query': candidate_query.strip(),
+            'candidate_depth': None,
+            'depth_delta': 10**9,
+            'candidate_result': None,
+            'failure_status': 'llm_rewrite_attribute_count_invalid',
+        }
+    if not any(query_contains_exact_anchor(candidate_query, pattern['corrected']) for pattern in selected_patterns):
+        return {
+            'candidate_query': candidate_query.strip(),
+            'candidate_depth': None,
+            'depth_delta': 10**9,
+            'candidate_result': None,
+            'failure_status': 'llm_correct_anchor_not_found',
+        }
+
+    candidate_doc = _parse_spacy_doc(candidate_query)
+    _, candidate_depth = compute_doc_token_depths(candidate_doc)
+    candidate_result, failure_status = build_candidate_correct_anchor_result(
+        original_query,
+        candidate_query,
+        selected_patterns,
+        expected_depth,
+        query_info,
+    )
     return {
-        'revised_correct_query': base_query,
-        'noisy_query': noisy_query,
-        'anchor_entries': applied_specs,
-    }, None
+        'candidate_query': candidate_query.strip(),
+        'candidate_depth': candidate_depth,
+        'depth_delta': abs(candidate_depth - expected_depth),
+        'candidate_result': candidate_result,
+        'failure_status': failure_status,
+    }
+
+
+def select_best_failed_candidate(evaluations: list[dict], expected_depth: int) -> dict | None:
+    if not isinstance(evaluations, list):
+        raise TypeError("evaluations 必须是列表")
+    if not isinstance(expected_depth, int) or expected_depth <= 0:
+        raise ValueError("expected_depth 必须是正整数")
+    if not evaluations:
+        return None
+
+    status_priority = {
+        'llm_error_not_inserted': 0,
+        'llm_correct_anchor_not_found': 0,
+        'llm_correct_anchor_not_unique': 0,
+        'llm_error_token_not_found': 1,
+        'llm_correct_anchor_token_not_found': 1,
+        'llm_rewrite_attribute_count_invalid': 2,
+        'corrected_query_attribute_count_invalid': 2,
+        'no_anchor': 3,
+    }
+
+    def score(item: dict) -> tuple[int, int]:
+        if not isinstance(item, dict):
+            raise TypeError("evaluation item 必须是 dict")
+        depth_delta = item.get('depth_delta')
+        if not isinstance(depth_delta, int) or depth_delta < 0:
+            depth_delta = 10**9
+        failure_status = item.get('failure_status')
+        if not isinstance(failure_status, str):
+            failure_status = ''
+        return depth_delta, status_priority.get(failure_status, 99)
+
+    return min(evaluations, key=score)
+
+
+def get_error_token_depths_in_query(query: str, error_text: str) -> list[int]:
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query 必须是非空字符串")
+    if not isinstance(error_text, str) or not error_text.strip():
+        raise ValueError("error_text 必须是非空字符串")
+    doc = _parse_spacy_doc(query)
+    token_depths, _ = compute_doc_token_depths(doc)
+    escaped = re.escape(error_text)
+    if re.fullmatch(r"[A-Za-z0-9']+", error_text):
+        anchor_pattern = re.compile(rf"\b{escaped}\b", flags=re.IGNORECASE)
+    else:
+        anchor_pattern = re.compile(escaped, flags=re.IGNORECASE)
+    depths = []
+    for match in anchor_pattern.finditer(query):
+        token_info = find_token_info_at_span(doc, token_depths, match.start(), match.end())
+        if token_info is None:
+            continue
+        depths.append(token_info['depth'])
+    return depths
+
+
+def build_depth_adjusted_fragments(error_text: str, observed_depths: list[int], target_depth: int) -> list[str]:
+    if not isinstance(error_text, str) or not error_text.strip():
+        raise ValueError("error_text 必须是非空字符串")
+    if not isinstance(observed_depths, list) or not observed_depths:
+        return []
+    if not isinstance(target_depth, int) or target_depth <= 0:
+        raise ValueError("target_depth 必须是正整数")
+    error_text = error_text.strip()
+    closest_depth = min(observed_depths, key=lambda depth: abs(depth - target_depth))
+    if closest_depth < target_depth:
+        return [
+            f"that has {error_text} option",
+            f"that includes {error_text} label",
+            f"with option that has {error_text} label",
+            f"with choice that includes {error_text} note",
+            f"that has option with {error_text} label",
+            f"that includes option with {error_text} note",
+            f"which has option with {error_text} label",
+            f"which includes choice with {error_text} note",
+        ]
+    if closest_depth > target_depth:
+        return [
+            f"with {error_text} option",
+            f"with {error_text} label",
+            f"with {error_text} note",
+            f"for {error_text} option",
+            f"as {error_text} choice",
+            f"that has {error_text} option",
+            f"that includes {error_text} label",
+        ]
+    return []
+
+
+def build_total_depth_shallow_fragments(error_text: str) -> list[str]:
+    if not isinstance(error_text, str) or not error_text.strip():
+        raise ValueError("error_text 必须是非空字符串")
+    error_text = error_text.strip()
+    return [
+        f"with {error_text} option",
+        f"with {error_text} label",
+        f"with {error_text} note",
+        f"with {error_text} choice",
+        f"for {error_text} option",
+        f"as {error_text} option",
+        f"{error_text} option",
+        f"{error_text} label",
+        f"{error_text} note",
+    ]
+
+
+def try_total_depth_shallow_local_fragments(
+    query: str,
+    pattern: dict,
+    position: int,
+    expected_depth: int,
+    query_info: dict,
+) -> tuple[dict | None, str | None, int]:
+    shallow_fragments = build_total_depth_shallow_fragments(pattern['original'])
+    last_failure_status = None
+    tried_count = 0
+    for shallow_fragment in shallow_fragments:
+        if not fragment_preserves_attributes(shallow_fragment, query_info, pattern['original']):
+            last_failure_status = 'local_fragment_attribute_conflict'
+            continue
+        tried_count += 1
+        shallow_query = insert_local_fragment(query, position, shallow_fragment)
+        shallow_result, shallow_failure_status = build_anchor_rewrite_result(
+            query,
+            shallow_query,
+            [pattern],
+            expected_depth,
+            query_info,
+        )
+        if shallow_result is not None:
+            log(
+                "本地总深度过深调整片段命中: "
+                f"pattern={pattern['original']} target_total_depth={expected_depth} "
+                f"position={position} fragment={shallow_fragment}"
+            )
+            return shallow_result, None, tried_count
+        last_failure_status = shallow_failure_status
+    return None, last_failure_status, tried_count
+
+
+def try_depth_adjusted_local_fragments(
+    query: str,
+    pattern: dict,
+    position: int,
+    candidate_query: str,
+    expected_depth: int,
+    query_info: dict,
+) -> tuple[dict | None, str | None, int]:
+    observed_depths = get_error_token_depths_in_query(candidate_query, pattern['original'])
+    adjusted_fragments = build_depth_adjusted_fragments(
+        pattern['original'],
+        observed_depths,
+        pattern['source_error_depth'],
+    )
+    last_failure_status = None
+    tried_count = 0
+    for adjusted_fragment in adjusted_fragments:
+        if not fragment_preserves_attributes(adjusted_fragment, query_info, pattern['original']):
+            last_failure_status = 'local_fragment_attribute_conflict'
+            continue
+        tried_count += 1
+        adjusted_query = insert_local_fragment(query, position, adjusted_fragment)
+        adjusted_result, adjusted_failure_status = build_anchor_rewrite_result(
+            query,
+            adjusted_query,
+            [pattern],
+            expected_depth,
+            query_info,
+        )
+        if adjusted_result is not None:
+            log(
+                "本地深度调整片段命中: "
+                f"pattern={pattern['original']} observed_depths={observed_depths} "
+                f"target_depth={pattern['source_error_depth']} position={position} fragment={adjusted_fragment}"
+            )
+            return adjusted_result, None, tried_count
+        last_failure_status = adjusted_failure_status
+    return None, last_failure_status, tried_count
+
+
+def select_anchor_insertion_locally(
+    query: str,
+    doc,
+    query_info: dict,
+    error_patterns: list,
+    expected_depth: int,
+) -> tuple[dict | None, str | None, str | None]:
+    selected_patterns = normalize_selected_anchor_patterns(error_patterns)
+    query_tokens, computed_depth = extract_query_tokens(doc)
+    try:
+        candidate_queries = generate_llm_local_fragments(query, query_info, query_tokens, selected_patterns)
+    except Exception as exc:
+        log(f"LLM 本地候选解析失败: {type(exc).__name__}: {exc}")
+        return None, 'llm_fragment_response_parse_error', None
+    if candidate_queries is None:
+        return None, 'empty_llm_fragment_response', None
+    last_failure_status = None
+    evaluations = []
+
+    for candidate_query in candidate_queries:
+        evaluation = evaluate_candidate_query_for_feedback(
+            query,
+            candidate_query,
+            query_info,
+            selected_patterns,
+            expected_depth,
+        )
+        evaluations.append(evaluation)
+        last_failure_status = evaluation['failure_status']
+        if evaluation['candidate_result'] is not None:
+            evaluation['candidate_result']['injection_mode'] = 'local_insert_then_inject'
+            log(
+                "LLM token 候选命中: "
+                f"candidate_depth={evaluation['candidate_depth']} "
+                f"candidate_index={len(evaluations)}"
+            )
+            return evaluation['candidate_result'], None, 'local_insert_then_inject'
+
+    if not evaluations:
+        log("LLM token 候选搜索未命中: 无可用候选")
+        return None, last_failure_status or 'local_insertion_no_candidate', None
+
+    best_evaluation = select_best_failed_candidate(evaluations, expected_depth)
+    log(
+        "LLM token 候选搜索未命中: "
+        f"best_candidate_depth={best_evaluation['candidate_depth']} "
+        f"failure_status={best_evaluation['failure_status']}"
+    )
+    return None, best_evaluation['failure_status'] or last_failure_status or 'local_insertion_no_candidate', None
 
 
 def iter_nonspace_token_spans(text: str) -> list:
@@ -1292,7 +1902,7 @@ def build_anchor_insertion_result(
 
 def select_anchor_insertion_with_llm(
     query: str,
-    query_tokens: list,
+    doc,
     query_info: dict,
     error_patterns: list,
     expected_depth: int,
@@ -1300,20 +1910,21 @@ def select_anchor_insertion_with_llm(
     selected_patterns = normalize_selected_anchor_patterns(error_patterns)
     if not selected_patterns:
         return None, 'no_token_error_pattern'
+    query_tokens, computed_depth = extract_query_tokens(doc)
     system_base, user_content = build_llm_anchor_insertion_prompt(query, query_info, query_tokens, selected_patterns)
+    response = call_llm(user_content, system_base=system_base)
+    if not response or not response.strip():
+        return None, 'empty_llm_response'
     try:
-        response = call_llm(user_content, system_base=system_base)
-        if not response or not response.strip():
-            return None, 'empty_llm_response'
         candidate_queries = parse_llm_anchor_insertion_response(response, selected_patterns)
     except Exception as exc:
-        log(f"LLM anchor 响应解析失败，记任务失败: {type(exc).__name__}: {exc}")
-        return None, 'llm_anchor_response_invalid'
+        log(f"LLM 锚点候选解析失败: {type(exc).__name__}: {exc}")
+        return None, 'llm_anchor_response_parse_error'
     if candidate_queries is None:
         return None, 'no_suitable_rewrite'
     last_failure_status = None
     for candidate_query in candidate_queries:
-        candidate_result, failure_status = build_anchor_rewrite_result(
+        candidate_result, failure_status = build_candidate_correct_anchor_result(
             query,
             candidate_query,
             selected_patterns,
@@ -1363,6 +1974,151 @@ def normalize_result_field_values(value):
     raise TypeError("result field 必须是字符串或字符串列表")
 
 
+def select_direct_anchor_matches(last_two_tokens: list, error_patterns: list) -> list[dict] | None:
+    if not isinstance(last_two_tokens, list) or not last_two_tokens:
+        raise ValueError("last_two_tokens 必须是非空列表")
+    ordered_tokens = sorted(last_two_tokens, key=lambda item: (-item['depth'], item['index']))
+    selected = []
+    used_token_indices = set()
+    seen_corrected = set()
+
+    for idx, pattern in enumerate(error_patterns):
+        if not isinstance(pattern, dict):
+            raise TypeError(f"error_patterns[{idx}] 必须是 dict")
+        corrected = pattern.get('corrected')
+        if not isinstance(corrected, str) or not corrected.strip():
+            raise ValueError(f"error_patterns[{idx}].corrected 必须是非空字符串")
+        corrected = corrected.strip()
+        if corrected in seen_corrected:
+            raise ValueError(f"selected_patterns 中 correct_text 不能重复: {corrected}")
+        seen_corrected.add(corrected)
+
+        matched_token = None
+        for token_info in ordered_tokens:
+            if token_info['index'] in used_token_indices:
+                continue
+            if token_info['text'].lower() == corrected.lower():
+                matched_token = token_info
+                break
+        if matched_token is None:
+            return None
+        used_token_indices.add(matched_token['index'])
+        selected.append({
+            'pattern': pattern,
+            'source_start': matched_token['start'],
+            'source_end': matched_token['end'],
+            'token_info': matched_token,
+        })
+
+    return selected
+
+
+def apply_span_replacements(text: str, anchor_specs: list) -> tuple[str, list[dict]]:
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("text 必须是非空字符串")
+    if not isinstance(anchor_specs, list) or not anchor_specs:
+        raise ValueError("anchor_specs 必须是非空列表")
+
+    ordered_specs = sorted(anchor_specs, key=lambda item: item['source_start'])
+    last_end = -1
+    for idx, spec in enumerate(ordered_specs):
+        if not isinstance(spec, dict):
+            raise TypeError(f"anchor_specs[{idx}] 必须是 dict")
+        for required_key in ('pattern', 'source_start', 'source_end', 'token_info'):
+            if required_key not in spec:
+                raise KeyError(f"anchor_specs[{idx}] 缺少字段: {required_key}")
+        if not isinstance(spec['source_start'], int) or not isinstance(spec['source_end'], int):
+            raise TypeError(f"anchor_specs[{idx}].source_start/source_end 必须是整数")
+        if spec['source_start'] < 0 or spec['source_end'] < spec['source_start'] or spec['source_end'] > len(text):
+            raise ValueError(
+                f"anchor_specs[{idx}] 的 source span 无效: start={spec['source_start']}, end={spec['source_end']}, text_len={len(text)}"
+            )
+        if spec['source_start'] < last_end:
+            raise ValueError("anchor_specs 中的替换 span 不能重叠")
+        if not isinstance(spec['pattern'], dict):
+            raise TypeError(f"anchor_specs[{idx}].pattern 必须是 dict")
+        if 'original' not in spec['pattern'] or 'corrected' not in spec['pattern']:
+            raise KeyError(f"anchor_specs[{idx}].pattern 缺少 original/corrected")
+        if not isinstance(spec['pattern']['original'], str) or not spec['pattern']['original'].strip():
+            raise ValueError(f"anchor_specs[{idx}].pattern.original 必须是非空字符串")
+        if not isinstance(spec['pattern']['corrected'], str) or not spec['pattern']['corrected'].strip():
+            raise ValueError(f"anchor_specs[{idx}].pattern.corrected 必须是非空字符串")
+        last_end = spec['source_end']
+
+    current_text = text
+    offset = 0
+    applied_specs = []
+    for spec in ordered_specs:
+        start = spec['source_start'] + offset
+        end = spec['source_end'] + offset
+        replacement = spec['pattern']['original']
+        current_text = current_text[:start] + replacement + current_text[end:]
+        applied_spec = dict(spec)
+        applied_spec['replacement'] = replacement
+        applied_spec['final_start'] = start
+        applied_spec['final_end'] = start + len(replacement)
+        applied_specs.append(applied_spec)
+        offset += len(replacement) - (spec['source_end'] - spec['source_start'])
+
+    return current_text, applied_specs
+
+
+def validate_post_injection_syntax_multi(noisy_query: str, anchor_entries: list, expected_max_depth: int) -> str | None:
+    if not isinstance(noisy_query, str) or not noisy_query:
+        raise ValueError("noisy_query 必须是非空字符串")
+    if not isinstance(anchor_entries, list) or not anchor_entries:
+        raise ValueError("anchor_entries 必须是非空列表")
+    if not isinstance(expected_max_depth, int) or expected_max_depth <= 0:
+        raise ValueError("expected_max_depth 必须是正整数")
+
+    noisy_doc = _parse_spacy_doc(noisy_query)
+
+    for idx, entry in enumerate(anchor_entries):
+        if not isinstance(entry, dict):
+            raise TypeError(f"anchor_entries[{idx}] 必须是 dict")
+        for required_key in ('replacement', 'final_start', 'final_end'):
+            if required_key not in entry:
+                raise KeyError(f"anchor_entries[{idx}] 缺少字段: {required_key}")
+        if not isinstance(entry['replacement'], str) or not entry['replacement']:
+            raise ValueError(f"anchor_entries[{idx}].replacement 必须是非空字符串")
+        if not isinstance(entry['final_start'], int) or not isinstance(entry['final_end'], int):
+            raise TypeError(f"anchor_entries[{idx}].final_start/final_end 必须是整数")
+        if 'token_info' not in entry or not isinstance(entry['token_info'], dict):
+            raise KeyError(f"anchor_entries[{idx}] 缺少 token_info")
+        matched_token = None
+        for token in noisy_doc:
+            if (
+                token.text == entry['replacement']
+                and token.idx == entry['final_start']
+                and token.idx + len(token.text) == entry['final_end']
+            ):
+                matched_token = token
+                break
+        if matched_token is None:
+            return 'injected_error_token_not_found_after_injection'
+    return None
+
+
+def build_multi_anchor_result_from_specs(base_query: str, anchor_specs: list, expected_max_depth: int) -> tuple[dict | None, str | None]:
+    if not isinstance(base_query, str) or not base_query.strip():
+        raise ValueError("base_query 必须是非空字符串")
+    if not isinstance(anchor_specs, list) or not anchor_specs:
+        raise ValueError("anchor_specs 必须是非空列表")
+    if not isinstance(expected_max_depth, int) or expected_max_depth <= 0:
+        raise ValueError("expected_max_depth 必须是正整数")
+
+    noisy_query, applied_specs = apply_span_replacements(base_query, anchor_specs)
+    depth_status = validate_post_injection_syntax_multi(noisy_query, applied_specs, expected_max_depth)
+    if depth_status is not None:
+        return None, depth_status
+
+    return {
+        'revised_correct_query': base_query,
+        'noisy_query': noisy_query,
+        'anchor_entries': applied_specs,
+    }, None
+
+
 def validate_post_injection_syntax(
     noisy_query: str,
     error_text: str,
@@ -1379,27 +2135,20 @@ def validate_post_injection_syntax(
         raise ValueError("expected_max_depth 必须是正整数")
 
     expected_end = expected_start + len(error_text)
-    noisy_doc = _load_spacy_model()(noisy_query)
-    noisy_token_depths, noisy_max_depth = compute_doc_token_depths(noisy_doc)
-    if noisy_max_depth != expected_max_depth:
-        if noisy_max_depth < expected_max_depth:
-            return 'syntax_depth_too_shallow_after_injection'
-        return 'syntax_depth_too_deep_after_injection'
+    noisy_doc = _parse_spacy_doc(noisy_query)
     for token in noisy_doc:
         if (
             token.text == error_text
             and token.idx == expected_start
             and token.idx + len(token.text) == expected_end
         ):
-            if noisy_token_depths.get(token.i) is None:
-                raise ValueError("injected token depth 缺失")
             return None
     return 'injected_error_token_not_found_after_injection'
 
 
-def inject_by_last_two_layers(
+def inject_by_observed_error_depth(
     query: str,
-    query_tokens: list,
+    doc,
     error_patterns: list,
     query_info: dict,
     expected_depth: int,
@@ -1407,6 +2156,9 @@ def inject_by_last_two_layers(
     injectable_patterns = build_injectable_patterns(error_patterns)
     if not injectable_patterns:
         return {'status': 'no_token_error_pattern'}
+    query_tokens, computed_depth = extract_query_tokens(doc)
+    if not query_tokens:
+        return {'status': 'no_token_available'}
 
     direct_anchor = select_direct_anchor(query_tokens, injectable_patterns)
     if direct_anchor:
@@ -1424,9 +2176,9 @@ def inject_by_last_two_layers(
         }]
         mode = 'direct_anchor'
     else:
-        insertion_result, failure_status = select_anchor_insertion_with_llm(
+        insertion_result, failure_status, insertion_mode = select_anchor_insertion_locally(
             query,
-            query_tokens,
+            doc,
             query_info,
             injectable_patterns,
             expected_depth,
@@ -1436,12 +2188,9 @@ def inject_by_last_two_layers(
         revised_correct_query = insertion_result['revised_correct_query']
         noisy_query = insertion_result['noisy_query']
         anchor_entries = insertion_result['anchor_entries']
-        mode = 'rewrite_then_inject'
+        mode = insertion_result.get('injection_mode', insertion_mode or 'local_insert_then_inject')
 
-    injected_errors = [
-        build_injected_error(anchor_entry['pattern'], anchor_entry['token_info'], mode)
-        for anchor_entry in anchor_entries
-    ]
+    injected_errors = build_injected_errors(anchor_entries, mode)
     if noisy_query == revised_correct_query:
         return {'status': 'no_injection'}
     if not injected_errors_match_real_patterns(injected_errors, injectable_patterns):
@@ -1466,6 +2215,7 @@ def inject_by_last_two_layers(
         'injection_mode': mode,
         'anchor_entries': anchor_entries,
         'selected_tokens': [anchor_entry['token_info'] for anchor_entry in anchor_entries],
+        'target_depth_tokens': query_tokens,
     }
 
 
@@ -1473,7 +2223,7 @@ def inject_by_last_two_layers(
 # 增量写入辅助函数
 # ========================================
 def write_noisy_result_incremental(result_item: dict, output_file: str):
-    """将单个句法树最后两层注入结果增量写入简化文件"""
+    """将单个按真实错误深度注入的结果增量写入简化文件"""
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     for required_key in ('uid', 'asin', 'source_query', 'status'):
         if required_key not in result_item:
@@ -1529,7 +2279,7 @@ def write_noisy_result_incremental(result_item: dict, output_file: str):
                     raise KeyError(f"成功结果 injected_errors[{idx}] 缺少 {required_key}")
                 if not isinstance(injected_error[required_key], str) or not injected_error[required_key].strip():
                     raise ValueError(f"成功结果 injected_errors[{idx}].{required_key} 必须是非空字符串")
-            if injected_error['injection_mode'] not in ('direct_anchor', 'rewrite_then_inject'):
+            if injected_error['injection_mode'] not in ('direct_anchor', 'local_insert_then_inject'):
                 raise ValueError(f"未知 injection_mode: {injected_error['injection_mode']}")
         for idx, anchor_entry in enumerate(anchor_entries):
             if not isinstance(anchor_entry, dict):
@@ -1544,7 +2294,7 @@ def write_noisy_result_incremental(result_item: dict, output_file: str):
             if not isinstance(anchor_entry['replacement'], str) or not anchor_entry['replacement'].strip():
                 raise ValueError(f"成功结果 anchor_entries[{idx}].replacement 必须是非空字符串")
         noisy_query = result_item['noisy_query']
-        noisy_doc = _load_spacy_model()(noisy_query)
+        noisy_doc = _parse_spacy_doc(noisy_query)
         noisy_token_depths, _ = compute_doc_token_depths(noisy_doc)
         noise_type = [anchor_entry['pattern']['error_type'] for anchor_entry in anchor_entries]
         correct_text = [anchor_entry['pattern']['corrected'] for anchor_entry in anchor_entries]
@@ -1569,29 +2319,130 @@ def write_noisy_result_incremental(result_item: dict, output_file: str):
                 raise ValueError(f"成功结果 anchor_entries[{idx}] 的 token depth 缺失")
             injection_target_depth.append(actual_depth)
 
-        def pack_output_field(values: list[str]):
+        def pack_output_field(values: list):
             if not values:
                 return ''
             if len(values) == 1:
                 return values[0]
             return values
 
-    output_data = {
-        'user_id': result_item['uid'],
-        'asin': result_item['asin'],
-        'original_query': original_query,
-        'noisy_query': noisy_query,
-        'noise_type': pack_output_field(noise_type) if result_item['status'] == 'success' else '',
-        'correct_text': pack_output_field(correct_text) if result_item['status'] == 'success' else '',
-        'noisy_text': pack_output_field(noisy_text) if result_item['status'] == 'success' else '',
-        'anchor_replaced_text': pack_output_field(anchor_replaced_text) if result_item['status'] == 'success' else '',
-        'injection_target_depth': pack_output_field(injection_target_depth) if result_item['status'] == 'success' else '',
-        'injection_source': INJECTION_SOURCE,
-    }
-    # 追加到文件
+    try:
+        output_data = {
+            'user_id': result_item['uid'],
+            'asin': result_item['asin'],
+            'original_query': original_query,
+            'noisy_query': noisy_query,
+            'noise_type': pack_output_field(noise_type) if result_item['status'] == 'success' else '',
+            'correct_text': pack_output_field(correct_text) if result_item['status'] == 'success' else '',
+            'noisy_text': pack_output_field(noisy_text) if result_item['status'] == 'success' else '',
+            'anchor_replaced_text': pack_output_field(anchor_replaced_text) if result_item['status'] == 'success' else '',
+            'injection_target_depth': pack_output_field(injection_target_depth) if result_item['status'] == 'success' else '',
+            'injection_source': INJECTION_SOURCE,
+        }
+    except Exception as exc:
+        raise ValueError(f"成功结果写盘前校验失败: {type(exc).__name__}: {exc}") from exc
+
     with open(output_file, 'a', encoding='utf-8') as f:
         json.dump(output_data, f, indent=2, ensure_ascii=False)
         f.write('\n')
+
+
+def load_query_records_by_key(records: list) -> dict:
+    record_by_key = {}
+    for idx, record in enumerate(records):
+        validate_syntax_depth_query_record(record, idx)
+        key = completed_key_from_record(record)
+        if key in record_by_key:
+            raise ValueError(f"query 文件存在重复 user_id/asin: {key}")
+        record_by_key[key] = record
+    return record_by_key
+
+
+def noisy_record_is_completed(record: dict) -> bool:
+    if not isinstance(record, dict):
+        raise TypeError("record 必须是对象")
+    noisy_info = record.get('noisy_injection')
+    if not isinstance(noisy_info, dict):
+        return False
+    injection_source = noisy_info.get('injection_source')
+    if injection_source != INJECTION_SOURCE:
+        return False
+    ground_truth_query = noisy_info.get('ground_truth_query')
+    noisy_query = noisy_info.get('noisy_query')
+    if not isinstance(ground_truth_query, str) or not ground_truth_query.strip():
+        return False
+    if not isinstance(noisy_query, str) or not noisy_query.strip():
+        return False
+    return True
+
+
+def load_completed_query_keys_from_records(records: list) -> set:
+    completed = set()
+    for record in records:
+        if noisy_record_is_completed(record):
+            completed.add(completed_key_from_record(record))
+    return completed
+
+
+def update_query_record_in_place(record: dict, result_item: dict) -> None:
+    if not isinstance(record, dict):
+        raise TypeError("record 必须是对象")
+    if not isinstance(result_item, dict):
+        raise TypeError("result_item 必须是对象")
+    if result_item.get('status') != 'success':
+        return
+    if 'ground_truth_query' not in result_item or 'noisy_query' not in result_item:
+        raise KeyError("成功结果缺少 ground_truth_query 或 noisy_query")
+    if 'injected_errors' not in result_item:
+        raise KeyError("成功结果缺少 injected_errors")
+    if 'anchor_entries' not in result_item:
+        raise KeyError("成功结果缺少 anchor_entries")
+    if 'query_info' not in result_item or not isinstance(result_item['query_info'], dict):
+        raise KeyError("成功结果缺少 query_info")
+
+    noisy_doc = _parse_spacy_doc(result_item['noisy_query'])
+    noisy_token_depths, _ = compute_doc_token_depths(noisy_doc)
+    injection_target_depth = []
+    for idx, anchor_entry in enumerate(result_item['anchor_entries']):
+        matched_token = None
+        for token in noisy_doc:
+            if (
+                token.text == anchor_entry['replacement']
+                and token.idx == anchor_entry['final_start']
+                and token.idx + len(token.text) == anchor_entry['final_end']
+            ):
+                matched_token = token
+                break
+        if matched_token is None:
+            raise ValueError(f"anchor_entries[{idx}] 在 noisy_query 中未找到对应 token")
+        actual_depth = noisy_token_depths.get(matched_token.i)
+        if actual_depth is None:
+            raise ValueError(f"anchor_entries[{idx}] 的 token depth 缺失")
+        injection_target_depth.append(actual_depth)
+
+    syntax_depth_query = record.get('syntax_depth_query')
+    if not isinstance(syntax_depth_query, dict):
+        raise TypeError("record.syntax_depth_query 必须是对象")
+    syntax_depth_query['query'] = result_item['ground_truth_query']
+    syntax_depth_query['word_count'] = int(len(result_item['ground_truth_query'].split()))
+
+    record['noisy_injection'] = {
+        'noisy_query': result_item['noisy_query'],
+        'noise_type': [item['error_type'] for item in result_item['injected_errors']],
+        'correct_text': [item['correct'] for item in result_item['injected_errors']],
+        'noisy_text': [item['error'] for item in result_item['injected_errors']],
+        'anchor_replaced_text': [entry['token_info']['text'] for entry in result_item['anchor_entries']],
+        'injection_target_depth': injection_target_depth,
+        'injection_source': INJECTION_SOURCE,
+        'query_rewritten': bool(result_item['query_rewritten']),
+        'injection_mode': result_item['injection_mode'],
+    }
+
+
+def write_query_records_back(records: list, file_path: str) -> None:
+    output_path = file_path
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(records, f, indent=2, ensure_ascii=False)
 
 
 # ========================================
@@ -1708,7 +2559,11 @@ def merge_filtered_user_errors(raw_user_errors: dict) -> dict:
             for pattern in filter_error_patterns(err_data.get(category, [])):
                 if 'error_type' not in pattern or not isinstance(pattern['error_type'], str) or not pattern['error_type']:
                     raise ValueError(f"user_errors[{uid}] 缺少有效 error_type")
-                key = (pattern['original'], pattern['corrected'], pattern['error_type'])
+                key = (
+                    pattern['original'],
+                    pattern['corrected'],
+                    pattern['error_type'],
+                )
                 if key in seen:
                     continue
                 seen.add(key)
@@ -1719,37 +2574,13 @@ def merge_filtered_user_errors(raw_user_errors: dict) -> dict:
 
 
 def load_syntax_depth_query_records(file_path: str) -> list:
-    if not isinstance(file_path, str) or not file_path:
-        raise ValueError("file_path 必须是非空字符串")
-
-    last_error = None
-    for attempt in range(1, JSON_READ_MAX_ATTEMPTS + 1):
-        if not os.path.exists(file_path):
-            last_error = FileNotFoundError(f"syntax-depth query file not found: {file_path}")
-        else:
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                if not content.strip():
-                    raise json.JSONDecodeError("empty file while upstream writer is replacing JSON", content, 0)
-                payload = json.loads(content)
-                if not isinstance(payload, list):
-                    raise TypeError("query_by_syntax_depth.json 顶层必须是列表")
-                return payload
-            except json.JSONDecodeError as exc:
-                last_error = exc
-
-        if attempt < JSON_READ_MAX_ATTEMPTS:
-            log(
-                "query_by_syntax_depth.json 当前不可解析，等待上游写入完成后重试 "
-                f"({attempt}/{JSON_READ_MAX_ATTEMPTS}): {file_path}; "
-                f"{type(last_error).__name__}: {last_error}"
-            )
-            time.sleep(JSON_READ_RETRY_SECONDS)
-
-    raise RuntimeError(
-        f"query_by_syntax_depth.json 在 {JSON_READ_MAX_ATTEMPTS} 次读取后仍不可解析: {file_path}"
-    ) from last_error
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"syntax-depth query file not found: {file_path}")
+    with open(file_path, 'r', encoding='utf-8') as f:
+        payload = json.load(f)
+    if not isinstance(payload, list):
+        raise TypeError("query_by_syntax_depth.json 顶层必须是列表")
+    return payload
 
 
 def validate_syntax_depth_query_record(record: dict, idx: int) -> None:
@@ -1765,15 +2596,13 @@ def validate_syntax_depth_query_record(record: dict, idx: int) -> None:
     query_info = record['syntax_depth_query']
     if not isinstance(query_info, dict):
         raise TypeError(f"records[{idx}].syntax_depth_query 必须是对象")
-    for required_key in ('query', 'word_count', 'actual_depth', 'attrs_used'):
+    for required_key in ('query', 'word_count', 'attrs_used'):
         if required_key not in query_info:
             raise KeyError(f"records[{idx}].syntax_depth_query 缺少字段: {required_key}")
     if not isinstance(query_info['query'], str) or not query_info['query'].strip():
         raise ValueError(f"records[{idx}].syntax_depth_query.query 必须是非空字符串")
     if not isinstance(query_info['word_count'], int):
         raise TypeError(f"records[{idx}].syntax_depth_query.word_count 必须是整数")
-    if not isinstance(query_info['actual_depth'], int):
-        raise TypeError(f"records[{idx}].syntax_depth_query.actual_depth 必须是整数")
     attrs_used = query_info['attrs_used']
     if not isinstance(attrs_used, dict) or len(attrs_used) != 5:
         raise ValueError(f"records[{idx}].syntax_depth_query.attrs_used 必须是包含 5 个属性值的对象")
@@ -1813,7 +2642,7 @@ def build_syntax_depth_query_tasks(records: list, user_errors: dict, completed_k
             'source_query_type': 'syntax_depth_query',
             'source_query': query_info['query'].strip(),
             'source_word_count': query_info['word_count'],
-            'source_syntax_tree_depth': query_info['actual_depth'],
+            'source_syntax_tree_depth': query_info.get('actual_depth'),
             'target_syntax_tree_depth': query_info.get('target_depth'),
             'level': query_info.get('target_depth'),
             'errors': errors,
@@ -1828,7 +2657,7 @@ def process_one_query_task(task: dict, doc) -> dict:
     uid = task['uid']
     query = task['source_query']
     try:
-        query_tokens, computed_depth = extract_query_tokens(doc)
+        _, computed_depth = compute_doc_token_depths(doc)
     except Exception as exc:
         return {
             'uid': uid,
@@ -1839,9 +2668,9 @@ def process_one_query_task(task: dict, doc) -> dict:
         }
 
     try:
-        injected = inject_by_last_two_layers(
+        injected = inject_by_observed_error_depth(
             query,
-            query_tokens,
+            doc,
             task['errors'],
             task['query_info'],
             computed_depth,
@@ -1851,9 +2680,9 @@ def process_one_query_task(task: dict, doc) -> dict:
             'uid': uid,
             'asin': task['asin'],
             'source_query': query,
-            'status': 'task_unexpected_exception',
-            'source_query_type': task['source_query_type'],
+            'status': 'task_exception',
             'error': f'{type(exc).__name__}: {exc}',
+            'source_query_type': task['source_query_type'],
         }
     if injected['status'] != 'success':
         return {
@@ -1880,7 +2709,7 @@ def process_one_query_task(task: dict, doc) -> dict:
         'source_syntax_tree_depth': task['source_syntax_tree_depth'],
         'target_syntax_tree_depth': task['target_syntax_tree_depth'],
         'computed_syntax_tree_depth': computed_depth,
-        'query_tokens': query_tokens,
+        'target_depth_tokens': injected['target_depth_tokens'],
         'selected_tokens': injected['selected_tokens'],
         'anchor_entries': injected['anchor_entries'],
         'injection_mode': injected['injection_mode'],
@@ -1889,17 +2718,22 @@ def process_one_query_task(task: dict, doc) -> dict:
 
 
 def main():
-    log(f"=== 基于目标查询深度保持的噪声注入开始 (Category: {CATEGORY}) ===")
+    log(f"=== 基于最终严格版查询的噪声注入开始 (Category: {CATEGORY}) ===")
     log(f"加载 syntax-depth query from {SYNTAX_DEPTH_QUERY_FILE}...")
     syntax_depth_records = load_syntax_depth_query_records(SYNTAX_DEPTH_QUERY_FILE)
     log(f"加载了 {len(syntax_depth_records)} 个用户级 syntax-depth query 记录")
+    query_record_by_key = load_query_records_by_key(syntax_depth_records)
+
+    log(f"加载用户评论深度 from {USER_REVIEW_DEPTH_FILE}...")
+    user_review_depths = load_user_review_depths(USER_REVIEW_DEPTH_FILE)
+    log(f"加载了 {len(user_review_depths)} 个用户的评论深度")
 
     log(f"加载用户错误 from {USER_ERROR_FILE}...")
-    raw_user_errors = load_user_errors(USER_ERROR_FILE)
+    raw_user_errors = load_user_errors(USER_ERROR_FILE, user_review_depths)
     user_errors = merge_filtered_user_errors(raw_user_errors)
     log(f"过滤并合并 ACL/CCOMP 后，有错误模式的用户数: {len(user_errors)}")
 
-    completed_keys = load_completed_query_keys(NOISY_OUTPUT_FILE)
+    completed_keys = load_completed_query_keys_from_records(syntax_depth_records)
     log(f"已有 {INJECTION_SOURCE} 完成记录数: {len(completed_keys)}")
 
     tasks, build_stats = build_syntax_depth_query_tasks(syntax_depth_records, user_errors, completed_keys)
@@ -1910,19 +2744,28 @@ def main():
     if not tasks:
         raise ValueError("没有可处理的 query_by_syntax_depth 任务")
 
-    log("LLM token 候选已启用：LLM 基于原句 token 生成候选 noisy query，本地校验注入前后整体深度保持不变")
-    prewarm_noisy_cache(LAST_TWO_LAYER_ANCHOR_INSERTION_SYSTEM_BASE)
+    log("开始加载 spaCy 模型并批量预解析源 query 文档")
+    log("LLM token 候选已启用：LLM 基于原句 token 生成候选 noisy query，本地校验属性完整性与真实 typo 对齐，不再要求注入前后整体句法树深度一致")
+    with ThreadPoolExecutor(max_workers=2) as warmup_executor:
+        cache_future = warmup_executor.submit(prewarm_noisy_cache, LOCAL_INSERTION_FRAGMENT_SYSTEM_BASE)
+        nlp = _load_spacy_model()
+        task_docs = list(
+            zip(
+                tasks,
+                nlp.pipe((task['source_query'] for task in tasks), batch_size=SPACY_PIPE_BATCH_SIZE),
+            )
+        )
+        log("spaCy 批量预解析完成")
+        cache_future.result()
 
-    nlp = _load_spacy_model()
     log(f"并发 worker 数: {EFFECTIVE_MAX_WORKERS}")
     status_counts = {}
     success_count = 0
     rewritten_success_count = 0
     direct_success_count = 0
-    rewrite_success_count = 0
+    local_insert_success_count = 0
     total_start = time.time()
 
-    task_docs = list(zip(tasks, nlp.pipe((task['source_query'] for task in tasks), batch_size=BATCH_SIZE)))
     with ThreadPoolExecutor(max_workers=EFFECTIVE_MAX_WORKERS) as executor:
         future_to_task = {
             executor.submit(process_one_query_task, task, doc): task
@@ -1942,14 +2785,18 @@ def main():
                     'asin': task['asin'],
                     'source_query': task['source_query'],
                     'source_query_type': task.get('source_query_type'),
-                    'status': 'task_unexpected_exception',
+                    'status': 'task_exception',
                     'error': f'{type(exc).__name__}: {exc}',
                 }
             try:
-                write_noisy_result_incremental(result, NOISY_OUTPUT_FILE)
+                if result['status'] == 'success':
+                    record_key = completed_key_from_fields(result['uid'], result['asin'])
+                    if record_key not in query_record_by_key:
+                        raise KeyError(f"原始 query 记录不存在: {record_key}")
+                    update_query_record_in_place(query_record_by_key[record_key], result)
             except Exception as exc:
                 log(
-                    f"[ERROR] 结果写盘失败，已降级为失败: "
+                    f"[ERROR] 结果写回 query 文件失败，已降级为失败: "
                     f"user={task['uid'][:20]} err={type(exc).__name__}: {exc}"
                 )
                 result = {
@@ -1957,7 +2804,7 @@ def main():
                     'asin': task['asin'],
                     'source_query': task['source_query'],
                     'source_query_type': task.get('source_query_type'),
-                    'status': 'task_unexpected_exception',
+                    'status': 'task_exception',
                     'error': f'{type(exc).__name__}: {exc}',
                 }
 
@@ -1970,29 +2817,30 @@ def main():
                     rewritten_success_count += 1
                 if result['injection_mode'] == 'direct_anchor':
                     direct_success_count += 1
-                elif result['injection_mode'] == 'rewrite_then_inject':
-                    rewrite_success_count += 1
+                elif result['injection_mode'] == 'local_insert_then_inject':
+                    local_insert_success_count += 1
 
             log(
                 f"  [进度 {processed_count}/{len(tasks)}] "
                 f"成功:{success_count} 直接注入:{direct_success_count} "
-                f"LLM重写后注入:{rewrite_success_count} "
+                f"本地插入后注入:{local_insert_success_count} "
                 f"改写成功:{rewritten_success_count} "
                 f"当前状态:{status} user={task['uid'][:20]}"
             )
 
     elapsed = time.time() - total_start
+    write_query_records_back(syntax_depth_records, SYNTAX_DEPTH_QUERY_FILE)
     log(f"\n{'='*60}")
     log("==================== 统计结果 ====================")
     log(f"总任务数: {len(tasks)}")
     log(f"成功注入: {success_count} ({success_count/len(tasks)*100:.1f}%)")
-    log(f"直接命中并注入: {direct_success_count}")
-    log(f"LLM 重写后注入: {rewrite_success_count}")
+    log(f"直接在目标错误深度命中并注入: {direct_success_count}")
+    log(f"本地局部插入后注入: {local_insert_success_count}")
     log(f"其中 query_rewritten=True: {rewritten_success_count}")
     for status in sorted(status_counts):
         log(f"  - {status}: {status_counts[status]}")
     log(f"耗时: {elapsed:.1f}s")
-    log(f"结果保存到: {NOISY_OUTPUT_FILE}")
+    log(f"结果已回写到: {SYNTAX_DEPTH_QUERY_FILE}")
 
 
 if __name__ == '__main__':
