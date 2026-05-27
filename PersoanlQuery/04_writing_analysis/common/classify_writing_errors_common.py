@@ -120,7 +120,7 @@ def get_category_paths(category: str) -> Tuple[Path, Path, Path]:
     category_dir = WRITING_ANALYSIS_ROOT / category
     writing_error_file = category_dir / "writing_error.json"
     stage1_reviews_file = STAGE1_ROOT / category / "stage1_reviews.json"
-    output_file = category_dir / "writing_error_filtered.json"
+    output_file = category_dir / "writing_error.json"
     return writing_error_file, stage1_reviews_file, output_file
 
 
