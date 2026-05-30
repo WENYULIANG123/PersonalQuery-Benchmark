@@ -100,6 +100,13 @@ def require_int(item: Dict, field: str, context: str) -> int:
     return value
 
 
+def require_bool(item: Dict, field: str, context: str) -> bool:
+    value = require_field(item, field, context)
+    if not isinstance(value, bool):
+        raise TypeError(f"{context} field '{field}' must be bool, got {type(value).__name__}")
+    return value
+
+
 def require_number(item: Dict, field: str, context: str) -> float:
     value = require_field(item, field, context)
     if not isinstance(value, (int, float)):
@@ -207,51 +214,36 @@ def load_syntax_depth_metadata(syntax_depth_query_file: str) -> Dict[Tuple[str, 
 
 
 def load_noisy_pairs(category_name: str, noisy_query_file: str, syntax_depth_query_file: str) -> List[Dict]:
-    with open(syntax_depth_query_file, "r", encoding="utf-8") as f:
+    """Load noisy query pairs from the new flat noisy_query.json format.
+
+    The noisy_query_file contains records with flat structure:
+    - uid, asin, clean_query, noisy_query, query_rewritten, etc.
+
+    The syntax_depth_query_file is no longer used for loading pairs in this format.
+    """
+    with open(noisy_query_file, "r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, list):
         raise TypeError(
-            f"syntax-depth query file must contain a list, got {type(data).__name__}: {syntax_depth_query_file}"
+            f"noisy query file must contain a list, got {type(data).__name__}: {noisy_query_file}"
         )
 
     pairs = []
-    skipped_without_noisy_injection = 0
-    skipped_non_target_injection_source = 0
+    skipped_invalid_record = 0
     for row_index, item in enumerate(data):
         if not isinstance(item, dict):
-            raise TypeError(f"syntax-depth row {row_index} must be dict, got {type(item).__name__}")
-        context = f"syntax-depth noisy row {row_index}"
-        user_id = require_str(item, "user_id", context)
+            raise TypeError(f"noisy query row {row_index} must be dict, got {type(item).__name__}")
+        context = f"noisy query row {row_index}"
+
+        user_id = require_str(item, "uid", context)
         asin = require_str(item, "asin", context)
-        syntax_query = require_dict(item, "syntax_depth_query", context)
-        original_query = require_str(syntax_query, "query", context)
+        clean_query = require_str(item, "clean_query", context)
+        noisy_query = require_str(item, "noisy_query", context)
+        query_rewritten = require_bool(item, "query_rewritten", context)
 
-        noisy_injection = item.get("noisy_injection")
-        if noisy_injection is None:
-            skipped_without_noisy_injection += 1
-            continue
-        if not isinstance(noisy_injection, dict):
-            raise TypeError(f"{context} noisy_injection must be dict, got {type(noisy_injection).__name__}")
-
-        injection_source = require_str(noisy_injection, "injection_source", context)
-        if injection_source != NOISY_INJECTION_SOURCE:
-            skipped_non_target_injection_source += 1
-            continue
-
-        noisy_query = require_str(noisy_injection, "noisy_query", context)
-        attrs_used = {
-            "query_attrs_used": syntax_query.get("attrs_used"),
-            "noise_type": require_str_or_str_list(noisy_injection, "noise_type", context),
-            "correct_text": require_str_or_str_list(noisy_injection, "correct_text", context),
-            "noisy_text": require_str_or_str_list(noisy_injection, "noisy_text", context),
-            "anchor_replaced_text": require_str_or_str_list(noisy_injection, "anchor_replaced_text", context),
-        }
-        query_rewritten = noisy_injection.get("query_rewritten")
-        if not isinstance(query_rewritten, bool):
-            raise TypeError(f"{context} noisy_injection.query_rewritten must be bool, got {type(query_rewritten).__name__}")
-        injection_mode = noisy_injection.get("injection_mode")
-        if not isinstance(injection_mode, str) or not injection_mode:
-            raise ValueError(f"{context} noisy_injection.injection_mode must be non-empty string")
+        applied_error = item.get("applied_error")
+        if applied_error is not None and not isinstance(applied_error, dict):
+            raise TypeError(f"{context} applied_error must be dict when present, got {type(applied_error).__name__}")
 
         pair = {
             "pair_id": len(pairs),
@@ -260,33 +252,36 @@ def load_noisy_pairs(category_name: str, noisy_query_file: str, syntax_depth_que
             "user_id": user_id,
             "asin": asin,
             "query_category": SYNTAX_DEPTH_QUERY_CATEGORY,
-            "correct_query": original_query,
+            "correct_query": clean_query,
             "correct_query_source_field": CORRECT_QUERY_SOURCE_FIELD,
-            "source_query": original_query,
-            "ground_truth_query": original_query,
+            "source_query": clean_query,
+            "ground_truth_query": clean_query,
             "noisy_query": noisy_query,
-            "original_query": original_query,
+            "original_query": clean_query,
             "query_rewritten": query_rewritten,
-            "injection_mode": injection_mode,
-            "injection_source": injection_source,
-            "word_count": len(original_query.split()),
-            "attrs_used": attrs_used,
+            "injection_mode": "lambdamart_token",
+            "injection_source": NOISY_INJECTION_SOURCE,
+            "word_count": len(clean_query.split()),
+            "attrs_used": {
+                "query_attrs_used": None,
+                "noise_type": None,
+                "correct_text": applied_error.get("corrected") if applied_error else None,
+                "noisy_text": applied_error.get("original") if applied_error else None,
+                "anchor_replaced_text": None,
+            },
         }
         pairs.append(pair)
 
     if not pairs:
-        raise ValueError(
-            f"No noisy records found with injection_source={NOISY_INJECTION_SOURCE} in {syntax_depth_query_file}"
-        )
+        raise ValueError(f"No noisy records found in {noisy_query_file}")
 
     rewritten_count = sum(1 for pair in pairs if pair["query_rewritten"] is True)
     log(
         f"加载 noisy syntax-depth 配对: {len(pairs)} 条，"
-        f"跳过缺少 noisy_injection 的记录 {skipped_without_noisy_injection} 条，"
-        f"跳过 injection_source 不匹配的记录 {skipped_non_target_injection_source} 条，"
+        f"跳过无效记录 {skipped_invalid_record} 条，"
         f"其中 query_rewritten=True 为 {rewritten_count} 条"
     )
-    log("Correct 侧使用 07 query_by_syntax_depth.syntax_depth_query.query；Noisy 侧使用 noisy_injection.noisy_query")
+    log("Correct 侧使用 clean_query；Noisy 侧使用 noisy_query")
     return pairs
 
 
