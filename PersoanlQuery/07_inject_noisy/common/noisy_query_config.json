@@ -1,14 +1,14 @@
 {
-  "num_users_to_test": 100000,
-  "max_workers": 50,
-  "use_minimaxio": true,
+  "num_users_to_test": 10,
+  "max_workers": 10,
+  "use_minimaxio": false,
   "inject_error_count": 3,
   "error_injection_rate": 0.8,
-  "prompt_file": "/home/wlia0047/ar57/wenyu/PersoanlQuery/07_inject_noisy/noisy_query_prompts.json",
+  "prompt_file": "/home/wlia0047/ar57/wenyu/PersoanlQuery/07_inject_noisy/common/noisy_query_prompts.json",
   "categories": {
     "Baby_Products": {
-      "query_file": "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Baby_Products/query.json",
-      "user_error_file": "/home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/Baby_Products/acl_ccomp_error.json",
+      "query_file": "/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Baby_Products/query_by_syntax_depth_vades_lite_sentence_user_distribution_train10_holdout10.json",
+      "user_error_file": "/home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/Baby_Products/writing_error.json",
       "noisy_output_file": "/home/wlia0047/ar57/wenyu/result/personal_query/07_inject_noisy/Baby_Products/noisy_query.json"
     },
     "Grocery_and_Gourmet_Food": {

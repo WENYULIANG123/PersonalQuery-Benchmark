@@ -72,6 +72,12 @@ SYNTAX_DEPTH_QUERY_FILE = (
     f"/home/wlia0047/ar57/wenyu/result/personal_query/06_query/{CATEGORY_NAME}/"
     "query_by_syntax_depth_vades_lite_sentence_user_distribution_train10_holdout10.json"
 )
+# LambdaMART 注入的 noisy_query.json 文件（新格式）
+NOISY_QUERY_JSON_FILE = os.path.join(
+    GLOBAL_PATHS.get("inject_noisy", f"/home/wlia0047/ar57/wenyu/result/personal_query/07_inject_noisy"),
+    CATEGORY_NAME,
+    "noisy_query.json"
+)
 CLEAN_MODE = "syntax_depth_correct"
 NOISY_MODE = "syntax_depth_noisy"
 SYNTAX_DEPTH_INJECTION_SOURCE = "final_strict_query_no_depth_constraint"
@@ -342,61 +348,48 @@ def _build_query_entry(
 
 
 def load_syntax_depth_query_pairs() -> Dict[str, List[Dict]]:
-    """从 query_by_syntax_depth 统一文件加载 syntax-depth clean/noisy 查询对。"""
-    data = load_syntax_depth_query_records(SYNTAX_DEPTH_QUERY_FILE)
+    """从 LambdaMART 生成的 noisy_query.json 文件加载 clean/noisy 查询对。
+
+    新的 noisy_query.json 格式：
+    {
+        "uid": "...",
+        "asin": "...",
+        "clean_query": "...",
+        "noisy_query": "...",
+        "query_rewritten": true,
+        ...
+    }
+    """
+    if not os.path.exists(NOISY_QUERY_JSON_FILE):
+        raise FileNotFoundError(f"noisy_query.json 文件不存在: {NOISY_QUERY_JSON_FILE}")
+
+    with open(NOISY_QUERY_JSON_FILE, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise TypeError(f"noisy_query.json 顶层必须是 list，实际为 {type(data).__name__}")
+
     clean_queries = []
     noisy_queries = []
-    skipped_without_noisy_injection = 0
-    skipped_non_target_injection_source = 0
 
     for index, item in enumerate(data):
         if not isinstance(item, dict):
-            raise TypeError(f"syntax-depth query row must be dict at index {index}, got {type(item).__name__}")
+            raise TypeError(f"noisy_query.json row must be dict at index {index}, got {type(item).__name__}")
 
-        for field in ('user_id', 'asin', 'syntax_depth_query'):
-            if field not in item:
-                raise ValueError(f"syntax-depth row missing required field '{field}' at index {index}: {item}")
-
-        user_id = item['user_id']
-        asin = item['asin']
-        query_block = item['syntax_depth_query']
+        # 支持 uid 或 user_id 字段
+        user_id = item.get('uid') or item.get('user_id')
         if not isinstance(user_id, str) or not user_id.strip():
-            raise ValueError(f"syntax-depth row has invalid user_id at index {index}: {item}")
+            raise ValueError(f"noisy_query.json row has invalid user_id/uid at index {index}: {item}")
+        asin = item.get('asin')
         if not isinstance(asin, str) or not asin.strip():
-            raise ValueError(f"syntax-depth row has invalid asin for user={user_id} at index {index}: {item}")
-        if not isinstance(query_block, dict):
-            raise TypeError(
-                f"syntax_depth_query must be dict for user={user_id}, asin={asin}, index={index}, "
-                f"got {type(query_block).__name__}"
-            )
-
-        clean_query = query_block.get('query')
+            raise ValueError(f"noisy_query.json row has invalid asin for user={user_id} at index {index}")
+        clean_query = item.get('clean_query')
         if not isinstance(clean_query, str) or not clean_query.strip():
-            raise ValueError(
-                f"syntax_depth_query.query must be non-empty for user={user_id}, asin={asin}, index={index}: {item}"
-            )
-        clean_query = clean_query.strip()
-
-        noisy_info = item.get('noisy_injection')
-        if noisy_info is None:
-            skipped_without_noisy_injection += 1
-            continue
-        if not isinstance(noisy_info, dict):
-            raise TypeError(
-                f"noisy_injection must be dict for user={user_id}, asin={asin}, index={index}, "
-                f"got {type(noisy_info).__name__}"
-            )
-
-        injection_source = noisy_info.get('injection_source')
-        if injection_source != SYNTAX_DEPTH_INJECTION_SOURCE:
-            skipped_non_target_injection_source += 1
-            continue
-
-        noisy_query = noisy_info.get('noisy_query')
+            raise ValueError(f"noisy_query.json row has invalid clean_query at index {index}")
+        noisy_query = item.get('noisy_query')
         if not isinstance(noisy_query, str) or not noisy_query.strip():
-            raise ValueError(
-                f"noisy_injection.noisy_query must be non-empty for user={user_id}, asin={asin}, index={index}: {item}"
-            )
+            raise ValueError(f"noisy_query.json row has invalid noisy_query at index {index}")
+
+        clean_query = clean_query.strip()
         noisy_query = noisy_query.strip()
 
         clean_queries.append(_build_query_entry(
@@ -406,8 +399,8 @@ def load_syntax_depth_query_pairs() -> Dict[str, List[Dict]]:
             noisy_query=noisy_query,
             query_text=clean_query,
             query_type='clean',
-            source_query_field='syntax_depth_query.query',
-            injection_source=injection_source,
+            source_query_field='clean_query',
+            injection_source=SYNTAX_DEPTH_INJECTION_SOURCE,
         ))
         noisy_queries.append(_build_query_entry(
             user_id=user_id,
@@ -416,16 +409,18 @@ def load_syntax_depth_query_pairs() -> Dict[str, List[Dict]]:
             noisy_query=noisy_query,
             query_text=noisy_query,
             query_type='noisy',
-            source_query_field='noisy_injection.noisy_query',
-            injection_source=injection_source,
+            source_query_field='noisy_query',
+            injection_source=SYNTAX_DEPTH_INJECTION_SOURCE,
         ))
 
     log_with_timestamp(
-        f"✓ 从 {SYNTAX_DEPTH_QUERY_FILE} 加载了 {len(clean_queries)} 条 syntax-depth clean 查询和 "
-        f"{len(noisy_queries)} 条 noisy 查询，"
-        f"跳过缺少 noisy_injection 的记录 {skipped_without_noisy_injection} 条，"
-        f"跳过 injection_source 不匹配的记录 {skipped_non_target_injection_source} 条"
+        f"✓ 从 {NOISY_QUERY_JSON_FILE} 加载了 {len(clean_queries)} 条 clean 查询和 "
+        f"{len(noisy_queries)} 条 noisy 查询"
     )
+    return {
+        'clean_queries': clean_queries,
+        'noisy_queries': noisy_queries,
+    }
     return {
         'clean_queries': clean_queries,
         'noisy_queries': noisy_queries,
