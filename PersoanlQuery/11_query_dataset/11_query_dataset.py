@@ -342,8 +342,8 @@ def compute_error_pattern(clean_query: str, noisy_query: str) -> dict[str, str] 
     """Compute error pattern by finding the difference between clean and noisy query.
 
     Returns error_pattern with:
-    - original: the correct word from clean_query that was replaced
-    - corrected: the error word that replaced it in noisy_query
+    - correct_word: the correct word from clean_query that was replaced
+    - error_word: the error word that replaced it in noisy_query
     """
     import re
 
@@ -360,7 +360,7 @@ def compute_error_pattern(clean_query: str, noisy_query: str) -> dict[str, str] 
             clean_alnum = re.sub(r'[^a-zA-Z0-9]', '', clean_word)
             noisy_alnum = re.sub(r'[^a-zA-Z0-9]', '', noisy_word)
             if clean_alnum and noisy_alnum:
-                return {"original": clean_word, "corrected": noisy_word}
+                return {"correct_word": clean_word, "error_word": noisy_word}
     return None
 
 
