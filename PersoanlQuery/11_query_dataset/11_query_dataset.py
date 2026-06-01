@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Unified Stage 11 query dataset CLI."""
+"""Unified Stage 11 query dataset CLI.
+
+Dataset is built from:
+- Stage 06: for attrs_used
+- Stage 07: for clean_query, noisy_query, error_type
+- Stage 12: for cluster_index
+"""
 
 from __future__ import annotations
 
@@ -23,18 +29,14 @@ OUTPUT_FIELDS = [
     "asin",
     "cluster_index",
     "correct_query",
-    "attrs_used",
+    "noisy_query",
+    "error_pattern",
 ]
 
 FORBIDDEN_DATASET_FIELDS = {
     "sample_id",
     "user_id",
-    "clean_query",
-    "clean_word_count",
-    "has_noisy_query",
-    "noisy_query",
     "query_type",
-    "correct_word_count",
     "idf",
     "target_depth",
     "user_avg_depth",
@@ -43,9 +45,17 @@ FORBIDDEN_DATASET_FIELDS = {
     "complexity_level",
     "complexity_group",
     "depth",
-    "has_error_query",
-    "error_query",
+    "query_rewritten",
+    "selected_token",
+    "score",
+    "applied_error",
     "injected_errors",
+    "status",
+    "injection_mode",
+    "debug_response",
+    "error",
+    "attrs_used",
+    "error_type",
 }
 
 ATTRIBUTE_TYPE_LABELS = {
@@ -74,6 +84,7 @@ ATTRIBUTE_TYPE_LABELS = {
 class DatasetPaths:
     category: str
     stage6_query_file: Path
+    stage7_noisy_file: Path
     cluster_profile_file: Path
     output_dir: Path
     dataset_file: Path
@@ -281,6 +292,12 @@ def make_dataset_paths(category: str, output_root: Path) -> DatasetPaths:
             / category
             / "query_by_syntax_depth_vades_lite_sentence_user_distribution_train10_holdout10.json"
         ),
+        stage7_noisy_file=(
+            RESULT_ROOT
+            / "07_inject_noisy"
+            / category
+            / "noisy_query.json"
+        ),
         cluster_profile_file=(
             RESULT_ROOT
             / "12_complexity_analysis_clause_features"
@@ -294,6 +311,10 @@ def make_dataset_paths(category: str, output_root: Path) -> DatasetPaths:
 
 
 def load_stage6_query_index(path: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    """Load Stage 06 query file to extract attrs_used.
+
+    Format: [{"user_id": ..., "asin": ..., "syntax_depth_query": {"query": ..., "attrs_used": {...}}}, ...]
+    """
     rows = read_json_array(path, "Stage 06 latest query file")
     index: dict[tuple[str, str], dict[str, Any]] = {}
     for row_idx, raw_item in enumerate(rows):
@@ -317,6 +338,40 @@ def load_stage6_query_index(path: Path) -> dict[tuple[str, str], dict[str, Any]]
     return index
 
 
+def load_stage7_noisy_index(path: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    """Load Stage 07 noisy query file.
+
+    Format: [{"uid": ..., "asin": ..., "clean_query": ..., "noisy_query": ...,
+              "query_rewritten": ..., "selected_token": ..., "score": ...,
+              "applied_error": {"original": ..., "corrected": ..., "error_type": ...},
+              "status": ...}, ...]
+    """
+    rows = read_json_array(path, "Stage 07 noisy query file")
+    index: dict[tuple[str, str], dict[str, Any]] = {}
+    for row_idx, raw_item in enumerate(rows):
+        item = require_dict(raw_item, f"stage7[{row_idx}]")
+        user_id = require_item_text(item, "uid", f"stage7[{row_idx}]")
+        asin = require_item_text(item, "asin", f"stage7[{row_idx}]")
+        clean_query = require_item_text(item, "clean_query", f"stage7[{row_idx}]")
+        noisy_query = require_item_text(item, "noisy_query", f"stage7[{row_idx}]")
+        applied_error = item.get("applied_error")
+        error_pattern = None
+        if applied_error and isinstance(applied_error, dict):
+            original = applied_error.get("original")
+            corrected = applied_error.get("corrected")
+            if original and corrected:
+                error_pattern = {"original": original, "corrected": corrected}
+        key = (user_id, asin)
+        if key in index:
+            raise ValueError(f"Duplicate Stage 07 key: {key}")
+        index[key] = {
+            "clean_query": clean_query,
+            "noisy_query": noisy_query,
+            "error_pattern": error_pattern,
+        }
+    return index
+
+
 def load_cluster_profile_index(path: Path) -> dict[tuple[str, str], dict[str, Any]]:
     rows = read_jsonl(path, "Cluster user profiles")
     index: dict[tuple[str, str], dict[str, Any]] = {}
@@ -336,21 +391,29 @@ def load_cluster_profile_index(path: Path) -> dict[tuple[str, str], dict[str, An
 def build_dataset_rows(
     category: str,
     stage6_index: dict[tuple[str, str], dict[str, Any]],
+    stage7_index: dict[tuple[str, str], dict[str, Any]],
     cluster_index: dict[tuple[str, str], dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    if set(stage6_index) != set(cluster_index):
-        missing_cluster = sorted(set(stage6_index) - set(cluster_index))
-        extra_cluster = sorted(set(cluster_index) - set(stage6_index))
-        raise ValueError(
-            f"Stage 06 / cluster profile key mismatch for {category}: "
-            f"missing_cluster={len(missing_cluster)}, extra_cluster={len(extra_cluster)}"
-        )
+    # Use Stage 06 as primary source, intersect with cluster_index
+    common_keys = set(stage6_index) & set(cluster_index)
+    missing_cluster = sorted(set(stage6_index) - set(cluster_index))
+    extra_cluster = sorted(set(cluster_index) - set(stage6_index))
 
     rows: list[dict[str, Any]] = []
-    for key in sorted(stage6_index):
+    for key in sorted(common_keys):
         user_id, asin = key
         stage6_query = stage6_index[key]
         cluster_profile = cluster_index[key]
+
+        # Get noisy query from stage7 if available, otherwise use correct query
+        if key in stage7_index:
+            stage7_data = stage7_index[key]
+            noisy_query = stage7_data["noisy_query"]
+            error_pattern = stage7_data["error_pattern"]
+        else:
+            noisy_query = stage6_query["query"]
+            error_pattern = None
+
         rows.append(
             {
                 "category": category,
@@ -358,31 +421,41 @@ def build_dataset_rows(
                 "asin": asin,
                 "cluster_index": cluster_profile["cluster_index"],
                 "correct_query": stage6_query["query"],
-                "attrs_used": stage6_query["attrs_used"],
+                "noisy_query": noisy_query,
+                "error_pattern": error_pattern,
             }
         )
-    return rows
+    return rows, len(missing_cluster), len(extra_cluster)
 
 
 def build_one_category(paths: DatasetPaths) -> dict[str, Any]:
     stage6_index = load_stage6_query_index(paths.stage6_query_file)
+    stage7_index = load_stage7_noisy_index(paths.stage7_noisy_file)
     cluster_index = load_cluster_profile_index(paths.cluster_profile_file)
-    dataset_rows = build_dataset_rows(paths.category, stage6_index, cluster_index)
+
+    dataset_rows, missing_cluster, extra_cluster = build_dataset_rows(
+        paths.category, stage6_index, stage7_index, cluster_index
+    )
 
     write_jsonl(paths.dataset_file, dataset_rows)
 
     unique_users = {row["uuid"] for row in dataset_rows}
     unique_user_product_pairs = {(row["uuid"], row["asin"]) for row in dataset_rows}
     total_query_words = sum(len(row["correct_query"].split()) for row in dataset_rows)
-    avg_query_words = total_query_words / len(dataset_rows)
+    avg_query_words = total_query_words / len(dataset_rows) if dataset_rows else 0
     cluster_index_counts = Counter(str(row["cluster_index"]) for row in dataset_rows)
+
+    # Count how many have noisy_query injected
+    noisy_injected = sum(1 for r in dataset_rows if r["error_pattern"] is not None)
 
     summary = {
         "category": paths.category,
         "stage6_query_file": str(paths.stage6_query_file),
+        "stage7_noisy_file": str(paths.stage7_noisy_file),
         "cluster_profile_file": str(paths.cluster_profile_file),
         "dataset_file": str(paths.dataset_file),
         "num_stage6_items": len(stage6_index),
+        "num_stage7_items": len(stage7_index),
         "num_cluster_profile_items": len(cluster_index),
         "num_dataset_rows": len(dataset_rows),
         "num_unique_users": len(unique_users),
@@ -390,6 +463,9 @@ def build_one_category(paths: DatasetPaths) -> dict[str, Any]:
         "total_query_words": total_query_words,
         "avg_query_words": avg_query_words,
         "rows_by_cluster_index": dict(sorted(cluster_index_counts.items(), key=lambda item: int(item[0]))),
+        "missing_from_cluster": missing_cluster,
+        "extra_in_cluster": extra_cluster,
+        "noisy_injected": noisy_injected,
     }
     write_json(paths.summary_file, summary)
     return summary
@@ -471,7 +547,11 @@ def validate_dataset_file(path: Path, counts: Counter[str]) -> None:
             if cluster_index < 0:
                 raise ValueError(f"{path}:{lineno}.cluster_index must be non-negative")
             require_text_value(item["correct_query"], f"{path}:{lineno}.correct_query")
-            require_dict(item["attrs_used"], f"{path}:{lineno}.attrs_used")
+            require_text_value(item["noisy_query"], f"{path}:{lineno}.noisy_query")
+            # error_pattern can be None or a dict with original/corrected
+            error_pattern = item.get("error_pattern")
+            if error_pattern is not None:
+                require_dict(error_pattern, f"{path}:{lineno}.error_pattern")
             counts[f"cluster_index:{cluster_index}"] += 1
 
 
@@ -497,7 +577,8 @@ def build_grouped_query(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "cluster_index": row["cluster_index"],
         "correct_query": row["correct_query"],
-        "attrs_used": row["attrs_used"],
+        "noisy_query": row["noisy_query"],
+        "error_pattern": row.get("error_pattern"),
     }
 
 
@@ -507,7 +588,6 @@ def build_grouped_rows(category: str, flat_rows: list[dict[str, Any]]) -> list[d
         row_label = f"{category} data.jsonl row {row_index + 1}"
         user_id = require_item_text(row, "uuid", row_label)
         asin = require_item_text(row, "asin", row_label)
-        attrs_used = require_dict(row["attrs_used"], f"{row_label}.attrs_used")
         cluster_index = require_item_int(row, "cluster_index", row_label)
         if cluster_index < 0:
             raise ValueError(f"{row_label}.cluster_index must be non-negative")
@@ -518,7 +598,6 @@ def build_grouped_rows(category: str, flat_rows: list[dict[str, Any]]) -> list[d
                 "category": category,
                 "uuid": user_id,
                 "asin": asin,
-                "attrs_used": attrs_used,
                 "queries": [],
             }
 
@@ -616,7 +695,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Unified CLI for Stage 11 query dataset workflows.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    build_parser = subparsers.add_parser("build", help="Build clean Stage 11 datasets from Stage 06 and Stage 12 inputs.")
+    build_parser = subparsers.add_parser("build", help="Build Stage 11 datasets from Stage 06, Stage 07, and Stage 12 inputs.")
     build_parser.add_argument("--categories", nargs="+", required=True)
     build_parser.add_argument("--output-root", default=str(DATASET_ROOT))
     build_parser.set_defaults(func=run_build)
