@@ -35,13 +35,19 @@ from token_level_lambdamart_enhanced import (
 # ========================================
 # 配置
 # ========================================
-CONFIG = {
-    'category': 'Baby_Products',
-    'query_file': '/home/wlia0047/ar57/wenyu/result/personal_query/06_query/Baby_Products/query_by_syntax_depth_vades_lite_sentence_user_distribution_train10_holdout10.json',
-    'user_error_file': '/home/wlia0047/ar57/wenyu/result/personal_query/04_writing_analysis/Baby_Products/writing_error.json',
-    'model_file': '/home/wlia0047/ar57/wenyu/result/personal_query/07_inject_noisy/models/lambdamart_Baby_Products_enhanced.json',
-    'output_file': '/home/wlia0047/ar57/wenyu/result/personal_query/07_inject_noisy/Baby_Products/noisy_query.json',
-}
+def build_config(category: str) -> dict:
+    """根据类别构建配置"""
+    base = '/home/wlia0047/ar57/wenyu'
+    return {
+        'category': category,
+        'query_file': f'{base}/result/personal_query/06_query/{category}/query_by_syntax_depth_vades_lite_sentence_user_distribution_train10_holdout10.json',
+        'user_error_file': f'{base}/result/personal_query/04_writing_analysis/{category}/writing_error.json',
+        'model_file': f'{base}/result/personal_query/07_inject_noisy/models/lambdamart_{category}_enhanced.json',
+        'output_file': f'{base}/result/personal_query/07_inject_noisy/{category}/noisy_query.json',
+    }
+
+
+CONFIG = build_config('Baby_Products')
 
 # 特征名称（必须与训练时一致）
 FEATURE_NAMES = [
@@ -57,12 +63,12 @@ FEATURE_NAMES = [
 def find_similar_error(token: str, user_errors: list, threshold: float = 0.7) -> dict:
     """找到与 token 最相似的用户历史错误
 
-    关键：用户把 corrected 拼成了 original
-    所以我们应该找与 corrected（正确词）高度相似的 token
+    关键：用户把 corrected（正确词）拼成了 original（错误词）
+    所以我们应该找与 token（正确词）高度相似的 original
 
     注入规则：
-    - 首字母尾字母必须相同
-    - 如果 token 就是 corrected，则直接匹配
+    - 首字母尾字母必须相同（与 original 匹配）
+    - 如果 token 就是 original，则直接匹配
 
     返回的 error_case 会被用来把 token 替换成 original（用户的错误形式）
     """
@@ -70,7 +76,6 @@ def find_similar_error(token: str, user_errors: list, threshold: float = 0.7) ->
         return None
 
     best_error = None
-    best_score = float('inf')  # 编辑距离越小越好
 
     for err in user_errors:
         original = err.get('original', '')
@@ -79,33 +84,19 @@ def find_similar_error(token: str, user_errors: list, threshold: float = 0.7) ->
             continue
 
         token_lower = token.lower()
-        corrected_lower = corrected.lower()
+        original_lower = original.lower()
 
-        # 如果 token 就是 corrected（完全一致），直接匹配
-        if token_lower == corrected_lower:
-            best_score = 0
+        # 如果 token 就是 original，直接匹配
+        if token_lower == original_lower:
             best_error = err
             break
 
-        # 纯大小写差异：token 和 corrected 只有首字母大小写不同（如 german vs German）
-        if token != corrected and token_lower == corrected_lower:
+        # 首字母尾字母必须相同（与 original 匹配）
+        if not token_lower or not original_lower:
             continue
-
-        # 所有格变化：babies vs baby's（差异只是末尾的 's）
-        token_base = token_lower.rstrip("'s").rstrip("'")
-        corrected_base = corrected_lower.rstrip("'s").rstrip("'")
-        if token_base == corrected_base and len(token_lower) != len(corrected_lower):
-            continue
-
-        # 首字母尾字母必须相同（防止 NoJo -> to to 这类跨类别错误匹配）
-        if not token_lower or not corrected_lower:
-            continue
-        if token_lower[0] != corrected_lower[0] or token_lower[-1] != corrected_lower[-1]:
-            continue
-
-        # 直接匹配
-        best_error = err
-        break
+        if token_lower[0] == original_lower[0] and token_lower[-1] == original_lower[-1]:
+            best_error = err
+            break
 
     return best_error
 
@@ -205,10 +196,10 @@ def process_batch_lambdamart(tasks: list, model, completed_keys: set):
                 user_error_count=len(user_errors)
             )
 
-            # 应用错误
+            # 应用错误（选择分数最高的 token，只要有匹配的错误就注入）
             noisy_query = clean_query
             applied_error = None
-            if selected_token and error_case and score >= -4.0:  # 分数>=-4.0就注入（放宽以提高注入率）
+            if selected_token and error_case:
                 noisy_query = apply_error_to_query(clean_query, error_case, selected_token)
                 applied_error = {
                     'original': error_case.get('original'),
@@ -252,16 +243,21 @@ def process_batch_lambdamart(tasks: list, model, completed_keys: set):
     return results
 
 
-def main():
+def main(category: str = None):
+    if category is None:
+        category = CONFIG['category']
+
+    config = build_config(category)
+
     print("=" * 60)
-    print("LambdaMART 噪声注入 (Baby Products)")
+    print(f"LambdaMART 噪声注入 ({category})")
     print("=" * 60)
 
-    category = CONFIG['category']
-    query_file = CONFIG['query_file']
-    user_error_file = CONFIG['user_error_file']
-    model_file = CONFIG['model_file']
-    output_file = CONFIG['output_file']
+    category = config['category']
+    query_file = config['query_file']
+    user_error_file = config['user_error_file']
+    model_file = config['model_file']
+    output_file = config['output_file']
 
     print(f"Query 文件: {query_file}")
     print(f"用户错误文件: {user_error_file}")
@@ -325,4 +321,6 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    import sys
+    category = sys.argv[1] if len(sys.argv) > 1 else None
+    main(category)

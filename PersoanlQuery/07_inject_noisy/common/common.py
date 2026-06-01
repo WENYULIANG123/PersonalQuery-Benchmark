@@ -211,11 +211,39 @@ def parse_noisy_response(text_content: str) -> dict:
 # 用户错误数据处理
 # ========================================
 def load_user_errors(error_file: str) -> dict:
-    """加载用户错误数据 - writing_error.json 格式"""
+    """加载用户错误数据 - writing_error.json 格式（支持读取不完整的 JSON）"""
     if not os.path.exists(error_file):
         raise FileNotFoundError(f"错误文件不存在: {error_file}")
-    with open(error_file, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+
+    try:
+        with open(error_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except json.JSONDecodeError:
+        # 如果 JSON 不完整，尝试逐行解析
+        data = []
+        with open(error_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+            # 尝试找到完整的 JSON 对象
+            depth = 0
+            start = 0
+            for i, c in enumerate(content):
+                if c == '{':
+                    if depth == 0:
+                        start = i
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            obj = json.loads(content[start:i+1])
+                            data.append(obj)
+                        except json.JSONDecodeError:
+                            pass
+            if isinstance(data, list) and len(data) > 0 and 'user_results' in data[0]:
+                data = data[0]['user_results']
+            elif not isinstance(data, list):
+                data = []
+
     if isinstance(data, list):
         users_list = data
     else:

@@ -233,9 +233,9 @@ class MiniMaxAnthropicClient:
     """MiniMax LLM Client using Anthropic SDK.
 
     Uses the Anthropic-compatible API endpoint at https://api.minimaxi.com/anthropic
-    Supports MiniMax-M2.7 and other models with thinking/text content blocks.
+    Supports M2.5 and other models with thinking/text content blocks.
     """
-    def __init__(self, model: str = "MiniMax-M2.7-highspeed"):
+    def __init__(self, model: str = "M2.5"):
         self.model = model
         _ensure_minimax_compute_node_network()
         import anthropic
@@ -249,7 +249,7 @@ class MiniMaxAnthropicClient:
         prompt: str,
         max_tokens: int = 8192,
         temperature: Optional[float] = None,
-        max_retries: int = 100,
+        max_retries: int = 350,
     ) -> tuple:
         """Call MiniMax API and return both thinking and text.
 
@@ -290,7 +290,7 @@ class MiniMaxAnthropicClient:
                 # 空响应也需要重试
                 if not text_content:
                     if attempt < max_retries - 1:
-                        wait_time = min(60, (2 ** attempt) * 3)
+                        wait_time = 60  # 等待60秒
                         print(f"[MiniMax-Anthropic] Empty response. Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
                         time.sleep(wait_time)
                         retry_count += 1
@@ -306,7 +306,7 @@ class MiniMaxAnthropicClient:
                 # 429/529/500/502/503/504/520/522/530 等错误都需要重试
                 retryable = any(code in error_str for code in ["429", "529", "500", "502", "503", "504", "520", "522", "530"])
                 if retryable:
-                    wait_time = min(60, (2 ** attempt) * 3)
+                    wait_time = 60  # 等待60秒
                     print(f"[MiniMax-Anthropic] Rate limited ({e}). Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
                     time.sleep(wait_time)
                     retry_count += 1
@@ -321,7 +321,7 @@ class MiniMaxAnthropicClient:
         prompt: str,
         max_tokens: int = 4096,
         temperature: Optional[float] = None,
-        max_retries: int = 100,
+        max_retries: int = 350,
     ) -> str:
         """Call MiniMax API and return text content only.
 
@@ -342,7 +342,7 @@ class MiniMaxAnthropicClient:
         user_content: str,
         max_tokens: int = 4096,
         temperature: Optional[float] = None,
-        max_retries: int = 100,
+        max_retries: int = 350,
         retry_on_empty_response: bool = True,
         stream: bool = False,
     ) -> tuple:
@@ -421,7 +421,7 @@ class MiniMaxAnthropicClient:
                 text_content = text_content.strip()
                 if not text_content:
                     if retry_on_empty_response and attempt < max_retries - 1:
-                        wait_time = min(60, (2 ** attempt) * 3)
+                        wait_time = 60  # 等待60秒
                         _log(f"[MiniMax-Cache] Empty response. Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
                         time.sleep(wait_time)
                         retry_count += 1
@@ -437,7 +437,7 @@ class MiniMaxAnthropicClient:
                 error_str = str(e)
                 retryable = any(code in error_str for code in ["429", "529", "500", "502", "503", "504", "520", "522", "530"])
                 if retryable:
-                    wait_time = min(60, (2 ** attempt) * 3)
+                    wait_time = 60  # 等待60秒
                     _log(f"[MiniMax-Cache] Rate limited ({e}). Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
                     time.sleep(wait_time)
                     retry_count += 1
@@ -502,7 +502,7 @@ class MiniMaxAnthropicClient:
 
                 if not text_content:
                     if retry_on_empty_response and attempt < max_retries - 1:
-                        wait_time = min(60, (2 ** attempt) * 3)
+                        wait_time = 60  # 等待60秒
                         _log(f"{log_prefix} Empty streaming response. Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
                         time.sleep(wait_time)
                         retry_count += 1
@@ -517,7 +517,7 @@ class MiniMaxAnthropicClient:
                 error_str = str(e)
                 retryable = any(code in error_str for code in ["429", "529", "500", "502", "503", "504", "520", "522", "530"])
                 if retryable:
-                    wait_time = min(60, (2 ** attempt) * 3)
+                    wait_time = 60  # 等待60秒
                     _log(f"{log_prefix} Rate limited ({e}). Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
                     time.sleep(wait_time)
                     retry_count += 1
@@ -533,9 +533,9 @@ class MiniMaxIOAnthropicClient:
     """MiniMax IO LLM Client using Anthropic SDK.
 
     Uses the Anthropic-compatible API endpoint at https://api.minimax.io/anthropic
-    Supports MiniMax-M2.7 and other models with thinking/text content blocks.
+    Supports M2.5 and other models with thinking/text content blocks.
     """
-    def __init__(self, model: str = "MiniMax-M2.7"):
+    def __init__(self, model: str = "M2.5"):
         self.model = model
         _ensure_minimax_compute_node_network()
         import anthropic
@@ -549,7 +549,7 @@ class MiniMaxIOAnthropicClient:
         prompt: str,
         max_tokens: int = 8192,
         temperature: Optional[float] = None,
-        max_retries: int = 100,
+        max_retries: int = 350,
     ) -> tuple:
         """Call MiniMax IO API and return both thinking and text.
 
@@ -589,7 +589,7 @@ class MiniMaxIOAnthropicClient:
                 text_content = text_content.strip()
                 if not text_content:
                     if attempt < max_retries - 1:
-                        wait_time = min(60, (2 ** attempt) * 3)
+                        wait_time = 60  # 等待60秒
                         print(f"[MiniMaxIO-Anthropic] Empty response. Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
                         time.sleep(wait_time)
                         retry_count += 1
@@ -604,7 +604,7 @@ class MiniMaxIOAnthropicClient:
                 error_str = str(e)
                 retryable = any(code in error_str for code in ["429", "529", "500", "502", "503", "504", "520", "522", "530"])
                 if retryable:
-                    wait_time = min(60, (2 ** attempt) * 3)
+                    wait_time = 60  # 等待60秒
                     print(f"[MiniMaxIO-Anthropic] Rate limited ({e}). Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
                     time.sleep(wait_time)
                     retry_count += 1
@@ -620,7 +620,7 @@ class MiniMaxIOAnthropicClient:
         prompt: str,
         max_tokens: int = 4096,
         temperature: Optional[float] = None,
-        max_retries: int = 100,
+        max_retries: int = 350,
     ) -> str:
         """Call MiniMax IO API and return text content only."""
         _, text_content = self.call_with_thinking(
@@ -637,7 +637,7 @@ class MiniMaxIOAnthropicClient:
         user_content: str,
         max_tokens: int = 4096,
         temperature: Optional[float] = None,
-        max_retries: int = 100,
+        max_retries: int = 350,
         retry_on_empty_response: bool = True,
         stream: bool = False,
     ) -> tuple:
@@ -699,7 +699,7 @@ class MiniMaxIOAnthropicClient:
                 text_content = text_content.strip()
                 if not text_content:
                     if retry_on_empty_response and attempt < max_retries - 1:
-                        wait_time = min(60, (2 ** attempt) * 3)
+                        wait_time = 60  # 等待60秒
                         _log(f"[MiniMaxIO-Cache] Empty response. Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
                         time.sleep(wait_time)
                         retry_count += 1
@@ -715,7 +715,7 @@ class MiniMaxIOAnthropicClient:
                 error_str = str(e)
                 retryable = any(code in error_str for code in ["429", "529", "500", "502", "503", "504", "520", "522", "530"])
                 if retryable:
-                    wait_time = min(60, (2 ** attempt) * 3)
+                    wait_time = 60  # 等待60秒
                     _log(f"[MiniMaxIO-Cache] Rate limited ({e}). Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
                     time.sleep(wait_time)
                     retry_count += 1
@@ -781,7 +781,7 @@ class MiniMaxIOAnthropicClient:
 
                 if not text_content:
                     if retry_on_empty_response and attempt < max_retries - 1:
-                        wait_time = min(60, (2 ** attempt) * 3)
+                        wait_time = 60  # 等待60秒
                         _log(f"{log_prefix} Empty streaming response. Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
                         time.sleep(wait_time)
                         retry_count += 1
@@ -796,7 +796,7 @@ class MiniMaxIOAnthropicClient:
                 error_str = str(e)
                 retryable = any(code in error_str for code in ["429", "529", "500", "502", "503", "504", "520", "522", "530"])
                 if retryable:
-                    wait_time = min(60, (2 ** attempt) * 3)
+                    wait_time = 60  # 等待60秒
                     _log(f"{log_prefix} Rate limited ({e}). Retry {attempt + 1}/{max_retries}, waiting {wait_time}s...")
                     time.sleep(wait_time)
                     retry_count += 1
