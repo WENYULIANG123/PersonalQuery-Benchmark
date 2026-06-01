@@ -38,16 +38,6 @@ def get_category_config(category_name: str) -> Dict[str, Any]:
             resolved[key] = value
     return resolved
 
-def get_query_config_file() -> str:
-    """获取查询配置文件路径"""
-    config = get_config()
-    return resolve_path(config.get('query_config_file', ''))
-
-def get_ccomp_prompts_file() -> str:
-    """获取 CCOMP prompts 文件路径"""
-    config = get_config()
-    return resolve_path(config.get('ccomp_prompts_file', ''))
-
 def list_categories():
     """列出所有配置的类别"""
     return list(get_config()['categories'].keys())
