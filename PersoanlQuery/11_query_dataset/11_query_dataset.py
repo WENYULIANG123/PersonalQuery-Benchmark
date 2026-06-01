@@ -4,7 +4,7 @@
 Dataset is built from:
 - Stage 06: for attrs_used
 - Stage 07: for clean_query, noisy_query, error_type
-- Stage 12: for cluster_index
+- Stage 12: for cluster
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ OUTPUT_FIELDS = [
     "category",
     "uuid",
     "asin",
-    "cluster_index",
+    "cluster",
     "correct_query",
     "noisy_query",
     "error_pattern",
@@ -403,7 +403,7 @@ def load_cluster_profile_index(path: Path) -> dict[tuple[str, str], dict[str, An
         if key in index:
             raise ValueError(f"Duplicate cluster profile key: {key}")
         index[key] = {
-            "cluster_index": cluster_index,
+            "cluster": cluster_index,
         }
     return index
 
@@ -412,18 +412,18 @@ def build_dataset_rows(
     category: str,
     stage6_index: dict[tuple[str, str], dict[str, Any]],
     stage7_index: dict[tuple[str, str], dict[str, Any]],
-    cluster_index: dict[tuple[str, str], dict[str, Any]],
+    cluster: dict[tuple[str, str], dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    # Use Stage 06 as primary source, intersect with cluster_index
-    common_keys = set(stage6_index) & set(cluster_index)
-    missing_cluster = sorted(set(stage6_index) - set(cluster_index))
-    extra_cluster = sorted(set(cluster_index) - set(stage6_index))
+    # Use Stage 06 as primary source, intersect with cluster
+    common_keys = set(stage6_index) & set(cluster)
+    missing_cluster = sorted(set(stage6_index) - set(cluster))
+    extra_cluster = sorted(set(cluster) - set(stage6_index))
 
     rows: list[dict[str, Any]] = []
     for key in sorted(common_keys):
         user_id, asin = key
         stage6_query = stage6_index[key]
-        cluster_profile = cluster_index[key]
+        cluster_profile = cluster[key]
 
         # Get noisy query from stage7 if available, otherwise use correct query
         if key in stage7_index:
@@ -439,7 +439,7 @@ def build_dataset_rows(
                 "category": category,
                 "uuid": user_id,
                 "asin": asin,
-                "cluster_index": cluster_profile["cluster_index"],
+                "cluster": cluster_profile["cluster"],
                 "correct_query": stage6_query["query"],
                 "noisy_query": noisy_query,
                 "error_pattern": error_pattern,
@@ -451,10 +451,10 @@ def build_dataset_rows(
 def build_one_category(paths: DatasetPaths) -> dict[str, Any]:
     stage6_index = load_stage6_query_index(paths.stage6_query_file)
     stage7_index = load_stage7_noisy_index(paths.stage7_noisy_file)
-    cluster_index = load_cluster_profile_index(paths.cluster_profile_file)
+    cluster = load_cluster_profile_index(paths.cluster_profile_file)
 
     dataset_rows, missing_cluster, extra_cluster = build_dataset_rows(
-        paths.category, stage6_index, stage7_index, cluster_index
+        paths.category, stage6_index, stage7_index, cluster
     )
 
     write_jsonl(paths.dataset_file, dataset_rows)
@@ -463,7 +463,7 @@ def build_one_category(paths: DatasetPaths) -> dict[str, Any]:
     unique_user_product_pairs = {(row["uuid"], row["asin"]) for row in dataset_rows}
     total_query_words = sum(len(row["correct_query"].split()) for row in dataset_rows)
     avg_query_words = total_query_words / len(dataset_rows) if dataset_rows else 0
-    cluster_index_counts = Counter(str(row["cluster_index"]) for row in dataset_rows)
+    cluster_counts = Counter(str(row["cluster"]) for row in dataset_rows)
 
     # Count how many have noisy_query injected
     noisy_injected = sum(1 for r in dataset_rows if r["error_pattern"] is not None)
@@ -476,13 +476,13 @@ def build_one_category(paths: DatasetPaths) -> dict[str, Any]:
         "dataset_file": str(paths.dataset_file),
         "num_stage6_items": len(stage6_index),
         "num_stage7_items": len(stage7_index),
-        "num_cluster_profile_items": len(cluster_index),
+        "num_cluster_profile_items": len(cluster),
         "num_dataset_rows": len(dataset_rows),
         "num_unique_users": len(unique_users),
         "num_unique_user_product_pairs": len(unique_user_product_pairs),
         "total_query_words": total_query_words,
         "avg_query_words": avg_query_words,
-        "rows_by_cluster_index": dict(sorted(cluster_index_counts.items(), key=lambda item: int(item[0]))),
+        "rows_by_cluster": dict(sorted(cluster_counts.items(), key=lambda item: int(item[0]))),
         "missing_from_cluster": missing_cluster,
         "extra_in_cluster": extra_cluster,
         "noisy_injected": noisy_injected,
@@ -499,8 +499,8 @@ def print_dataset_statistics_table(aggregate_summary: dict[str, Any]) -> None:
     for raw_summary in category_summaries:
         summary = require_dict(raw_summary, "category summary")
         label = category_label(require_item_text(summary, "category", "category summary"))
-        rows_by_cluster_index = require_dict(summary.get("rows_by_cluster_index"), f"{label} rows_by_cluster_index")
-        cluster_counts.update({int(key): int(value) for key, value in rows_by_cluster_index.items()})
+        rows_by_cluster = require_dict(summary.get("rows_by_cluster"), f"{label} rows_by_cluster")
+        cluster_counts.update({int(key): int(value) for key, value in rows_by_cluster.items()})
         table_rows.extend(
             [
                 (f"{label} Total Query", int(summary["num_dataset_rows"])),
@@ -514,8 +514,8 @@ def print_dataset_statistics_table(aggregate_summary: dict[str, Any]) -> None:
             ("Total Query", int(aggregate_summary["num_dataset_rows"])),
         ]
     )
-    for cluster_index in sorted(cluster_counts):
-        table_rows.append((f"cluster_index_{cluster_index} Rows", cluster_counts[cluster_index]))
+    for cluster in sorted(cluster_counts):
+        table_rows.append((f"cluster_{cluster} Rows", cluster_counts[cluster]))
 
     print("\n[STATISTICS]\n" + format_two_column_stats_table(table_rows), flush=True)
 
@@ -563,16 +563,16 @@ def validate_dataset_file(path: Path, counts: Counter[str]) -> None:
             require_text_value(item["category"], f"{path}:{lineno}.category")
             require_text_value(item["uuid"], f"{path}:{lineno}.uuid")
             require_text_value(item["asin"], f"{path}:{lineno}.asin")
-            cluster_index = require_int_value(item["cluster_index"], f"{path}:{lineno}.cluster_index")
-            if cluster_index < 0:
-                raise ValueError(f"{path}:{lineno}.cluster_index must be non-negative")
+            cluster = require_int_value(item["cluster"], f"{path}:{lineno}.cluster")
+            if cluster < 0:
+                raise ValueError(f"{path}:{lineno}.cluster must be non-negative")
             require_text_value(item["correct_query"], f"{path}:{lineno}.correct_query")
             require_text_value(item["noisy_query"], f"{path}:{lineno}.noisy_query")
             # error_pattern can be None or a dict with original/corrected
             error_pattern = item.get("error_pattern")
             if error_pattern is not None:
                 require_dict(error_pattern, f"{path}:{lineno}.error_pattern")
-            counts[f"cluster_index:{cluster_index}"] += 1
+            counts[f"cluster:{cluster}"] += 1
 
 
 def run_validate(args: argparse.Namespace) -> None:
@@ -588,14 +588,14 @@ def run_validate(args: argparse.Namespace) -> None:
 
 def query_sort_key(query: dict[str, Any]) -> tuple[int, str]:
     return (
-        query["cluster_index"],
+        query["cluster"],
         query["correct_query"],
     )
 
 
 def build_grouped_query(row: dict[str, Any]) -> dict[str, Any]:
     return {
-        "cluster_index": row["cluster_index"],
+        "cluster": row["cluster"],
         "correct_query": row["correct_query"],
         "noisy_query": row["noisy_query"],
         "error_pattern": row.get("error_pattern"),
@@ -608,9 +608,9 @@ def build_grouped_rows(category: str, flat_rows: list[dict[str, Any]]) -> list[d
         row_label = f"{category} data.jsonl row {row_index + 1}"
         user_id = require_item_text(row, "uuid", row_label)
         asin = require_item_text(row, "asin", row_label)
-        cluster_index = require_item_int(row, "cluster_index", row_label)
-        if cluster_index < 0:
-            raise ValueError(f"{row_label}.cluster_index must be non-negative")
+        cluster = require_item_int(row, "cluster", row_label)
+        if cluster < 0:
+            raise ValueError(f"{row_label}.cluster must be non-negative")
 
         key = (user_id, asin)
         if key not in grouped:
@@ -627,7 +627,7 @@ def build_grouped_rows(category: str, flat_rows: list[dict[str, Any]]) -> list[d
     for key, grouped_row in grouped.items():
         grouped_row["queries"].sort(key=query_sort_key)
         seen_query_keys = [
-            (item["cluster_index"], item["correct_query"])
+            (item["cluster"], item["correct_query"])
             for item in grouped_row["queries"]
         ]
         if len(seen_query_keys) != len(set(seen_query_keys)):
@@ -668,11 +668,11 @@ def build_statistics_rows(summary: dict[str, Any]) -> list[tuple[str, int | floa
         category_summary = require_dict(raw_category_summary, f"category_summaries[{summary_index}]")
         category = require_item_text(category_summary, "category", f"category_summaries[{summary_index}]")
         label = category_label(category)
-        rows_by_cluster_index = require_dict(
-            category_summary.get("rows_by_cluster_index"),
-            f"{label}.rows_by_cluster_index",
+        rows_by_cluster = require_dict(
+            category_summary.get("rows_by_cluster"),
+            f"{label}.rows_by_cluster",
         )
-        cluster_counts.update({int(key): int(value) for key, value in rows_by_cluster_index.items()})
+        cluster_counts.update({int(key): int(value) for key, value in rows_by_cluster.items()})
 
         table_rows.extend(
             [
@@ -687,8 +687,8 @@ def build_statistics_rows(summary: dict[str, Any]) -> list[tuple[str, int | floa
             ("Total Query", require_item_int(summary, "num_dataset_rows", "summary")),
         ]
     )
-    for cluster_index in sorted(cluster_counts):
-        table_rows.append((f"cluster_index_{cluster_index} Rows", cluster_counts[cluster_index]))
+    for cluster in sorted(cluster_counts):
+        table_rows.append((f"cluster_{cluster} Rows", cluster_counts[cluster]))
     return table_rows
 
 
