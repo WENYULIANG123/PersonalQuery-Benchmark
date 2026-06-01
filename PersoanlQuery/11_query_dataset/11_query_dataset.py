@@ -338,6 +338,32 @@ def load_stage6_query_index(path: Path) -> dict[tuple[str, str], dict[str, Any]]
     return index
 
 
+def compute_error_pattern(clean_query: str, noisy_query: str) -> dict[str, str] | None:
+    """Compute error pattern by finding the difference between clean and noisy query.
+
+    Returns error_pattern with:
+    - original: the correct word from clean_query that was replaced
+    - corrected: the error word that replaced it in noisy_query
+    """
+    import re
+
+    clean_words = clean_query.split()
+    noisy_words = noisy_query.split()
+
+    if len(clean_words) != len(noisy_words):
+        return None
+
+    # Find the first position where words differ
+    for i, (clean_word, noisy_word) in enumerate(zip(clean_words, noisy_words)):
+        if clean_word != noisy_word:
+            # Extract only alphanumeric parts for comparison
+            clean_alnum = re.sub(r'[^a-zA-Z0-9]', '', clean_word)
+            noisy_alnum = re.sub(r'[^a-zA-Z0-9]', '', noisy_word)
+            if clean_alnum and noisy_alnum:
+                return {"original": clean_word, "corrected": noisy_word}
+    return None
+
+
 def load_stage7_noisy_index(path: Path) -> dict[tuple[str, str], dict[str, Any]]:
     """Load Stage 07 noisy query file.
 
@@ -354,13 +380,7 @@ def load_stage7_noisy_index(path: Path) -> dict[tuple[str, str], dict[str, Any]]
         asin = require_item_text(item, "asin", f"stage7[{row_idx}]")
         clean_query = require_item_text(item, "clean_query", f"stage7[{row_idx}]")
         noisy_query = require_item_text(item, "noisy_query", f"stage7[{row_idx}]")
-        applied_error = item.get("applied_error")
-        error_pattern = None
-        if applied_error and isinstance(applied_error, dict):
-            original = applied_error.get("original")
-            corrected = applied_error.get("corrected")
-            if original and corrected:
-                error_pattern = {"original": original, "corrected": corrected}
+        error_pattern = compute_error_pattern(clean_query, noisy_query)
         key = (user_id, asin)
         if key in index:
             raise ValueError(f"Duplicate Stage 07 key: {key}")
